@@ -1,0 +1,21 @@
+// Runtime choice between concrete implementations uses a tagged enum.
+// This is explicit dynamic polymorphism, NOT a virtual class vtable.
+enum Shape {
+    Circle(i32),
+    Rectangle(i32, i32)
+}
+
+fn area(shape: Shape) -> i32 {
+    match shape {
+        Circle(radius) => { return radius * radius * 3; },
+        Rectangle(width, height) => { return width * height; }
+    }
+}
+
+fn main() -> i32 {
+    auto circle = Circle(3);
+    auto rectangle = Rectangle(4, 5);
+    if area(circle) != 27 { return 1; }
+    if area(rectangle) != 20 { return 2; }
+    return 0;
+}

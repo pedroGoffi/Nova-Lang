@@ -1,0 +1,6 @@
+// FFI calls are explicit: no standard library is required for basic output.
+extern fn puts(text: str) -> i32;
+fn main() -> i32 {
+    puts("Hello, World! From Nova 0.4");
+    return 0;
+}

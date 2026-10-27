@@ -1,0 +1,12 @@
+[package]
+name = "nova"
+version = "0.9.6"
+edition = "2021"
+description = "Nova bootstrap compiler with RAII destructors, defer and typed standard library"
+build = "build.rs"
+
+[dependencies]
+lalrpop-util = { version = "0.22", features = ["lexer"] }
+
+[build-dependencies]
+lalrpop = "0.22"

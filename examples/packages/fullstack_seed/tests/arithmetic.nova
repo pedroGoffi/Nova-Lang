@@ -1,0 +1,5 @@
+fn main() -> i32 {
+    let mut total: i32 = 0;
+    for i in 0..5 { total += i; }
+    return total - 10;
+}

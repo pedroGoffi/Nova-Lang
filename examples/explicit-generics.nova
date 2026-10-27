@@ -1,0 +1,6 @@
+fn identity<T>(value: T) -> T { return value; }
+fn main() -> i32 {
+    let big: i64 = identity::<i64>(42);
+    let small: i32 = identity::<i32>(4);
+    return small - 4;
+}

@@ -1,0 +1,35 @@
+import std;
+
+struct Message { text: str }
+impl Message {
+    fn to_string(self: &Message) -> str { return self.text; }
+    fn to_debug_string(self: &Message) -> str { return self.text; }
+}
+
+macro_rules! log_value {
+    ($value:expr) => {
+        println!("[INFO] {}", $value);
+    };
+}
+
+fn main() -> i32 {
+    let name: str = "Nova";
+    let age: i64 = 42;
+    let enabled: bool = true;
+    let price: f64 = 29.90;
+    let msg = new Message { text: "typed macro" };
+
+    println!("Olá, {}!", name);
+    println!("Inteiro: {}, booleano: {}", age, enabled);
+    println!("Preço: R$ {:.2}", price);
+    println!("Nome: {name}, chaves: {{ok}}");
+    println!("Debug de str: {:?}", name);
+    println!("Estrutura: {}", msg);
+    println!("Debug da estrutura: {:?}", msg);
+    log_value!(age);
+    print!("Sem quebra ");
+    println!("de linha no print!");
+    eprintln!("stderr: código {}", 404);
+    println!();
+    return 0;
+}

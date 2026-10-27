@@ -1,0 +1,23 @@
+// Demonstrates safe implicit widening and generic inference.
+// Compile/run with cargo run -- run examples/advanced/numeric_inference_093.nova
+fn identity<T>(value: T) -> T { return value; }
+
+fn accumulate(value: i64) -> i64 { return value + 1; }
+
+fn as_double(value: i32) -> f64 { return value; }
+
+fn main() -> i32 {
+    let small: i32 = 17;
+    let large: i64 = small;                // safe: i32 -> i64
+    auto next = accumulate(small);        // argument is widened to i64
+    auto same = identity(small);          // T inferred as i32
+    let precise: f64 = as_double(small);  // safe: i32 -> f64
+    let unsigned: u8 = 42;
+    let signed: i16 = unsigned;           // safe: u8 -> i16
+    if large != 17 as i64 { return 1; }
+    if next != 18 as i64 { return 2; }
+    if same != 17 { return 3; }
+    if precise != 17.0 { return 4; }
+    if signed != 42 as i16 { return 5; }
+    return 0;
+}

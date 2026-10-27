@@ -1,0 +1,9 @@
+// A separate physical .nova file, compiled as namespace string_example.
+pub fn hello() -> () {
+    std::io::native_println("Hello from string_example.nova!");
+    return;
+}
+
+fn internal_helper() -> i32 {
+    return 123;
+}

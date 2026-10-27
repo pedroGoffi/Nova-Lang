@@ -1,0 +1,748 @@
+// Recursive-descent + Pratt parser, entirely in Nova.
+// CST is an arena: six i64 cells per node:
+//   kind, first_token, last_token_exclusive, first_edge, last_edge, child_count
+// Edges are two cells: child_id, next_edge_id. IDs are 1-based (zero=null).
+// Kind IDs are documented in docs/SELFHOST.md. No recursive by-value structs.
+pub struct Parser {
+    scan: lexer::Scan,
+    state: u64,
+    nodes: u64,
+    edges: u64
+}
+
+pub fn create(scan: lexer::Scan) -> Parser {
+    let state: u64 = std::vec::native_int64_vector_create();
+    std::vec::native_int64_vector_append(state,0); // cursor
+    std::vec::native_int64_vector_append(state,-1); // first error token
+    std::vec::native_int64_vector_append(state,0); // error category
+    return new Parser {
+        scan: scan, state: state,
+        nodes: std::vec::native_int64_vector_create(), edges: std::vec::native_int64_vector_create()
+    };
+}
+pub fn position(p: Parser) -> i64 { return std::vec::native_int64_vector_at(p.state,0); }
+pub fn failed(p: Parser) -> bool { return std::vec::native_int64_vector_at(p.state,1) >= 0; }
+pub fn error_token(p: Parser) -> i64 { return std::vec::native_int64_vector_at(p.state,1); }
+pub fn error_code(p: Parser) -> i64 { return std::vec::native_int64_vector_at(p.state,2); }
+fn fail(p: Parser, code: i64) -> () {
+    if !failed(p) {
+        std::vec::native_int64_vector_put(p.state,1,position(p));
+        std::vec::native_int64_vector_put(p.state,2,code);
+    }
+    return;
+}
+fn advance(p: Parser) -> () {
+    std::vec::native_int64_vector_put(p.state,0,position(p) + 1);
+    return;
+}
+fn token_kind(p: Parser) -> i64 { return lexer::cell(p.scan,position(p),0); }
+fn look(p: Parser, value: str) -> bool { return lexer::is(p.scan,position(p),value); }
+fn next_is(p: Parser, value: str) -> bool { return lexer::is(p.scan,position(p) + 1,value); }
+fn take(p: Parser, value: str) -> bool {
+    if look(p,value) { advance(p); return true; }
+    return false;
+}
+fn need(p: Parser, value: str) -> bool {
+    if take(p,value) { return true; }
+    fail(p,6);
+    return false;
+}
+fn kind(p: Parser, id: i64) -> i64 {
+    if id == 0 { return 0; }
+    return std::vec::native_int64_vector_at(p.nodes,(id - 1) * 6);
+}
+fn begin(p: Parser, node_kind: i64) -> i64 {
+    let id: i64 = std::vec::native_int64_vector_count(p.nodes) / 6 + 1;
+    std::vec::native_int64_vector_append(p.nodes,node_kind);
+    std::vec::native_int64_vector_append(p.nodes,position(p));
+    std::vec::native_int64_vector_append(p.nodes,position(p));
+    std::vec::native_int64_vector_append(p.nodes,0);
+    std::vec::native_int64_vector_append(p.nodes,0);
+    std::vec::native_int64_vector_append(p.nodes,0);
+    return id;
+}
+fn set_start(p: Parser, node: i64, token: i64) -> () {
+    if node != 0 { std::vec::native_int64_vector_put(p.nodes,(node - 1) * 6 + 1,token); }
+    return;
+}
+fn close(p: Parser, node: i64) -> i64 {
+    if node != 0 { std::vec::native_int64_vector_put(p.nodes,(node - 1) * 6 + 2,position(p)); }
+    return node;
+}
+fn attach(p: Parser, parent: i64, child: i64) -> () {
+    if parent == 0 || child == 0 { return; }
+    let edge: i64 = std::vec::native_int64_vector_count(p.edges) / 2 + 1;
+    std::vec::native_int64_vector_append(p.edges,child);
+    std::vec::native_int64_vector_append(p.edges,0);
+    let base: i64 = (parent - 1) * 6;
+    let last: i64 = std::vec::native_int64_vector_at(p.nodes,base + 4);
+    if last == 0 { std::vec::native_int64_vector_put(p.nodes,base + 3,edge); }
+    else { std::vec::native_int64_vector_put(p.edges,(last - 1) * 2 + 1,edge); }
+    std::vec::native_int64_vector_put(p.nodes,base + 4,edge);
+    std::vec::native_int64_vector_put(p.nodes,base + 5,std::vec::native_int64_vector_at(p.nodes,base + 5) + 1);
+    return;
+}
+pub fn node_count(p: Parser) -> i64 { return std::vec::native_int64_vector_count(p.nodes) / 6; }
+pub fn node_kind(p: Parser, id: i64) -> i64 { return kind(p,id); }
+pub fn node_start(p: Parser, id: i64) -> i64 { return std::vec::native_int64_vector_at(p.nodes,(id - 1) * 6 + 1); }
+pub fn node_end(p: Parser, id: i64) -> i64 { return std::vec::native_int64_vector_at(p.nodes,(id - 1) * 6 + 2); }
+pub fn node_child_count(p: Parser, id: i64) -> i64 { return std::vec::native_int64_vector_at(p.nodes,(id - 1) * 6 + 5); }
+pub fn node_child(p: Parser, id: i64, nth: i64) -> i64 {
+    if nth < 0 || nth >= node_child_count(p,id) { return 0; }
+    let mut edge: i64 = std::vec::native_int64_vector_at(p.nodes,(id - 1) * 6 + 3);
+    let mut i: i64 = 0;
+    while i < nth { edge = std::vec::native_int64_vector_at(p.edges,(edge - 1) * 2 + 1); i += 1; }
+    return std::vec::native_int64_vector_at(p.edges,(edge - 1) * 2);
+}
+pub fn drop(p: Parser) -> () {
+    std::vec::native_int64_vector_destroy(p.state);
+    std::vec::native_int64_vector_destroy(p.nodes);
+    std::vec::native_int64_vector_destroy(p.edges);
+    return;
+}
+
+fn reserved(p: Parser) -> bool {
+    return look(p,"fn") || look(p,"let") || look(p,"mut") ||
+      look(p,"pub") || look(p,"return") || look(p,"if") ||
+      look(p,"else") || look(p,"while") || look(p,"for") ||
+      look(p,"in") || look(p,"loop") || look(p,"break") ||
+      look(p,"continue") || look(p,"match") || look(p,"struct") || look(p,"class") || look(p,"defer") ||
+      look(p,"enum") || look(p,"impl") || look(p,"new") ||
+      look(p,"true") || look(p,"false") || look(p,"unsafe") ||
+      look(p,"extern") || look(p,"namespace") || look(p,"import") ||
+      look(p,"mod") || look(p,"use") || look(p,"gen") ||
+      look(p,"async") || look(p,"yield") || look(p,"await") ||
+      look(p,"const") || look(p,"auto") || look(p,"as") || look(p,"macro") ||
+      look(p,"typedef") || look(p,"trait") || look(p,"extends");
+}
+fn identifier(p: Parser) -> i64 {
+    if failed(p) { return 0; }
+    let id: i64 = begin(p,39);
+    // Macro AST placeholders are prefixed with `$`.
+    take(p,"$");
+    if token_kind(p) != 1 || reserved(p) { fail(p,1); return close(p,id); }
+    advance(p);
+    return close(p,id);
+}
+fn path(p: Parser) -> i64 {
+    let id: i64 = begin(p,46);
+    attach(p,id,identifier(p));
+    while !failed(p) && look(p,"::") && !next_is(p,"<") {
+        advance(p);
+        attach(p,id,identifier(p));
+    }
+    return close(p,id);
+}
+// Generic parameter declaration: <T,U>; also used for type arguments,
+// with arg_types=true. Trailing comma remains disallowed (stage-0 grammar).
+fn generics(p: Parser, arg_types: bool) -> i64 {
+    let id: i64 = begin(p,47);
+    if !take(p,"<") { return close(p,id); }
+    if !look(p,">") {
+        if arg_types { attach(p,id,parse_type(p)); }
+        else { attach(p,id,identifier(p)); }
+        while !failed(p) && take(p,",") {
+            if arg_types { attach(p,id,parse_type(p)); }
+            else { attach(p,id,identifier(p)); }
+        }
+    }
+    need(p,">");
+    return close(p,id);
+}
+fn parse_type(p: Parser) -> i64 {
+    let id: i64 = begin(p,12);
+    if take(p,"auto") { return close(p,id); }
+    if take(p,"[") {
+        attach(p,id,parse_type(p));
+        need(p,";");
+        if token_kind(p) == 2 { advance(p); }
+        else { fail(p,3); }
+        need(p,"]");
+        return close(p,id);
+    }
+    if take(p,"*") {
+        if !take(p,"mut") { need(p,"const"); }
+        attach(p,id,parse_type(p));
+        return close(p,id);
+    }
+    if take(p,"(") {
+        need(p,")");
+        return close(p,id);
+    }
+    attach(p,id,path(p));
+    if look(p,"<") { attach(p,id,generics(p,true)); }
+    return close(p,id);
+}
+// Mirror Rust LALRPOP CastType: simple named casts are bare, while
+// generic and compound types must be enclosed in parentheses after `as`.
+fn cast_type(p: Parser) -> i64 {
+    if take(p,"(") {
+        let ty: i64 = parse_type(p);
+        need(p,")");
+        return ty;
+    }
+    let id: i64 = begin(p,12);
+    attach(p,id,path(p));
+    return close(p,id);
+}
+fn named_type(p: Parser) -> i64 {
+    let id: i64 = begin(p,13);
+    attach(p,id,identifier(p));
+    need(p,":");
+    attach(p,id,parse_type(p));
+    return close(p,id);
+}
+fn fields(p: Parser, parent: i64) -> () {
+    if look(p,"}") { return; }
+    attach(p,parent,named_type(p));
+    while !failed(p) && take(p,",") { attach(p,parent,named_type(p)); }
+    return;
+}
+fn attribute(p: Parser) -> i64 {
+    let id: i64 = begin(p,11);
+    need(p,"#"); need(p,"[");
+    attach(p,id,identifier(p));
+    need(p,"(");
+    if !look(p,")") {
+        attach(p,id,identifier(p));
+        while !failed(p) && take(p,",") { attach(p,id,identifier(p)); }
+    }
+    need(p,")"); need(p,"]");
+    return close(p,id);
+}
+fn struct_item(p: Parser) -> i64 {
+    let id: i64 = begin(p,4);
+    if !take(p,"struct") { need(p,"class"); }
+    attach(p,id,identifier(p));
+    if look(p,"<") { attach(p,id,generics(p,false)); }
+    if take(p,":") { attach(p,id,parse_type(p)); }
+    need(p,"{");
+    fields(p,id);
+    need(p,"}");
+    return close(p,id);
+}
+fn enum_item(p: Parser) -> i64 {
+    let id: i64 = begin(p,5);
+    need(p,"enum");
+    attach(p,id,identifier(p));
+    if look(p,"<") { attach(p,id,generics(p,false)); }
+    need(p,"{");
+    if !look(p,"}") {
+        attach(p,id,variant(p));
+        while !failed(p) && take(p,",") { attach(p,id,variant(p)); }
+    }
+    need(p,"}");
+    return close(p,id);
+}
+fn variant(p: Parser) -> i64 {
+    let id: i64 = begin(p,15);
+    attach(p,id,identifier(p));
+    if take(p,"(") {
+        if !look(p,")") {
+            attach(p,id,parse_type(p));
+            while !failed(p) && take(p,",") { attach(p,id,parse_type(p)); }
+        }
+        need(p,")");
+    }
+    return close(p,id);
+}
+fn parameters(p: Parser, external: bool) -> i64 {
+    let id: i64 = begin(p,48);
+    need(p,"(");
+    if !look(p,")") {
+        attach(p,id,parameter(p,external));
+        while !failed(p) && take(p,",") { attach(p,id,parameter(p,external)); }
+    }
+    need(p,")");
+    return close(p,id);
+}
+fn parameter(p: Parser, external: bool) -> i64 {
+    let id: i64 = begin(p,13);
+    if take(p,"...") {
+        if external { return close(p,id); }
+    }
+    attach(p,id,identifier(p));
+    need(p,":");
+    attach(p,id,parse_type(p));
+    return close(p,id);
+}
+fn function_item(p: Parser) -> i64 {
+    let id: i64 = begin(p,2);
+    if look(p,"gen") || look(p,"coro") || look(p,"async") { advance(p); }
+    need(p,"fn");
+    attach(p,id,identifier(p));
+    if look(p,"<") { attach(p,id,generics(p,false)); }
+    attach(p,id,parameters(p,false));
+    need(p,"->");
+    attach(p,id,parse_type(p));
+    attach(p,id,block(p));
+    return close(p,id);
+}
+fn extern_item(p: Parser) -> i64 {
+    let id: i64 = begin(p,3);
+    need(p,"extern"); need(p,"fn");
+    attach(p,id,identifier(p));
+    attach(p,id,parameters(p,true));
+    need(p,"->");
+    attach(p,id,parse_type(p));
+    need(p,";");
+    return close(p,id);
+}
+fn typedef_item(p: Parser) -> i64 {
+    let declaration: i64 = begin(p,52);
+    need(p,"typedef");
+    attach(p,declaration,identifier(p));
+    need(p,"=");
+    attach(p,declaration,parse_type(p));
+    need(p,";");
+    return close(p,declaration);
+}
+fn trait_restriction(p: Parser, parent: i64) -> () {
+    need(p,"<");
+    attach(p,parent,identifier(p));
+    need(p,"in");
+    attach(p,parent,parse_type(p));
+    while !failed(p) && take(p,",") { attach(p,parent,parse_type(p)); }
+    need(p,">");
+    return;
+}
+fn trait_item(p: Parser) -> i64 {
+    let declaration: i64 = begin(p,53);
+    need(p,"trait");
+    if look(p,"<") {
+        trait_restriction(p,declaration);
+        attach(p,declaration,identifier(p));
+    } else {
+        attach(p,declaration,identifier(p));
+        if look(p,"<") {trait_restriction(p,declaration);}
+    }
+    if take(p,"extends") {
+        attach(p,declaration,path(p));
+        while !failed(p) && take(p,",") {attach(p,declaration,path(p));}
+    }
+    need(p,"{");
+    while !failed(p) && !look(p,"}") {
+        need(p,"fn");
+        attach(p,declaration,identifier(p));
+        attach(p,declaration,parameters(p,false));
+        need(p,"->");
+        attach(p,declaration,parse_type(p));
+        need(p,";");
+    }
+    need(p,"}");
+    return close(p,declaration);
+}
+fn impl_item(p: Parser) -> i64 {
+    let id: i64 = begin(p,6);
+    need(p,"impl");
+    if look(p,"<") { attach(p,id,generics(p,false)); }
+    attach(p,id,parse_type(p));
+    if take(p,"for") {attach(p,id,parse_type(p));}
+    need(p,"{");
+    while !failed(p) && !look(p,"}") {
+        if token_kind(p) == 6 { fail(p,6); break; }
+        if look(p,"virtual") || look(p,"override") { advance(p); }
+        attach(p,id,function_item(p));
+    }
+    need(p,"}");
+    return close(p,id);
+}
+fn item(p: Parser) -> i64 {
+    if failed(p) { return 0; }
+    let node: i64 = begin(p,50); // visibility + attributes wrapper
+    let mut public_item: bool = take(p,"pub");
+    let mut has_attributes: bool = false;
+    while !failed(p) && look(p,"#") {
+        has_attributes = true;
+        attach(p,node,attribute(p));
+    }
+    // Allow both `pub #[derive(...)] struct` and
+    // `#[derive(...)] pub struct`, matching the Rust reference grammar.
+    if !public_item && has_attributes && take(p,"pub") { public_item = true; }
+    // Attributes currently apply to structs and enums only.
+    if has_attributes && !look(p,"struct") && !look(p,"class") && !look(p,"enum") {
+        fail(p,8);
+        return close(p,node);
+    }
+    if look(p,"struct") || look(p,"class") { attach(p,node,struct_item(p)); return close(p,node); }
+    if look(p,"enum") { attach(p,node,enum_item(p)); return close(p,node); }
+    if look(p,"typedef") { attach(p,node,typedef_item(p)); return close(p,node); }
+    if look(p,"trait") { attach(p,node,trait_item(p)); return close(p,node); }
+    if look(p,"extern") { attach(p,node,extern_item(p)); return close(p,node); }
+    if take(p,"macro") {
+        let m: i64 = begin(p,51);
+        set_start(p,m,position(p) - 1);
+        attach(p,m,identifier(p));
+        need(p,"(");
+        if !look(p,")") {
+            attach(p,m,identifier(p));
+            if take(p,":") { attach(p,m,identifier(p)); }
+            while !failed(p) && take(p,",") {
+                attach(p,m,identifier(p));
+                if take(p,":") { attach(p,m,identifier(p)); }
+            }
+        }
+        need(p,")"); need(p,"=>");
+        if look(p,"{") { attach(p,m,block(p)); }
+        else { attach(p,m,expression(p,1)); need(p,";"); }
+        attach(p,node,close(p,m)); return close(p,node);
+    }
+    if look(p,"fn") || look(p,"gen") || look(p,"async") ||
+       (look(p,"coro") && next_is(p,"fn")) {
+        attach(p,node,function_item(p));
+        return close(p,node);
+    }
+    if look(p,"impl") { attach(p,node,impl_item(p)); return close(p,node); }
+    if take(p,"namespace") {
+        let ns: i64 = begin(p,7);
+        set_start(p,ns,position(p) - 1);
+        attach(p,ns,identifier(p));
+        need(p,"{");
+        while !failed(p) && !look(p,"}") {
+            if token_kind(p) == 6 { fail(p,6); break; }
+            attach(p,ns,item(p));
+        }
+        need(p,"}");
+        attach(p,node,close(p,ns));
+        return close(p,node);
+    }
+    if take(p,"import") {
+        let a: i64 = begin(p,8);
+        set_start(p,a,position(p) - 1);
+        attach(p,a,path(p)); need(p,";"); attach(p,node,close(p,a));
+        return close(p,node);
+    }
+    if take(p,"mod") {
+        let a: i64 = begin(p,9);
+        set_start(p,a,position(p) - 1);
+        attach(p,a,identifier(p)); need(p,";"); attach(p,node,close(p,a));
+        return close(p,node);
+    }
+    if take(p,"use") {
+        let a: i64 = begin(p,10);
+        set_start(p,a,position(p) - 1);
+        attach(p,a,path(p)); need(p,";"); attach(p,node,close(p,a));
+        return close(p,node);
+    }
+    fail(p,4);
+    return close(p,node);
+}
+
+fn block(p: Parser) -> i64 {
+    let id: i64 = begin(p,16);
+    need(p,"{");
+    while !failed(p) && !look(p,"}") {
+        if token_kind(p) == 6 { fail(p,6); break; }
+        attach(p,id,statement(p));
+    }
+    need(p,"}");
+    return close(p,id);
+}
+fn statement(p: Parser) -> i64 {
+    if failed(p) { return 0; }
+    if take(p,"let") {
+        let id: i64 = begin(p,17);
+        set_start(p,id,position(p) - 1);
+        take(p,"mut");
+        attach(p,id,identifier(p));
+        if take(p,":") { attach(p,id,parse_type(p)); }
+        need(p,"=");
+        attach(p,id,expression(p,1));
+        if take(p,"defer") { attach(p,id,expression(p,1)); }
+        need(p,";");
+        return close(p,id);
+    }
+    if take(p,"auto") {
+        let id: i64 = begin(p,17);
+        set_start(p,id,position(p) - 1);
+        take(p,"mut");
+        attach(p,id,identifier(p));
+        need(p,"="); attach(p,id,expression(p,1));
+        if take(p,"defer") { attach(p,id,expression(p,1)); }
+        need(p,";");
+        return close(p,id);
+    }
+    if take(p,"defer") {
+        let id: i64 = begin(p,54);
+        set_start(p,id,position(p) - 1);
+        attach(p,id,expression(p,1));
+        need(p,";");
+        return close(p,id);
+    }
+    if take(p,"return") {
+        let id: i64 = begin(p,20);
+        set_start(p,id,position(p) - 1);
+        if !look(p,";") { attach(p,id,expression(p,1)); }
+        need(p,";");
+        return close(p,id);
+    }
+    if take(p,"if") {
+        let id: i64 = begin(p,21);
+        set_start(p,id,position(p) - 1);
+        attach(p,id,expression(p,1));
+        attach(p,id,block(p));
+        if take(p,"else") {
+            if look(p,"if") { attach(p,id,statement(p)); }
+            else { attach(p,id,block(p)); }
+        }
+        return close(p,id);
+    }
+    if take(p,"while") {
+        let id: i64 = begin(p,22);
+        set_start(p,id,position(p) - 1);
+        attach(p,id,expression(p,1));
+        attach(p,id,block(p));
+        return close(p,id);
+    }
+    if take(p,"loop") {
+        let id: i64 = begin(p,23);
+        set_start(p,id,position(p) - 1);
+        attach(p,id,block(p));
+        return close(p,id);
+    }
+    if take(p,"for") {
+        let id: i64 = begin(p,24);
+        set_start(p,id,position(p) - 1);
+        attach(p,id,identifier(p));
+        need(p,"in");
+        attach(p,id,expression(p,1));
+        // Both integer ranges and struct iterator protocols are valid.
+        if take(p,"..") { attach(p,id,expression(p,1)); }
+        attach(p,id,block(p));
+        return close(p,id);
+    }
+    if take(p,"break") { let id: i64 = begin(p,25);
+        set_start(p,id,position(p) - 1); need(p,";"); return close(p,id); }
+    if take(p,"continue") { let id: i64 = begin(p,26);
+        set_start(p,id,position(p) - 1); need(p,";"); return close(p,id); }
+    if take(p,"unsafe") {
+        let id: i64 = begin(p,27);
+        set_start(p,id,position(p) - 1);
+        attach(p,id,block(p));
+        return close(p,id);
+    }
+    if take(p,"match") {
+        let id: i64 = begin(p,28);
+        set_start(p,id,position(p) - 1);
+        attach(p,id,expression(p,1));
+        need(p,"{");
+        while !failed(p) && !look(p,"}") {
+            if token_kind(p) == 6 { fail(p,6); break; }
+            let arm: i64 = begin(p,29);
+            attach(p,arm,pattern(p));
+            need(p,"=>");
+            attach(p,arm,block(p));
+            take(p,",");
+            attach(p,id,close(p,arm));
+        }
+        need(p,"}");
+        return close(p,id);
+    }
+    let start: i64 = position(p);
+    let left: i64 = expression(p,1);
+    if look(p,"=") || look(p,"+=") || look(p,"-=") ||
+       look(p,"*=") || look(p,"/=") || look(p,"%=") {
+        let mut node_kind: i64 = 18;
+        if !look(p,"=") { node_kind = 19; }
+        let id: i64 = begin(p,node_kind);
+        set_start(p,id,node_start(p,left));
+        // Assignments to a local or to one direct field are valid syntax.
+        // The Rust semantic lowering enforces mutability and rejects deeper
+        // lvalues; the self-host parser mirrors acceptance of the direct dot.
+        let local_target: bool = kind(p,left) == 39 && position(p) == start + 1;
+        let field_target: bool = kind(p,left) == 34;
+        if !local_target && !field_target { fail(p,5); }
+        advance(p);
+        attach(p,id,left);
+        attach(p,id,expression(p,1));
+        need(p,";");
+        return close(p,id);
+    }
+    let id: i64 = begin(p,30);
+    set_start(p,id,node_start(p,left));
+    attach(p,id,left);
+    need(p,";");
+    return close(p,id);
+}
+fn pattern(p: Parser) -> i64 {
+    let id: i64 = begin(p,45);
+    attach(p,id,path(p));
+    if take(p,"(") {
+        if !look(p,")") {
+            attach(p,id,identifier(p));
+            while !failed(p) && take(p,",") { attach(p,id,identifier(p)); }
+        }
+        need(p,")");
+    }
+    return close(p,id);
+}
+
+fn precedence(p: Parser) -> i64 {
+    if look(p,"||") { return 1; }
+    if look(p,"&&") { return 2; }
+    if look(p,"|") { return 3; }
+    if look(p,"^") { return 4; }
+    if look(p,"&") { return 5; }
+    if look(p,"==") || look(p,"!=") { return 6; }
+    if look(p,"<") || look(p,"<=") || look(p,">") || look(p,">=") { return 7; }
+    if look(p,"<<") || look(p,">>") { return 8; }
+    if look(p,"+") || look(p,"-") { return 9; }
+    if look(p,"*") || look(p,"/") || look(p,"%") { return 10; }
+    return 0;
+}
+fn expression(p: Parser, min_bp: i64) -> i64 {
+    let mut lhs: i64 = unary(p);
+    while !failed(p) {
+        let bp: i64 = precedence(p);
+        if bp == 0 || bp < min_bp { break; }
+        let id: i64 = begin(p,31);
+        set_start(p,id,node_start(p,lhs));
+        attach(p,id,lhs);
+        advance(p);
+        attach(p,id,expression(p,bp + 1));
+        lhs = close(p,id);
+    }
+    return lhs;
+}
+fn unary(p: Parser) -> i64 {
+    if look(p,"-") || look(p,"!") || look(p,"~") ||
+       look(p,"&") || look(p,"*") || look(p,"yield") ||
+       look(p,"await") || look(p,"...") ||
+       look(p,"next") || look(p,"finished") ||
+       look(p,"resume") || look(p,"join") ||
+       look(p,"spawn") || look(p,"dispose") {
+        let id: i64 = begin(p,32);
+        let address: bool = look(p,"&");
+        let explicit_resume_input: bool = look(p,"resume") && next_is(p,"(");
+        advance(p);
+        if address { take(p,"mut"); }
+        if explicit_resume_input { attach(p,id,arguments(p)); }
+        else { attach(p,id,unary(p)); }
+        return close(p,id);
+    }
+    return postfix(p);
+}
+fn postfix(p: Parser) -> i64 {
+    let mut left: i64 = atom(p);
+    while !failed(p) {
+        if take(p,"as") {
+            let id: i64 = begin(p,52);
+            set_start(p,id,node_start(p,left));
+            attach(p,id,left);
+            attach(p,id,cast_type(p));
+            left = close(p,id);
+            continue;
+        }
+        if take(p,".") {
+            let id: i64 = begin(p,34);
+            set_start(p,id,node_start(p,left));
+            attach(p,id,left);
+            attach(p,id,identifier(p));
+            if look(p,"(") { attach(p,id,arguments(p)); }
+            left = close(p,id);
+            continue;
+        }
+        if take(p,"[") {
+            let id: i64 = begin(p,35);
+            set_start(p,id,node_start(p,left));
+            attach(p,id,left);
+            attach(p,id,expression(p,1));
+            need(p,"]");
+            left = close(p,id);
+            continue;
+        }
+        break;
+    }
+    return left;
+}
+fn arguments(p: Parser) -> i64 {
+    let id: i64 = begin(p,48);
+    need(p,"(");
+    if !look(p,")") {
+        attach(p,id,expression(p,1));
+        while !failed(p) && take(p,",") { attach(p,id,expression(p,1)); }
+    }
+    need(p,")");
+    return close(p,id);
+}
+fn initializer(p: Parser) -> i64 {
+    let id: i64 = begin(p,14);
+    attach(p,id,identifier(p));
+    need(p,":");
+    attach(p,id,expression(p,1));
+    return close(p,id);
+}
+fn atom(p: Parser) -> i64 {
+    if failed(p) { return 0; }
+    if token_kind(p) == 2 || token_kind(p) == 3 || token_kind(p) == 4 ||
+       look(p,"true") || look(p,"false") {
+        let id: i64 = begin(p,38);
+        advance(p);
+        return close(p,id);
+    }
+    if take(p,"(") {
+        let id: i64 = begin(p,43);
+        set_start(p,id,position(p) - 1);
+        if !look(p,")") { attach(p,id,expression(p,1)); }
+        need(p,")");
+        return close(p,id);
+    }
+    if take(p,"[") {
+        let id: i64 = begin(p,36);
+        set_start(p,id,position(p) - 1);
+        if !look(p,"]") {
+            attach(p,id,expression(p,1));
+            while !failed(p) && take(p,",") { attach(p,id,expression(p,1)); }
+        }
+        need(p,"]");
+        return close(p,id);
+    }
+    if take(p,"new") {
+        let id: i64 = begin(p,37);
+        set_start(p,id,position(p) - 1);
+        attach(p,id,path(p));
+        if look(p,"<") { attach(p,id,generics(p,true)); }
+        need(p,"{");
+        if !look(p,"}") {
+            attach(p,id,initializer(p));
+            while !failed(p) && take(p,",") { attach(p,id,initializer(p)); }
+        }
+        need(p,"}");
+        return close(p,id);
+    }
+    if (token_kind(p) == 1 && !reserved(p)) || look(p,"$") {
+        let id: i64 = begin(p,39);
+        attach(p,id,path(p));
+        if take(p,"!") {
+            let m: i64 = begin(p,53);
+            set_start(p,m,node_start(p,id));
+            attach(p,m,id);
+            attach(p,m,arguments(p));
+            return close(p,m);
+        }
+        if take(p,"::") {
+            need(p,"<");
+            let generic_id: i64 = begin(p,47);
+            if !look(p,">") {
+                attach(p,generic_id,parse_type(p));
+                while !failed(p) && take(p,",") { attach(p,generic_id,parse_type(p)); }
+            }
+            need(p,">");
+            attach(p,id,close(p,generic_id));
+            attach(p,id,arguments(p));
+        }
+        else { if look(p,"(") { attach(p,id,arguments(p)); } }
+        return close(p,id);
+    }
+    fail(p,2);
+    return 0;
+}
+
+pub fn parse_program(p: Parser) -> i64 {
+    let root: i64 = begin(p,1);
+    while !failed(p) && token_kind(p) != 6 {
+        if token_kind(p) == 7 { fail(p,7); break; }
+        attach(p,root,item(p));
+    }
+    return close(p,root);
+}

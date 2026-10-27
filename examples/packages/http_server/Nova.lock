@@ -1,0 +1,4 @@
+# Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
+http_server 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/http_server hash=011fa01511d87370
+std 0.7.0 builtin hash=1089f76e942e1583
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/http_server/src/main.nova hash=011fa01511d87370

@@ -1,0 +1,22 @@
+// Minimal native thread API. The callback has a plain function ABI and cannot
+// capture local state. An owned Thread joins when dropped (scope-based join).
+// This does not replace Nova's `spawn task` asynchronous executor.
+[[unsafe]] extern fn native_thread_start(callback: fn() -> ()) -> *mut i64;
+[[unsafe]] extern fn native_thread_join(handle: *mut i64) -> ();
+[[unsafe]] extern fn native_thread_destroy(handle: *mut i64) -> ();
+
+pub struct Thread { handle: *mut i64 }
+
+pub fn spawn(callback: fn() -> ()) -> Thread {
+    unsafe { return new Thread { handle: std::thread::native_thread_start(callback) }; }
+}
+impl Thread {
+    fn join(self: &Thread) -> () {
+        unsafe { std::thread::native_thread_join(self.handle); }
+        return;
+    }
+    fn drop(self: Thread) -> () {
+        unsafe { std::thread::native_thread_destroy(self.handle); }
+        return;
+    }
+}

@@ -1,0 +1,12 @@
+fn apply(value: i64, cb: fn(i64)->i64) -> i64 {
+    return cb(value);
+}
+fn doubled(value: i64) -> i64 { return value*2; }
+fn main() -> i32 {
+    let named: fn(i64)->i64 = doubled;
+    if apply(21,named) != 42 { return 1; }
+    let anonymous: fn(i64)->i64 = fn(x: i64)->i64 { return x+3; };
+    if apply(39,anonymous) != 42 { return 2; }
+    if apply(42,fn(x: i64)->i64 { return x; }) != 42 { return 3; }
+    return 0;
+}

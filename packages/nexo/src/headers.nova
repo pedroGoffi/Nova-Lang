@@ -1,0 +1,106 @@
+// HTTP header parsing and framing checks.
+// Methods return owned strings. Framing helpers borrow the request buffer.
+// HTTP field names are ASCII case-insensitive (RFC 9110).
+fn ascii_lower(value: i32) -> i32 {
+    if value >= 65 && value <= 90 { return value + 32; }
+    return value;
+}
+
+fn name_equals(input: &std::string::String, offset: i64, count: i64, field: str) -> bool {
+    let expected: std::string::String = std::string::from_text(field);
+    if expected.byte_length() != count { return false; }
+    let mut i: i64 = 0;
+    while i < count {
+        if ascii_lower(input.byte_at(offset + i)) != ascii_lower(expected.byte_at(i)) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+pub fn header_value(headers: str, name: str) -> std::string::String {
+    let lines: std::string::String = std::string::from_text(headers);
+    let size: i64 = lines.byte_length();
+    let mut at: i64 = 0;
+    while at < size {
+        let start: i64 = at;
+        while at < size && lines.byte_at(at) != 58 && lines.byte_at(at) != 13 { at += 1; }
+        if at < size && lines.byte_at(at) == 58 && name_equals(&lines, start, at - start, name) {
+            at += 1;
+            while at < size && (lines.byte_at(at) == 32 || lines.byte_at(at) == 9) { at += 1; }
+            let value_start: i64 = at;
+            while at < size && lines.byte_at(at) != 13 { at += 1; }
+            return lines.slice(value_start as u64,(at - value_start) as u64);
+        }
+        while at < size && lines.byte_at(at) != 10 { at += 1; }
+        at += 1;
+    }
+    return std::string::new_string();
+}
+
+pub fn header_end(input: &std::string::String) -> i64 {
+    let input_length: i64 = input.byte_length();
+    let mut byte_offset: i64 = 0;
+    while byte_offset+3 < input_length {
+        if input.byte_at(byte_offset)==13 && input.byte_at(byte_offset+1)==10 &&
+           input.byte_at(byte_offset+2)==13 && input.byte_at(byte_offset+3)==10 {
+            return byte_offset+4;
+        }
+        byte_offset += 1;
+    }
+    return -1;
+}
+
+// Unsupported Transfer-Encoding: -2. Malformed Content-Length: -1.
+// Reject unsupported framing, duplicate Content-Length and conflicting
+// Transfer-Encoding regardless of header order/capitalization.
+// Return: body length >=0, invalid -1, unsupported framing -2.
+pub fn content_length(input: &std::string::String, header_end_offset: i64) -> i64 {
+    let mut at: i64 = 0;
+    let mut first_line: bool = true;
+    let mut found_length: bool = false;
+    let mut body_length: i64 = 0;
+    let mut has_transfer_encoding: bool = false;
+    while at < header_end_offset {
+        let start: i64 = at;
+        while at + 1 < header_end_offset &&
+            !(input.byte_at(at) == 13 && input.byte_at(at+1) == 10) {
+            at += 1;
+        }
+        if at + 1 >= header_end_offset { return -1; }
+        let line_end: i64 = at;
+        at += 2;
+        if first_line { first_line = false; continue; }
+        if line_end == start { break; }
+        let mut colon: i64 = start;
+        while colon < line_end && input.byte_at(colon) != 58 { colon += 1; }
+        if colon == line_end { return -1; }
+        if name_equals(input,start,colon-start,"Transfer-Encoding") {
+            has_transfer_encoding = true;
+            continue;
+        }
+        if name_equals(input,start,colon-start,"Content-Length") {
+            if found_length { return -1; }
+            found_length = true;
+            let mut value_start: i64 = colon+1;
+            while value_start < line_end && (input.byte_at(value_start)==32 || input.byte_at(value_start)==9) {
+                value_start += 1;
+            }
+            let mut value_end: i64 = line_end;
+            while value_end > value_start && (input.byte_at(value_end-1)==32 || input.byte_at(value_end-1)==9) {
+                value_end -= 1;
+            }
+            if value_start == value_end { return -1; }
+            let mut digit_index: i64 = value_start;
+            while digit_index < value_end {
+                let byte: i32 = input.byte_at(digit_index);
+                if byte < 48 || byte > 57 { return -1; }
+                if body_length > 3276 { return -1; }
+                body_length = body_length * 10 + (byte - 48) as i64;
+                digit_index += 1;
+            }
+            if body_length > 32768 { return -1; }
+        }
+    }
+    if has_transfer_encoding { return -2; }
+    return body_length;
+}

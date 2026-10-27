@@ -1,0 +1,28 @@
+fn identity<T>(value: T) -> T {
+    return value;
+}
+
+namespace math {
+    fn square(value: i32) -> i32 {
+        return value * value;
+    }
+}
+
+#[derive(Serialize, Clone, Default, Debug)]
+#[repr(C)]
+struct Box<T> {
+    value: T
+}
+
+impl<T> Box<T> {
+    fn get(self: Box<T>) -> T {
+        return self.value;
+    }
+}
+
+fn main() -> i32 {
+    let box: Box<i32> = new Box<i32> { value: identity(7) };
+    let x: i32 = box.get();
+    let y: i32 = math::square(3);
+    return x + y - 16;
+}

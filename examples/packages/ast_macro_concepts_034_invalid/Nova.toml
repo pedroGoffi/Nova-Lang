@@ -1,0 +1,4 @@
+[package]
+name = "ast_macro_concepts_034_invalid"
+version = "0.1.0"
+entry = "src/main.nova"

@@ -1,0 +1,4 @@
+# Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
+ast_macro_concepts_034 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/ast_macro_concepts_034 hash=f625846f4bc8fbd6
+std 0.20.0 builtin hash=1023582074d5ca89
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/ast_macro_concepts_034/src/main.nova hash=f625846f4bc8fbd6

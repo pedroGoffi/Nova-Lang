@@ -1,0 +1,59 @@
+// Contract for set.nova: Signed integral value safe to store as a set key.
+pub concept SetElement<T> = signed<T>;
+
+// Typed sets backed by the private C map ABI. Numeric keys use a full
+// 64-bit key; text keys are copied and owned by the runtime.
+// The current stage-0 compiler only supports integral key types here.
+
+pub struct Set<T> { handle: u64, marker: [T; 0] }
+
+pub fn new_set<T: std::set::SetElement>() -> Set<T> {
+    return new Set<T> {
+        handle: std::internal::map::native_int64_map_create(),
+        marker: []
+    };
+}
+impl<T> Set<T> {
+    fn len(self: &Set<T>) -> u64 {
+        return std::internal::map::native_int64_map_length(self.handle);
+    }
+    fn is_empty(self: &Set<T>) -> bool { return self.len() == 0; }
+    fn insert(self: &mut Set<T>, value: T) -> bool {
+        return std::internal::map::native_int64_map_insert(self.handle,value as i64,1);
+    }
+    fn contains(self: &Set<T>, value: T) -> bool {
+        return std::internal::map::native_int64_map_contains(self.handle,value as i64);
+    }
+    fn remove(self: &mut Set<T>, value: T) -> bool {
+        return std::internal::map::native_int64_map_remove(self.handle,value as i64);
+    }
+    fn clear(self: &mut Set<T>) -> () {
+        std::internal::map::native_int64_map_clear(self.handle);return;
+    }
+    fn drop(self: Set<T>) -> () {
+        std::internal::map::native_int64_map_destroy(self.handle);return;
+    }
+}
+
+pub struct StringSet { handle: u64 }
+pub fn new_string_set() -> StringSet {
+    return new StringSet { handle: std::map::native_string_int64_map_create() };
+}
+impl StringSet {
+    fn len(self: &StringSet) -> u64 {
+        return std::map::native_string_int64_map_length(self.handle);
+    }
+    fn is_empty(self: &StringSet) -> bool { return self.len() == 0; }
+    fn insert(self: &mut StringSet, value: str) -> bool {
+        return std::map::native_string_int64_map_insert(self.handle,value,1);
+    }
+    fn contains(self: &StringSet, value: str) -> bool {
+        return std::map::native_string_int64_map_contains(self.handle,value);
+    }
+    fn remove(self: &mut StringSet, value: str) -> bool {
+        return std::map::native_string_int64_map_remove(self.handle,value);
+    }
+    fn drop(self: StringSet) -> () {
+        std::map::native_string_int64_map_destroy(self.handle);return;
+    }
+}

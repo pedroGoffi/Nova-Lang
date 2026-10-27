@@ -1,0 +1,4 @@
+# Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
+demo 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/demo hash=085995b056d9ec94
+std 0.8.2 builtin hash=f78ec5b28cc4d19a
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/demo/src/main.nova hash=085995b056d9ec94

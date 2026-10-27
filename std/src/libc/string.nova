@@ -1,0 +1,25 @@
+// Contract for libc/string.nova: Borrowed NUL-terminated character string.
+pub concept CText<T> = same_as<T,str>;
+
+// <string.h> + POSIX strdup/strndup.
+[[unsafe]] pub extern fn strlen(text: str) -> usize;
+[[unsafe]] pub extern fn strnlen(text: str, max_len: usize) -> usize;
+[[unsafe]] pub extern fn strcmp(left_value: str, right_value: str) -> i32;
+[[unsafe]] pub extern fn strncmp(left_value: str, right_value: str, element_count: usize) -> i32;
+[[unsafe]] pub extern fn strcasecmp(left_value: str, right_value: str) -> i32;
+[[unsafe]] pub extern fn strchr(text: str, character: i32) -> *const u8;
+[[unsafe]] pub extern fn strrchr(text: str, character: i32) -> *const u8;
+[[unsafe]] pub extern fn strstr(text: str, needle: str) -> *const u8;
+[[unsafe]] pub extern fn strspn(text: str, accept: str) -> usize;
+[[unsafe]] pub extern fn strcspn(text: str, reject: str) -> usize;
+[[unsafe]] pub extern fn strcpy(destination: *mut u8, source: str) -> *mut u8;
+[[unsafe]] pub extern fn strncpy(destination: *mut u8, source: str, element_count: usize) -> *mut u8;
+[[unsafe]] pub extern fn strcat(destination: *mut u8, source: str) -> *mut u8;
+[[unsafe]] pub extern fn strncat(destination: *mut u8, source: str, element_count: usize) -> *mut u8;
+[[unsafe]] pub extern fn memcpy(destination: *mut u8, source: *const u8, byte_count: usize) -> *mut u8;
+[[unsafe]] pub extern fn memmove(destination: *mut u8, source: *const u8, byte_count: usize) -> *mut u8;
+[[unsafe]] pub extern fn memset(destination: *mut u8, value: i32, byte_count: usize) -> *mut u8;
+[[unsafe]] pub extern fn memcmp(left_value: *const u8, right_value: *const u8, byte_count: usize) -> i32;
+[[unsafe]] pub extern fn memchr(data: *const u8, character: i32, byte_count: usize) -> *const u8;
+[[unsafe]] pub extern fn strdup(text: str) -> *mut u8;
+[[unsafe]] pub extern fn strndup(text: str, max_len: usize) -> *mut u8;

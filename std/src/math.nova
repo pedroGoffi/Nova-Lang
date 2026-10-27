@@ -1,0 +1,30 @@
+// Contract for math.nova: Ordered primitive numeric type accepted by math helpers.
+pub concept OrderedNumber<T> = integer<T> || floating<T>;
+
+// Nova STD math — compiled with the builtin runtime.
+extern fn native_min_i64(left_value: i64, right_value: i64) -> i64;
+extern fn native_max_i64(left_value: i64, right_value: i64) -> i64;
+extern fn native_clamp_i64(value: i64, lower_bound: i64, upper_bound: i64) -> i64;
+
+
+// Descriptive arithmetic helpers are implemented in Nova, not the runtime.
+pub fn absolute_i64(value: i64) -> i64 {
+    if value < 0 { return -value; }
+    return value;
+}
+
+// Compile-time Integral<T> constraint. Never coerce a floating point value
+// into an integer overload implicitly.
+pub fn minimum<T: std::math::OrderedNumber>(left: T, right: T) -> T {
+    if left < right { return left; }
+    return right;
+}
+pub fn maximum<T: std::math::OrderedNumber>(left: T, right: T) -> T {
+    if left > right { return left; }
+    return right;
+}
+pub fn clamp<T: std::math::OrderedNumber>(value: T, minimum_value: T, maximum_value: T) -> T {
+    if value < minimum_value { return minimum_value; }
+    if value > maximum_value { return maximum_value; }
+    return value;
+}

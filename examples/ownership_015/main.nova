@@ -1,0 +1,26 @@
+// Ownership 0.15: implicit move + lexical borrow + automatic destruction.
+// This example intentionally avoids legacy consuming methods.
+class Resource { number: i32 }
+
+impl Resource {
+    fn drop(self: Resource) -> () {
+        // In a real resource owner this releases a file/socket/allocation.
+        return;
+    }
+}
+
+// The callee owns its Resource parameter and drops it at scope exit.
+fn inspect(resource: Resource) -> i32 {
+    return resource.number;
+}
+
+fn main() -> i32 {
+    let original = new Resource { number: 19 };
+    let transferred = original;   // implicit move, original invalid afterward
+    let answer = inspect(transferred);
+
+    let mut counter: i32 = answer;
+    let counter_reference: &mut i32 = &mut counter;
+    *counter_reference = *counter_reference + 23;
+    return *counter_reference - 42;
+}

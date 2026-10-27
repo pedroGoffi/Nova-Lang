@@ -1,0 +1,6 @@
+// Expected to terminate with panic exit code 101 (not a success test).
+#[derive(Deserialize)] struct User { id: u8 }
+fn main() -> i32 {
+    let user = User_from_json("{\"id\":256}");
+    return 0;
+}

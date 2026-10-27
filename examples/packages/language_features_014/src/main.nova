@@ -1,0 +1,36 @@
+struct Vector { value: i32 }
+impl std::ops::Add for Vector {
+    fn add(self: Vector, other: Vector) -> Vector {
+        return new Vector {value: self.value+other.value};
+    }
+}
+
+trait Scalar {
+    fn doubled(self: Self) -> Self { return self + self; }
+}
+impl Scalar for i32 {}
+
+fn calculate(base: i32, multiplier: i32 = 2, offset: i32 = 3) -> i32 {
+    return base * multiplier + offset;
+}
+
+fn main() -> i32 {
+    let first = new Vector {value: 12};
+    let second = new Vector {value: 7};
+    let added: Vector = first + second;
+    if added.value != 19 {return 7;}
+
+    // Normalized to calculate(5, 2, 9) before typechecking.
+    let result: i32 = calculate(5, offset: 9);
+    if result != 19 {return 1;}
+    if result.doubled() != 38 {return 2;}
+
+    let counter = std::atomic::create_i64(5);
+    let consistency: i32 = std::atomic::sequentially_consistent();
+    if counter.fetch_add(7, consistency) != 5 {return 3;}
+    if counter.load(consistency) != 12 {return 4;}
+    if !counter.compare_exchange(12, 42, consistency, std::atomic::acquire()) {return 5;}
+    if counter.load(consistency) != 42 {return 6;}
+    // Automatic Drop releases the atomic cell on scope exit.
+    return 0;
+}

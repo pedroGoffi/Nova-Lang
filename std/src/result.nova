@@ -1,0 +1,31 @@
+// Contract for result.nova: Result-like value exposing success and error state.
+pub concept Outcome<T> = has_method<T,is_ok> && has_method<T,is_err>;
+
+// Typed success/error outcome. No exception unwinding is implied.
+pub enum Result<T,E> { Ok(T), Err(E) }
+impl<T,E> Result<T,E> {
+    fn is_ok(self: Result<T,E>) -> bool {
+        match self {
+            Ok(value) => { return true; }
+            Err(error) => { return false; }
+        }
+    }
+    fn is_err(self: Result<T,E>) -> bool {
+        match self {
+            Ok(value) => { return false; }
+            Err(error) => { return true; }
+        }
+    }
+    fn unwrap_or(self: Result<T,E>, fallback: T) -> T {
+        match self {
+            Ok(value) => { return value; }
+            Err(error) => { return fallback; }
+        }
+    }
+    fn error_or(self: Result<T,E>, fallback: E) -> E {
+        match self {
+            Ok(value) => { return fallback; }
+            Err(error) => { return error; }
+        }
+    }
+}

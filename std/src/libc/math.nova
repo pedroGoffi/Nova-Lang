@@ -1,0 +1,22 @@
+// Contract for libc/math.nova: C double argument/result type used by libm.
+pub concept CDouble<T> = same_as<T,f64>;
+
+// <math.h> — doubles; clang link command may require -lm on some targets.
+[[unsafe]] pub extern fn sqrt(input_value: f64) -> f64;
+[[unsafe]] pub extern fn cbrt(input_value: f64) -> f64;
+[[unsafe]] pub extern fn sin(input_value: f64) -> f64;
+[[unsafe]] pub extern fn cos(input_value: f64) -> f64;
+[[unsafe]] pub extern fn tan(input_value: f64) -> f64;
+[[unsafe]] pub extern fn asin(input_value: f64) -> f64;
+[[unsafe]] pub extern fn acos(input_value: f64) -> f64;
+[[unsafe]] pub extern fn atan(input_value: f64) -> f64;
+[[unsafe]] pub extern fn atan2(other_value: f64, input_value: f64) -> f64;
+[[unsafe]] pub extern fn exp(input_value: f64) -> f64;
+[[unsafe]] pub extern fn log(input_value: f64) -> f64;
+[[unsafe]] pub extern fn log10(input_value: f64) -> f64;
+[[unsafe]] pub extern fn pow(base: f64, exponent: f64) -> f64;
+[[unsafe]] pub extern fn fabs(input_value: f64) -> f64;
+[[unsafe]] pub extern fn fmod(input_value: f64, other_value: f64) -> f64;
+[[unsafe]] pub extern fn ceil(input_value: f64) -> f64;
+[[unsafe]] pub extern fn floor(input_value: f64) -> f64;
+[[unsafe]] pub extern fn round(input_value: f64) -> f64;

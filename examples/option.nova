@@ -1,0 +1,26 @@
+enum Option<T> {
+    Some(T),
+    None
+}
+
+impl<T> Option<T> {
+    fn is_some(self: Option<T>) -> bool {
+        match self {
+            Some(value) => { return true; }
+            None => { return false; }
+        }
+    }
+}
+
+fn main() -> i32 {
+    let value: Option<i32> = Some(10);
+    let missing: Option<i32> = None;
+    if value.is_some() && !missing.is_some() {
+        match value {
+            Some(v) => { return v - 10; }
+            None => { return 1; }
+        }
+    } else {
+        return 2;
+    }
+}

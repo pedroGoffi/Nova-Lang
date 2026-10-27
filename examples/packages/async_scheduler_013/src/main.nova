@@ -1,0 +1,16 @@
+// Cooperative async task: coroutine suspension is implemented by the generic
+// runtime, while Task and Scheduler are normal Nova library structs.
+async fn compute(value: i64) -> i64 {
+    let pause: u64 = std::task::native_sleep_ms(1);
+    let waited: i64 = await pause;
+    dispose pause;
+    return value;
+}
+fn main() -> i32 {
+    let scheduler = std::task::new_scheduler();
+    let work = std::task::start(compute(42));
+    scheduler.run();
+    let answer: i64 = work.wait();
+    if answer == 42 {return 0;}
+    return 1;
+}

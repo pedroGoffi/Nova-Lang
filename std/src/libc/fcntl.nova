@@ -1,0 +1,11 @@
+// Contract for libc/fcntl.nova: POSIX file descriptor type.
+pub concept CDescriptor<T> = same_as<T,i32>;
+
+// <fcntl.h>, <sys/ioctl.h>, <unistd.h> variadic POSIX APIs.
+// The optional vararg type depends on flags/command/request: O_CREAT needs
+// mode_t (unsigned int); ioctl generally uses an integer or pointer.
+[[unsafe]] pub extern fn open(path: str, flags: i32, ...) -> i32;
+[[unsafe]] pub extern fn openat(directory_descriptor: i32, path: str, flags: i32, ...) -> i32;
+[[unsafe]] pub extern fn fcntl(descriptor: i32, command: i32, ...) -> i32;
+[[unsafe]] pub extern fn ioctl(descriptor: i32, request: u64, ...) -> i32;
+[[unsafe]] pub extern fn syscall(number: i64, ...) -> i64;

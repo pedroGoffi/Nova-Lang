@@ -1,0 +1,27 @@
+// Contract for libc/stdlib.nova: C allocator size_t parameter.
+pub concept CSize<T> = same_as<T,usize>;
+
+// <stdlib.h> — low-level allocation and conversion. Manual free required.
+[[unsafe]] pub extern fn malloc(size: usize) -> *mut u8;
+[[unsafe]] pub extern fn calloc(count: usize, size: usize) -> *mut u8;
+[[unsafe]] pub extern fn realloc(pointer: *mut u8, size: usize) -> *mut u8;
+[[unsafe]] pub extern fn free(pointer: *mut u8) -> ();
+[[unsafe]] pub extern fn atoi(text: str) -> i32;
+[[unsafe]] pub extern fn atol(text: str) -> i64;
+[[unsafe]] pub extern fn atoll(text: str) -> i64;
+[[unsafe]] pub extern fn strtol(text: str, endptr: *mut u8, base: i32) -> i64;
+[[unsafe]] pub extern fn strtoll(text: str, endptr: *mut u8, base: i32) -> i64;
+[[unsafe]] pub extern fn strtoul(text: str, endptr: *mut u8, base: i32) -> u64;
+[[unsafe]] pub extern fn strtoull(text: str, endptr: *mut u8, base: i32) -> u64;
+[[unsafe]] pub extern fn strtod(text: str, endptr: *mut u8) -> f64;
+[[unsafe]] pub extern fn getenv(name: str) -> *const u8;
+[[unsafe]] pub extern fn setenv(name: str, value: str, overwrite: i32) -> i32;
+[[unsafe]] pub extern fn unsetenv(name: str) -> i32;
+[[unsafe]] pub extern fn rand() -> i32;
+[[unsafe]] pub extern fn srand(seed: u32) -> ();
+[[unsafe]] pub extern fn abs(value: i32) -> i32;
+[[unsafe]] pub extern fn labs(value: i64) -> i64;
+[[unsafe]] pub extern fn llabs(value: i64) -> i64;
+[[unsafe]] pub extern fn system(command: str) -> i32;
+[[unsafe]] pub extern fn exit(code: i32) -> ();
+[[unsafe]] pub extern fn abort() -> ();

@@ -1,0 +1,30 @@
+import std;
+
+// Ordered AST matcher arms, just like the declarative subset of macro_rules!.
+macro_rules! double {
+    ($value:expr) => $value + $value;
+}
+macro_rules! collect {
+    ($($value:expr),*) => [$($value),*];
+}
+macro_rules! print_all {
+    ($($message:expr),+) => {
+        $(std::io::println($message);)*
+    };
+}
+macro_rules! guarded_check {
+    ($condition:expr) => {
+        // This binding is hygienically generated in every invocation.
+        let expected = $condition;
+        if !expected { return 1; }
+    };
+}
+
+fn main() -> i32 {
+    let expected = 42;
+    let values = collect!(10, 20, 12);
+    guarded_check!(double!(values[1]) == 40);
+    guarded_check!(expected == 42);
+    print_all!("Nova macro_rules AST:", "matching + repetition + hygiene: OK");
+    return 0;
+}

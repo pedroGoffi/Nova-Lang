@@ -1,0 +1,128 @@
+// Contract for string.nova: Can expose a borrowed UTF-8 view.
+pub concept StringView<T> = requires(T value) { { value.as_str() } -> str; };
+
+// Nova STD string — compiled with the builtin runtime.
+extern fn native_string_create_from_text(text: str) -> u64;
+extern fn native_string_create_empty() -> u64;
+extern fn native_string_clone(handle: u64) -> u64;
+extern fn native_string_destroy(handle: u64) -> ();
+extern fn native_len(handle: u64) -> u64;
+extern fn native_capacity(handle: u64) -> u64;
+extern fn native_chars(handle: u64) -> u64;
+extern fn native_reserve(handle: u64, capacity: u64) -> ();
+extern fn native_push(handle: u64, text: str) -> ();
+extern fn native_concat(dest: u64, source: u64) -> ();
+extern fn native_clear(handle: u64) -> ();
+extern fn native_equals(handle: u64, text: str) -> bool;
+extern fn native_contains(handle: u64, text: str) -> bool;
+extern fn native_substring(handle: u64, start: u64, byte_count: u64) -> u64;
+extern fn native_print(handle: u64) -> ();
+extern fn native_println(handle: u64) -> ();
+extern fn native_append_i64(handle: u64, value: i64) -> ();
+
+// Typed, chainable append primitives for compile-time checked `format!`.
+// Every function mutates the same managed String and returns its handle.
+// Only the Nova compiler's format AST expansion should call these directly.
+extern fn native_format_append_text(handle: u64, text: str) -> u64;
+extern fn native_format_append_debug_str(handle: u64, text: str) -> u64;
+extern fn native_format_append_bool(handle: u64, value: bool) -> u64;
+extern fn native_format_append_i64(handle: u64, value: i64) -> u64;
+extern fn native_format_append_u64(handle: u64, value: u64) -> u64;
+extern fn native_format_append_f64(handle: u64, value: f64, precision: i32) -> u64;
+
+// Borrowed NUL-terminated UTF-8 view of a managed String.
+// Do not retain it after push/concat/clear/drop on the owning String.
+extern fn native_string_borrow_text(handle: u64) -> str;
+
+// Byte-oriented primitives needed for bootstrap parsing. Bounds-checked C
+// runtime intrinsics; source indexing and token recognition stay in Nova.
+extern fn native_byte_at(handle: u64, offset: i64) -> i32;
+extern fn native_span_equals(handle: u64, start: i64, length: i64, value: str) -> bool;
+extern fn native_byte_len(handle: u64) -> i64;
+
+// strlen for a borrowed, NUL-terminated `str` argument, NOT a String handle.
+// For an owned String handle, continue to use std::string::native_len(handle).
+extern fn native_text_length(text: str) -> u64;
+
+// Print a byte span of an owned String without copying it. For compiler
+// diagnostics: byte offsets from lexer's source positions, bounds-checked.
+extern fn native_print_span(handle: u64, start: i64, count: i64) -> ();
+
+// Owned String value. The raw handle functions above remain for backward
+// compatibility with stage-0 selfhosting, but new code should use this struct.
+pub struct String { handle: u64 }
+
+pub fn from_text(text: str) -> String {
+    return new String { handle: std::string::native_string_create_from_text(text) };
+}
+pub fn new_string() -> String {
+    return new String { handle: std::string::native_string_create_empty() };
+}
+impl String {
+    fn len(self: &String) -> u64 { return std::string::native_len(self.handle); }
+    fn capacity(self: &String) -> u64 { return std::string::native_capacity(self.handle); }
+    fn as_str(self: &String) -> str { return std::string::native_string_borrow_text(self.handle); }
+    fn to_string(self: &String) -> str { return self.as_str(); }
+    fn push(self: &String, text: str) -> () {
+        std::string::native_push(self.handle,text);
+        return;
+    }
+    fn clear(self: &String) -> () {
+        std::string::native_clear(self.handle);
+        return;
+    }
+    fn reserve(self: &String, capacity: u64) -> () {
+        std::string::native_reserve(self.handle,capacity);
+        return;
+    }
+    fn append_i64(self: &String, value: i64) -> () {
+        std::string::native_append_i64(self.handle,value);
+        return;
+    }
+    fn contains(self: &String, text: str) -> bool {
+        return std::string::native_contains(self.handle, text);
+    }
+    fn println(self: &String) -> () {
+        std::string::native_println(self.handle);
+        return;
+    }
+    fn clone(self: &String) -> String {
+        return new String { handle: std::string::native_string_clone(self.handle) };
+    }
+    fn drop(self: String) -> () {
+        std::string::native_string_destroy(self.handle);
+        return;
+    }
+}
+
+// Borrowed convenience APIs: read-only operations retain ownership of the source.
+pub fn copy_of(value: &String) -> String { return value.clone(); }
+pub fn slice(value: &String, start: u64, byte_count: u64) -> String {
+    return new String { handle: native_substring(value.handle,start,byte_count) };
+}
+impl String {
+    fn is_empty(self: &String) -> bool { return self.len() == 0; }
+    fn equals(self: &String, other: str) -> bool { return std::string::native_equals(self.handle, other); }
+    fn byte_length(self: &String) -> i64 { return std::string::native_byte_len(self.handle); }
+    fn byte_at(self: &String, byte_index: i64) -> i32 { return std::string::native_byte_at(self.handle,byte_index); }
+    fn slice(self: &String, first_byte: u64, byte_count: u64) -> String {
+        return new String { handle: std::string::native_substring(self.handle, first_byte,byte_count) };
+    }
+}
+
+// Stringable is checked at specialization, so a numeric value with no
+// `.to_string() -> str` is rejected instead of guessed or cast to a pointer.
+pub fn from_stringable<T: std::concepts::Stringable>(value: T) -> String {
+    return from_text(value.to_string());
+}
+
+// Formatter adapters for temporary owned Strings. The language deliberately
+// does not implicitly borrow an rvalue receiver: passing by value to a named
+// parameter keeps its UTF-8 view alive for the native append, then lets RAII
+// destroy the temporary exactly once when this helper returns.
+pub fn format_append_owned_text(handle: u64, value: String) -> u64 {
+    return native_format_append_text(handle, value.to_string());
+}
+pub fn format_append_owned_debug(handle: u64, value: String) -> u64 {
+    return native_format_append_debug_str(handle, value.to_string());
+}

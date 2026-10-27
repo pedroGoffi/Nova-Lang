@@ -1,0 +1,69 @@
+// HTTP response writer; no descriptor ownership is transferred to Response.
+// Numeric status arguments are validated at compile time by a concept.
+pub concept StatusInteger<T> = integer<T>;
+
+pub fn normalize_status<T: StatusInteger>(code: T) -> i32 {
+    let value: i64 = code as i64;
+    if value < 100 || value > 599 { return 500; }
+    return value as i32;
+}
+
+pub struct Response {
+    descriptor: i32,
+    status_code: i32,
+    content_type: str
+}
+
+[[pure]] pub fn reason(status_code: i32) -> str {
+    if status_code == 200 { return "OK"; }
+    if status_code == 201 { return "Created"; }
+    if status_code == 202 { return "Accepted"; }
+    if status_code == 204 { return "No Content"; }
+    if status_code == 301 { return "Moved Permanently"; }
+    if status_code == 302 { return "Found"; }
+    if status_code == 304 { return "Not Modified"; }
+    if status_code == 400 { return "Bad Request"; }
+    if status_code == 401 { return "Unauthorized"; }
+    if status_code == 403 { return "Forbidden"; }
+    if status_code == 404 { return "Not Found"; }
+    if status_code == 405 { return "Method Not Allowed"; }
+    if status_code == 409 { return "Conflict"; }
+    if status_code == 413 { return "Content Too Large"; }
+    if status_code == 422 { return "Unprocessable Content"; }
+    if status_code == 429 { return "Too Many Requests"; }
+    if status_code == 500 { return "Internal Server Error"; }
+    if status_code == 503 { return "Service Unavailable"; }
+    return "Unknown";
+}
+
+pub fn send_raw(descriptor: i32, status_code: i32, mime: str, body: str) -> i32 {
+    let response_text: std::string::String = std::string::from_text("HTTP/1.1 ");
+    response_text.append_i64(status_code as i64);
+    response_text.push(" ");
+    response_text.push(reason(status_code));
+    response_text.push("\r\nContent-Type: ");
+    response_text.push(mime);
+    response_text.push("\r\nContent-Length: ");
+    let body_length: u64 = std::string::native_text_length(body);
+    if status_code == 204 || status_code == 304 { response_text.append_i64(0); }
+    else { response_text.append_i64(body_length as i64); }
+    response_text.push("\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\n\r\n");
+    if std::net::native_tcp_write(descriptor,response_text.as_str()) < 0 { return -1; }
+    if status_code != 204 && status_code != 304 && std::net::native_tcp_write(descriptor,body) < 0 {
+        return -1;
+    }
+    return 0;
+}
+
+impl Response {
+    fn status(self: Response, status_code: i32) -> Response {
+        return new Response {descriptor:self.descriptor,status_code:normalize_status(status_code),content_type:self.content_type};
+    }
+    fn type(self: Response, mime: str) -> Response {
+        return new Response {descriptor:self.descriptor,status_code:self.status_code,content_type:mime};
+    }
+    fn send(self: Response, body: str) -> i32 {return send_raw(self.descriptor,self.status_code,self.content_type,body);}
+    fn text(self: Response, body: str) -> i32 {return send_raw(self.descriptor,self.status_code,"text/plain; charset=utf-8",body);}
+    fn html(self: Response, body: str) -> i32 {return send_raw(self.descriptor,self.status_code,"text/html; charset=utf-8",body);}
+    fn json(self: Response, body: str) -> i32 {return send_raw(self.descriptor,self.status_code,"application/json; charset=utf-8",body);}
+}

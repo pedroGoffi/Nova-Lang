@@ -1,0 +1,12 @@
+mod string_example;
+mod utils;
+
+use string_example::hello;
+use utils::format::double;
+use std::io::println;
+
+fn main() -> i32 {
+    hello();
+    println("Modules loaded successfully");
+    return double(21) - 42;
+}

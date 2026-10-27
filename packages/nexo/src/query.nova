@@ -1,0 +1,25 @@
+// Read a query parameter into an owned std::string::String.
+pub fn query_value(query: str, key: str) -> std::string::String {
+    let text: std::string::String = std::string::from_text(query);
+    let length: i64 = text.byte_length();
+    let mut pair_start: i64 = 0;
+    while pair_start < length {
+        let mut equals_offset: i64 = pair_start;
+        while equals_offset < length && text.byte_at(equals_offset) != 61 && text.byte_at(equals_offset) != 38 {
+            equals_offset += 1;
+        }
+        let mut pair_end: i64 = equals_offset;
+        if equals_offset < length && text.byte_at(equals_offset) == 61 {
+            pair_end += 1;
+            while pair_end < length && text.byte_at(pair_end) != 38 { pair_end += 1; }
+        }
+        if std::string::native_span_equals(text.handle, pair_start, equals_offset-pair_start, key) {
+            if equals_offset < pair_end {
+                return text.slice((equals_offset+1) as u64, (pair_end-equals_offset-1) as u64);
+            }
+            return std::string::new_string();
+        }
+        pair_start = pair_end + 1;
+    }
+    return std::string::new_string();
+}

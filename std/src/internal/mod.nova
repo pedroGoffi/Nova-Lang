@@ -1,0 +1,5 @@
+// Contract for internal/mod.nova: Native signed machine word accepted by the internal map ABI.
+pub concept NativeWord<T> = same_as<T,i64>;
+
+// Compiler-sealed runtime bindings. Not an application API.
+pub mod map;

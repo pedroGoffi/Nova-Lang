@@ -1,0 +1,177 @@
+// Stage-1 syntax bootstrap. Compile this package with the Rust Nova compiler.
+// Usage: NOVA_SOURCE=examples/hello.nova ./nova-selfhost
+//        NOVA_DUMP_AST=1 NOVA_SOURCE=... ./nova-selfhost
+pub mod lexer;
+mod parser;
+
+fn emit_nodes(p: parser::Parser) -> () {
+    let first: i64 = 1;
+    let zero: i64 = 0;
+    let one: i64 = 1;
+    for id in first..parser::node_count(p) + one {
+        std::io::native_print("node ");
+        std::io::native_print_i64(id);
+        std::io::native_print(" kind=");
+        std::io::native_print_i64(parser::node_kind(p,id));
+        std::io::native_print(" tokens=");
+        std::io::native_print_i64(parser::node_start(p,id));
+        std::io::native_print("..");
+        std::io::native_print_i64(parser::node_end(p,id));
+        std::io::native_print(" children=");
+        for i in zero..parser::node_child_count(p,id) {
+            if i != 0 { std::io::native_print(","); }
+            std::io::native_print_i64(parser::node_child(p,id,i));
+        }
+        std::io::native_println("");
+    }
+    return;
+}
+// Stable numeric CST exchange protocol for stage-1 comparisons.
+// Every node references token IDs and ordered child IDs, so the source bytes
+ // need not be escaped or duplicated. Format is documented in docs/CST-V1.md.
+fn write_cst(p: parser::Parser, scan: lexer::Scan, target: str, root: i64) -> bool {
+    let zero: i64 = 0;
+    let one: i64 = 1;
+    let five: i64 = 5;
+    let buffer: u64 = std::builder::native_create();
+    std::builder::native_append(buffer,"NOVA-CST-V1\n");
+    std::builder::native_append(buffer,"TOKENS ");
+    std::builder::native_append_i64(buffer,lexer::count(scan));
+    std::builder::native_append(buffer,"\n");
+    for i in zero..lexer::count(scan) {
+        std::builder::native_append(buffer,"T ");
+        std::builder::native_append_i64(buffer,i);
+        for field in zero..five {
+            std::builder::native_append(buffer," ");
+            std::builder::native_append_i64(buffer,lexer::cell(scan,i,field));
+        }
+        std::builder::native_append(buffer,"\n");
+    }
+    std::builder::native_append(buffer,"NODES ");
+    std::builder::native_append_i64(buffer,parser::node_count(p));
+    std::builder::native_append(buffer,"\n");
+    for id in one..parser::node_count(p) + one {
+        std::builder::native_append(buffer,"N ");
+        std::builder::native_append_i64(buffer,id);
+        std::builder::native_append(buffer," ");
+        std::builder::native_append_i64(buffer,parser::node_kind(p,id));
+        std::builder::native_append(buffer," ");
+        std::builder::native_append_i64(buffer,parser::node_start(p,id));
+        std::builder::native_append(buffer," ");
+        std::builder::native_append_i64(buffer,parser::node_end(p,id));
+        std::builder::native_append(buffer," ");
+        std::builder::native_append_i64(buffer,parser::node_child_count(p,id));
+        for i in zero..parser::node_child_count(p,id) {
+            std::builder::native_append(buffer," ");
+            std::builder::native_append_i64(buffer,parser::node_child(p,id,i));
+        }
+        std::builder::native_append(buffer,"\n");
+    }
+    std::builder::native_append(buffer,"ROOT ");
+    std::builder::native_append_i64(buffer,root);
+    std::builder::native_append(buffer,"\n");
+    let serialized: u64 = std::builder::native_finish(buffer);
+    let ok: bool = std::fs::native_write_text(target,std::string::native_string_borrow_text(serialized));
+    std::string::native_string_destroy(serialized);
+    return ok;
+}
+
+fn error_label(code: i64) -> str {
+    if code == 1 { return "expected identifier"; }
+    if code == 2 { return "expected expression"; }
+    if code == 3 { return "expected integer array size"; }
+    if code == 4 { return "expected item declaration"; }
+    if code == 5 { return "assignment requires a simple variable"; }
+    if code == 6 { return "unexpected token or missing delimiter"; }
+    if code == 7 { return "invalid lexical token"; }
+    if code == 8 { return "attributes are supported only on structs and enums"; }
+    return "unknown syntax error";
+}
+
+// A source-positioned diagnostic from the parser written in Nova itself.
+// The trace shows the actual pipeline entry points, not fictional runtime frames.
+fn print_error(p: parser::Parser, scan: lexer::Scan, input: u64, source: u64) -> () {
+    let token: i64 = parser::error_token(p);
+    let start: i64 = lexer::cell(scan,token,1);
+    let line: i64 = lexer::cell(scan,token,3);
+    let column: i64 = lexer::cell(scan,token,4);
+    std::io::native_print("error[NOVA-SELFHOST-P001]: ");
+    std::io::native_println(error_label(parser::error_code(p)));
+    std::io::native_print("  --> ");
+    std::string::native_print(input);
+    std::io::native_print(":");
+    std::io::native_print_i64(line);
+    std::io::native_print(":");
+    std::io::native_println_i64(column);
+    let mut begin: i64 = start;
+    while begin > 0 && std::string::native_byte_at(source,begin - 1) != 10 { begin -= 1; }
+    let mut end: i64 = start;
+    let length: i64 = std::string::native_byte_len(source);
+    while end < length && std::string::native_byte_at(source,end) != 10 { end += 1; }
+    std::io::native_print("   |\n");
+    std::io::native_print_i64(line);
+    std::io::native_print(" | ");
+    std::string::native_print_span(source,begin,end - begin);
+    std::io::native_println("");
+    std::io::native_print("   | ");
+    let mut pad: i64 = 1;
+    while pad < column && pad < 200 { std::io::native_print(" "); pad += 1; }
+    std::io::native_println("^");
+    std::io::native_println("  = package: nova_selfhost (selfhost/Nova.toml)");
+    std::io::native_println("  = phase: self-hosted syntax analysis");
+    std::io::native_println("  = pipeline: main -> lexer::scan -> parser::parse_program");
+    std::io::native_println("  = note: pipeline context is not a runtime stack trace");
+    return;
+}
+fn main() -> i32 {
+    let input: u64 = std::env::native_get("NOVA_SOURCE");
+    if std::string::native_equals(input,"") {
+        std::io::native_println("Usage: NOVA_SOURCE=path/file.nova ./nova-selfhost");
+        std::string::native_string_destroy(input);
+        return 2;
+    }
+    if !std::fs::native_exists(std::string::native_string_borrow_text(input)) {
+        std::io::native_println("error[NOVA-SELFHOST]: source file not found");
+        std::string::native_string_destroy(input);
+        return 2;
+    }
+    let source: u64 = std::fs::native_read_text(std::string::native_string_borrow_text(input));
+    let tokens: lexer::Scan = lexer::scan(source);
+    let p: parser::Parser = parser::create(tokens);
+    let root: i64 = parser::parse_program(p);
+    if parser::failed(p) || root == 0 {
+        print_error(p,tokens,input,source);
+        parser::drop(p);
+        lexer::drop(tokens);
+        std::string::native_string_destroy(source);
+        std::string::native_string_destroy(input);
+        return 1;
+    }
+    std::io::native_print("OK ");
+    std::string::native_print(input);
+    std::io::native_print(" tokens=");
+    std::io::native_print_i64(lexer::count(tokens));
+    std::io::native_print(" nodes=");
+    std::io::native_println_i64(parser::node_count(p));
+    let output: u64 = std::env::native_get("NOVA_CST_PATH");
+    if !std::string::native_equals(output,"") {
+        if !write_cst(p,tokens,std::string::native_string_borrow_text(output),root) {
+            std::io::native_println("error[NOVA-SELFHOST]: cannot write CST file");
+            std::string::native_string_destroy(output);
+            parser::drop(p);
+            lexer::drop(tokens);
+            std::string::native_string_destroy(source);
+            std::string::native_string_destroy(input);
+            return 3;
+        }
+    }
+    std::string::native_string_destroy(output);
+    let flag: u64 = std::env::native_get("NOVA_DUMP_AST");
+    if std::string::native_equals(flag,"1") { emit_nodes(p); }
+    std::string::native_string_destroy(flag);
+    parser::drop(p);
+    lexer::drop(tokens);
+    std::string::native_string_destroy(source);
+    std::string::native_string_destroy(input);
+    return 0;
+}

@@ -1,0 +1,18 @@
+// STL-like entry points. Generic map = Map<K,V> (both integral until the
+// compiler gains arbitrary-element relocation/drop). `string_map` provides
+// hash maps with owned UTF-8 keys and integral values.
+
+pub fn vector<T: std::concepts::Integral>() -> std::vec::Vec<T> {
+    return std::vec::new_vec::<T>();
+}
+pub fn map<K: std::concepts::WordKey,V: std::concepts::WordValue>() -> std::map::Map<K,V> {
+    return std::map::new_map::<K,V>();
+}
+pub fn string_map<V: std::concepts::WordValue>() -> std::map::StringMap<V> {
+    return std::map::new_string_map::<V>();
+}
+pub fn set<T: std::concepts::WordKey>() -> std::set::Set<T> {
+    return std::set::new_set::<T>();
+}
+pub fn string_set() -> std::set::StringSet { return std::set::new_string_set(); }
+pub fn strings() -> std::vec::StringVector {return std::vec::new_string_vector();}

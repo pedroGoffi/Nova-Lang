@@ -1,0 +1,8 @@
+fn main() -> i32 {
+    let mut value: i32 = 31;
+    unsafe {
+        let pointer: *mut i32 = &mut value;
+        let result: i32 = *pointer;
+        if result == 31 { return 0; } else { return 1; }
+    }
+}

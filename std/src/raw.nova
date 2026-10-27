@@ -1,0 +1,35 @@
+// Contract for raw.nova: Explicit raw pointer participating in unsafe allocation.
+pub concept RawPointer<T> = pointer<T>;
+
+// Nova STD raw — compiled with the builtin runtime.
+[[unsafe]] extern fn native_allocate(size: u64, alignment: u64) -> *mut u8;
+[[unsafe]] extern fn native_deallocate(pointer: *mut u8) -> ();
+[[unsafe]] extern fn native_reallocate(pointer: *mut u8, previous_size: u64, requested_size: u64, alignment: u64) -> *mut u8;
+
+
+// Low-level memory owner for FFI. Do not copy owning instances.
+// Use only with unsafe operations; free runs when this owner leaves scope.
+pub struct Allocation { pointer: *mut u8 }
+pub fn allocate(byte_count: u64, alignment: u64) -> Allocation {
+    unsafe { return new Allocation { pointer: native_allocate(byte_count,alignment) }; }
+}
+impl Allocation {
+    fn drop(self: Allocation) -> () {
+        unsafe { std::raw::native_deallocate(self.pointer); }
+        return;
+    }
+}
+
+// Target-aware, explicitly unsafe record allocation. Calling code must
+// initialize fields before reads and release exactly once.
+// size_of/align_of are compile-time intrinsics;
+// allocation and release remain generic memory operations at runtime.
+[[unsafe]] pub fn alloc_record<T>() -> *mut T {
+    unsafe {
+        return std::raw::native_allocate(std::raw::size_of::<T>(), std::raw::align_of::<T>()) as (*mut T);
+    }
+}
+[[unsafe]] pub fn free_record<T>(record: *mut T) -> () {
+    unsafe { std::raw::native_deallocate(record as (*mut u8)); }
+    return;
+}

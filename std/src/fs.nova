@@ -1,0 +1,20 @@
+// Contract for fs.nova: Owned text exposing UTF-8 content for filesystem operations.
+pub concept FileContent<T> = requires(T value) { { value.as_str() } -> str; };
+
+// Nova STD fs — compiled with the builtin runtime.
+extern fn native_exists(path: str) -> bool;
+extern fn native_write_text(path: str, text: str) -> bool;
+    // Returns an owned String handle. Caller must std::string::native_string_destroy(handle).
+extern fn native_read_text(path: str) -> u64;
+
+
+// Filesystem convenience functions return managed values rather than handles.
+pub fn read_string(path: str) -> std::string::String {
+    return new std::string::String { handle: native_read_text(path) };
+}
+pub fn save_string(path: str, content: &std::string::String) -> bool {
+    return native_write_text(path, content.as_str());
+}
+
+pub fn exists(path: str) -> bool {return native_exists(path);}
+pub fn write_text(path: str, text: str) -> bool {return native_write_text(path,text);}

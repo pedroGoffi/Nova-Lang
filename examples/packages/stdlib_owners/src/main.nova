@@ -1,0 +1,31 @@
+// Resource cleanup is implemented by owner structs in the Nova standard library.
+fn main() -> i32 {
+    let message: std::string::String = std::string::from_text("Nova stdlib");
+    if message.len() != 11 { return 1; }
+
+    let output: std::builder::StringBuilder = std::builder::make();
+    output.append("request #");
+    output.append_i64(42);
+    let snapshot: std::string::String = output.to_string();
+    if !snapshot.equals("request #42") { return 2; }
+
+    let integers: std::vec::Int64Vector = std::vec::new_int64_vector();
+    integers.append(20);
+    integers.append(22);
+    if integers.get(0) + integers.get(1) != 42 { return 3; }
+
+    let symbols: std::map::StringInt64Map = std::map::new_string_int64_map();
+    symbols.insert("answer",42);
+    if symbols.get_or("answer",0) != 42 { return 4; }
+
+    let buffer: std::memory::ByteBuffer = std::memory::new_buffer(4);
+    buffer.write(0,78);
+    if buffer.read(0) != 78 { return 5; }
+
+    let arena: std::arena::Arena = std::arena::new(128);
+    let arena_buffer: u64 = arena.allocate(4);
+    std::memory::native_buffer_write(arena_buffer,0,78);
+    if std::memory::native_buffer_read(arena_buffer,0) != 78 { return 6; }
+    unsafe { arena.clear(); }
+    return 0;
+}

@@ -1,0 +1,7 @@
+// Must fail with NOVA-MAC020: a floating-point argument is not `integer`.
+concept Whole<T> = integer<T>;
+macro_rules! checked { ($value:expr where Whole) => $value; }
+fn main() -> i32 {
+    let wrong: f64 = 3.5;
+    return checked!(wrong) as i32;
+}

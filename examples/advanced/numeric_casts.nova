@@ -1,0 +1,11 @@
+fn main() -> i32 {
+    auto a = 12;                 // i32
+    let b: i64 = 30;            // i64
+    auto total = a + b;         // auto-promotes i32 to i64
+    let u: u32 = 2;
+    auto safe_mix = a + u;      // auto-promotes to i64
+    auto floating = a + 0.5; // numeric float widening
+    let narrow: i32 = floating as i32;
+    let result = narrow + (safe_mix as i32);
+    return result - 26;
+}

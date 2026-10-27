@@ -1,0 +1,11 @@
+fn main() -> i32 {
+    let mut counter: i32 = 0;
+    for row in 0..4 {
+        for col in 0..4 {
+            if col == 2 { continue; }
+            if row == 3 { break; }
+            counter += 1;
+        }
+    }
+    return counter - 9;
+}

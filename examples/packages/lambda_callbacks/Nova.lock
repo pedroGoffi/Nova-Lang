@@ -1,0 +1,4 @@
+# Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
+lambda_callbacks 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/lambda_callbacks hash=9109bbeb631afe7e
+std 0.20.0 builtin hash=e9fbac7494a68486
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/lambda_callbacks/src/main.nova hash=9109bbeb631afe7e

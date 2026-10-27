@@ -1,0 +1,60 @@
+// Contract for net.nova: Network object holding a socket descriptor.
+pub concept NetworkEndpoint<T> = has_field<T,descriptor>;
+
+// Protocol-neutral, loopback-only, nonblocking TCP primitives.
+// tcp_accept / tcp_read return -2 for a would-block operation.
+extern fn native_tcp_listen(port: u64) -> i32;
+extern fn native_tcp_accept(descriptor: i32) -> i32;
+extern fn native_tcp_read(descriptor: i32, destination_string_handle: u64, maximum_bytes: u64) -> i64;
+extern fn native_tcp_write(descriptor: i32, content: str) -> i64;
+[[unsafe]] extern fn native_tcp_close(descriptor: i32) -> ();
+
+
+// TCP owns a descriptor; never close the same descriptor twice.
+// Nonblocking calls return -2 on would-block, otherwise a byte count or fd.
+pub struct TcpListener { descriptor: i32 }
+pub struct TcpConnection { descriptor: i32 }
+
+pub fn listen_loopback(port: u64) -> TcpListener {
+    return new TcpListener { descriptor: native_tcp_listen(port) };
+}
+// Adopt ownership of an existing descriptor exactly once. Passing a borrowed
+// descriptor or creating two owners would close a live socket prematurely.
+[[unsafe]] pub fn from_descriptor(descriptor: i32) -> TcpConnection {
+    return new TcpConnection { descriptor:descriptor };
+}
+impl TcpListener {
+    fn is_valid(self: &TcpListener) -> bool { return self.descriptor >= 0; }
+    // The returned owner is unique. A negative descriptor is a non-owning
+    // error/would-block sentinel; drop only closes valid descriptors.
+    fn accept(self: &TcpListener) -> TcpConnection {
+        return new TcpConnection { descriptor: native_tcp_accept(self.descriptor) };
+    }
+    // Bootstrap compatibility: callers must explicitly adopt raw fds via
+    // [[unsafe]] from_descriptor rather than making duplicate owners.
+    fn accept_descriptor(self: &TcpListener) -> i32 { return native_tcp_accept(self.descriptor); }
+    fn drop(self: TcpListener) -> () {
+        if self.descriptor >= 0 { unsafe { native_tcp_close(self.descriptor); } }
+        return;
+    }
+}
+impl TcpConnection {
+    fn is_valid(self: &TcpConnection) -> bool { return self.descriptor >= 0; }
+    fn descriptor_number(self: &TcpConnection) -> i32 { return self.descriptor; }
+    fn receive(self: &TcpConnection, buffer: &mut std::string::String, max_bytes: u64) -> i64 {
+        return native_tcp_read(self.descriptor,buffer.handle,max_bytes);
+    }
+    fn write(self: &TcpConnection, content: str) -> i64 { return native_tcp_write(self.descriptor,content); }
+    fn drop(self: TcpConnection) -> () {
+        if self.descriptor >= 0 { unsafe { native_tcp_close(self.descriptor); } }
+        return;
+    }
+}
+
+// The native listener constructor may return an invalid descriptor. The
+// checked variant expresses this as an Option instead of leaking a sentinel.
+pub fn try_listen_loopback(port: u64) -> std::option::Option<TcpListener> {
+    let descriptor: i32 = native_tcp_listen(port);
+    if descriptor < 0 { return None; }
+    return Some(new TcpListener { descriptor: descriptor });
+}

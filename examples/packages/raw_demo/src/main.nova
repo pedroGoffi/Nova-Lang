@@ -1,0 +1,7 @@
+fn main() -> i32 {
+    unsafe {
+        let pointer: *mut u8 = std::raw::native_allocate(64, 16);
+        std::raw::native_deallocate(pointer);
+    }
+    return 0;
+}

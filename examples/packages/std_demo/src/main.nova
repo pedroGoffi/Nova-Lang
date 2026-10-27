@@ -1,0 +1,34 @@
+mod string_example;
+use string_example::sample;
+
+fn main() -> i32 {
+    if sample() != 0 { return 9; }
+    let builder: u64 = std::builder::native_with_capacity(32);
+    std::builder::native_append(builder, "Nova STD: ");
+    std::builder::native_append_i64(builder, 500);
+    std::builder::native_append_bool(builder, true);
+    let message: u64 = std::builder::native_finish(builder);
+    std::string::native_println(message);
+    if !std::string::native_contains(message, "500") { return 1; }
+    if std::string::native_len(message) != 17 { return 2; }
+    let duplicate: u64 = std::string::native_string_clone(message);
+    std::string::native_string_destroy(message);
+    std::string::native_string_destroy(duplicate);
+
+    let numbers: u64 = std::vec::native_int64_vector_create();
+    std::vec::native_int64_vector_append(numbers, 11);
+    std::vec::native_int64_vector_append(numbers, 31);
+    let sum: i64 = std::vec::native_int64_vector_get(numbers, 0) + std::vec::native_int64_vector_pop(numbers);
+    std::vec::native_int64_vector_destroy(numbers);
+    if sum != 42 { return 3; }
+
+    let arena: u64 = std::arena::native_create(1024);
+    let buffer: u64 = std::arena::native_alloc(arena, 4);
+    std::memory::native_buffer_write(buffer, 0, 78);
+    if std::memory::native_buffer_read(buffer, 0) != 78 { return 4; }
+    std::arena::native_reset(arena);
+    std::arena::native_drop(arena);
+    if std::memory::native_live_resources() != 0 { return 5; }
+    std::io::native_println("Nova memory MVP OK");
+    return 0;
+}

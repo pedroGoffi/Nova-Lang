@@ -1,0 +1,16 @@
+// Contract for libc/ctype.nova: C character classification argument (int or EOF).
+pub concept CCharacter<T> = same_as<T,i32>;
+
+// <ctype.h> — input is EOF (-1) or unsigned char value (0..255).
+[[unsafe]] pub extern fn isalpha(character: i32) -> i32;
+[[unsafe]] pub extern fn isdigit(character: i32) -> i32;
+[[unsafe]] pub extern fn isalnum(character: i32) -> i32;
+[[unsafe]] pub extern fn isspace(character: i32) -> i32;
+[[unsafe]] pub extern fn isupper(character: i32) -> i32;
+[[unsafe]] pub extern fn islower(character: i32) -> i32;
+[[unsafe]] pub extern fn isprint(character: i32) -> i32;
+[[unsafe]] pub extern fn ispunct(character: i32) -> i32;
+[[unsafe]] pub extern fn isxdigit(character: i32) -> i32;
+[[unsafe]] pub extern fn iscntrl(character: i32) -> i32;
+[[unsafe]] pub extern fn toupper(character: i32) -> i32;
+[[unsafe]] pub extern fn tolower(character: i32) -> i32;

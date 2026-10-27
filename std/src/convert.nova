@@ -1,0 +1,21 @@
+// Contract for convert.nova: Signed integer convertible into an i64 decimal representation.
+pub concept DecimalInteger<T> = signed<T>;
+
+// Nova STD convert — compiled with the builtin runtime.
+extern fn native_i64_to_string(value: i64) -> u64;
+extern fn native_parse_i64_or(text: str, fallback: i64) -> i64;
+
+
+// String ownership stays explicit: returned String cleans itself up on exit.
+pub fn format_i64(value: i64) -> std::string::String {
+    return new std::string::String { handle: native_i64_to_string(value) };
+}
+pub fn parse_or(text: str, fallback: i64) -> i64 {
+    return native_parse_i64_or(text, fallback);
+}
+
+// Signed integers convert to i64 without truncation; unlike a generic
+// numeric cast this contract excludes u64 > INT64_MAX and float values.
+pub fn stringify<T: std::convert::DecimalInteger>(value: T) -> std::string::String {
+    return format_i64(value as i64);
+}

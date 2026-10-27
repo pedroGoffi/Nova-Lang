@@ -1,0 +1,21 @@
+// A no-network integration example for the modular Nexo package.
+// Concepts, derives, typed configs, borrowed strings, and HTTP framing.
+static_assert(nexo::response::StatusInteger<i32>);
+
+fn main() -> i32 {
+    let config: nexo::config::ServerConfig = nexo::config::defaults(7888);
+    let app: nexo::app::App = nexo::app::from_config(&config) defer app.close();
+
+    let text: std::string::String = std::string::from_text("POST /echo HTTP/1.1\r\ncontent-length: 4\r\nHost: localhost\r\n\r\ntest");
+    let end: i64 = nexo::headers::header_end(&text);
+    if end < 0 { return 1; }
+    if nexo::headers::content_length(&text,end) != 4 { return 2; }
+    if !nexo::path::matches("/users/:id","/users/42") { return 3; }
+    if nexo::path::matches("/users/:id","/users/") { return 4; }
+    if nexo::response::normalize_status(200) != 200 { return 5; }
+    if nexo::response::normalize_status(999) != 500 { return 6; }
+
+    let json: std::json::JsonText = std::json::manage_serialized(config.toJson());
+    if json.is_empty() { return 7; }
+    return 0;
+}

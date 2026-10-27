@@ -1,0 +1,22 @@
+// Contract for generator.nova: Generator-like value exposing advancement.
+pub concept GeneratorCursor<T> = has_method<T,next>;
+
+// Typed generator owner. The stage-0 runtime exchanges one i64 ABI word.
+extern fn native_next(handle: u64) -> i64;
+extern fn native_done(handle: u64) -> bool;
+extern fn native_drop(handle: u64) -> ();
+
+// ABI: single i64 word; arbitrary T is not supported by stage-0.
+pub struct Generator<T> { handle: u64, marker: [T; 0] }
+pub fn manage(handle: u64) -> Generator<i64> {
+    return new Generator<i64> { handle: handle, marker: [] };
+}
+[[unsafe]] pub fn manage_typed<T>(handle: u64) -> Generator<T> {
+    return new Generator<T> { handle: handle, marker: [] };
+}
+impl<T> Generator<T> {
+    // Check finished() before native_next(); native_next() is invalid after completion.
+    fn next(self: &Generator<T>) -> T { return std::generator::native_next(self.handle) as T; }
+    fn finished(self: &Generator<T>) -> bool { return std::generator::native_done(self.handle); }
+    fn drop(self: Generator<T>) -> () { std::generator::native_drop(self.handle); return; }
+}

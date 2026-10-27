@@ -1,0 +1,79 @@
+gen fn process_orders(total: i64) -> i64 {
+    let mut order: i64 = 1;
+
+    std::io::native_println("Generator inicializado");
+
+    while order <= total {
+        std::io::native_println("------------------------");
+        std::io::native_println("Processando novo pedido");
+
+        if order == 3 {
+            std::io::native_println("Pedido 3: processamento especial");
+        }
+
+        if order == 5 {
+            std::io::native_println("Pedido 5: ultimo pedido");
+        }
+
+        std::io::native_println("Pedido preparado. Suspendendo generator...");
+
+        yield order;
+
+        std::io::native_println("Generator retomado pelo consumidor");
+
+        order += 1;
+    }
+
+    std::io::native_println("Todos os pedidos foram processados");
+    return -1;
+}
+
+fn main() -> i32 {
+    std::io::native_println("================================");
+    std::io::native_println(" NOVA 0.8 - GENERATOR DEMO");
+    std::io::native_println("================================");
+
+    let generator: u64 = process_orders(5);
+
+    std::io::native_println("Generator criado, mas ainda nao executado");
+
+    let mut expected: i64 = 1;
+    let mut processed: i64 = 0;
+
+    while !std::generator::native_done(generator) {
+        std::io::native_println("");
+        std::io::native_println("MAIN: solicitando proximo pedido");
+
+        let order: i64 = std::generator::native_next(generator);
+
+        if std::generator::native_done(generator) {
+            std::io::native_println("MAIN: generator finalizado");
+        } else {
+            if order != expected {
+                std::io::native_println("ERRO: pedido fora de ordem");
+                std::generator::native_drop(generator);
+                return 10;
+            }
+
+            std::io::native_println("MAIN: pedido recebido com sucesso");
+
+            processed += 1;
+            expected += 1;
+        }
+    }
+
+    std::generator::native_drop(generator);
+
+    if processed != 5 {
+        std::io::native_println("ERRO: quantidade incorreta");
+        return 11;
+    }
+
+    std::io::native_println("");
+    std::io::native_println("================================");
+    std::io::native_println(" 5 PEDIDOS PROCESSADOS");
+    std::io::native_println(" GENERATOR FINALIZADO COM SUCESSO");
+    std::io::native_println("================================");
+
+    return 0;
+}

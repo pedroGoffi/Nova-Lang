@@ -1,0 +1,24 @@
+extern fn puts(text: str) -> i32;
+#[derive(Serialize)]
+struct User {
+    id: u64,
+    name: str,
+    active: bool
+}
+
+impl User {
+    fn set(self: Self, data: u64) -> () {
+        self.id = data;
+        return;
+    }
+}
+fn main() -> i32 {
+    let user: User = new User {
+        id: 42,
+        name: "Nova \"Language\"",
+        active: true
+    };
+    User_write_json(user);
+    puts(""); // JSON writer intentionally streams to stdout
+    return 0;
+}

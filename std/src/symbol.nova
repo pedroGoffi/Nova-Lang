@@ -1,0 +1,26 @@
+// Contract for symbol.nova: Symbol table capable of lookup.
+pub concept SymbolLookup<T> = has_method<T,contains>;
+
+// Scoped compiler-oriented symbols, implemented entirely through std::map.
+// SymbolTable owns a single StringInt64Map and relies on RAII for cleanup.
+pub struct SymbolTable { entries: std::map::StringInt64Map }
+
+pub fn new_table() -> SymbolTable {
+    return new SymbolTable { entries: std::map::new_string_int64_map() };
+}
+impl SymbolTable {
+    fn define(self: &SymbolTable, name: str, symbol_id: i64) -> bool {
+        return std::map::native_string_int64_map_insert(self.entries.handle,name,symbol_id);
+    }
+    fn contains(self: &SymbolTable, name: str) -> bool {
+        return std::map::native_string_int64_map_contains(self.entries.handle,name);
+    }
+    fn resolve_or(self: &SymbolTable, name: str, fallback: i64) -> i64 {
+        return std::map::native_string_int64_map_get_or(self.entries.handle,name,fallback);
+    }
+    fn remove(self: &SymbolTable, name: str) -> bool {
+        return std::map::native_string_int64_map_remove(self.entries.handle,name);
+    }
+    fn len(self: &SymbolTable) -> u64 { return std::map::native_string_int64_map_length(self.entries.handle); }
+    // Generated field Drop closes the owned map exactly once.
+}

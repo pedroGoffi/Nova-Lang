@@ -1,0 +1,30 @@
+// Nova macro_rules! with typed AST concept contracts.
+concept Whole<T> = integer<T>;
+concept I64Callback<T> = same_as<T, fn(i64)->i32>;
+
+// Both values and callable signatures are checked by the actual Nova
+// type/concept checker when this macro expands and specializes.
+macro_rules! checked_call {
+    ($callback:expr where I64Callback, $value:expr where Whole) => {
+        let operation = $callback;
+        let answer = operation($value);
+        if answer != 42 { return 1; }
+    };
+}
+
+// Repetition also checks the concrete type of EVERY expanded argument.
+macro_rules! checked_positive {
+    ($($value:expr where Whole),+) => {
+        std::io::println("eh os guri");
+        $(if $value < 0 { return 2; })*
+    };
+}
+
+fn twice(value: i64) -> i64 { return value * 2; }
+
+fn main() -> i32 {
+    let value: i64 = 21;
+    checked_call!(twice, value);
+    checked_positive!(value, value + 1, 42);
+    return 0;
+}

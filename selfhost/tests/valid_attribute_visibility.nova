@@ -1,0 +1,5 @@
+// Both forms are supported by the Rust parser and the parser in Nova.
+#[derive(Serialize, Clone)]
+pub struct Visible { value: i64 }
+#[derive(Debug)] pub enum Status { Good, Bad(i32) }
+pub #[derive(Clone)] struct Legacy { value: i64 }

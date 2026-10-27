@@ -1,0 +1,22 @@
+// Nova 0.9.5: JSON -> strongly typed structs, with nested object support.
+// No package/STD dependency is needed for #[derive(Deserialize)].
+extern fn puts(text: str) -> i32;
+
+#[derive(Serialize, Deserialize)]
+struct Address { zip: i32, active: bool }
+
+#[derive(Serialize, Deserialize)]
+struct User { id: u64, name: str, address: Address }
+
+fn main() -> i32 {
+    let user: User = User_from_json(
+        "{\"id\":200,\"name\":\"Nova \\\"Language\\\"\",\"address\":{\"zip\":99000,\"active\":true}}"
+    );
+    if user.id != 200 as u64 { return 1; }
+    if user.address.zip != 99000 { return 2; }
+    if !user.address.active { return 3; }
+
+    User_write_json(user);
+    puts("");
+    return 0;
+}

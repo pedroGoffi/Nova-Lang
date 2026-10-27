@@ -1,0 +1,28 @@
+// HTTP method names are defined in exactly one place.
+[[pure]] pub fn method_name(method_code: i64) -> str {
+    if method_code == 1 { return "GET"; }
+    if method_code == 2 { return "POST"; }
+    if method_code == 3 { return "PUT"; }
+    if method_code == 4 { return "PATCH"; }
+    if method_code == 5 { return "DELETE"; }
+    if method_code == 6 { return "OPTIONS"; }
+    if method_code == 7 { return "HEAD"; }
+    return "*";
+}
+
+// Type-safe alternative to numerical HTTP method codes. The legacy numeric
+// representation remains internal to the route registry.
+pub enum Method { Any, Get, Post, Put, Patch, Delete, Options, Head }
+
+[[pure]] pub fn code(value: Method) -> i64 {
+    match value {
+        Any => { return 0; },
+        Get => { return 1; },
+        Post => { return 2; },
+        Put => { return 3; },
+        Patch => { return 4; },
+        Delete => { return 5; },
+        Options => { return 6; },
+        Head => { return 7; }
+    }
+}

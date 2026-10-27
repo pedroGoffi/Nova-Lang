@@ -1,0 +1,38 @@
+// No manual drop is necessary: the compiler calls FileLike.drop() on scope exit.
+// Explicit declaration-level defer replaces the automatic destructor.
+class FileLike { token: i32 }
+
+fn open_file() -> FileLike { return new FileLike { token: 123 }; }
+fn close_token(token: i32) -> () { return; }
+
+impl FileLike {
+    fn close(self: FileLike) -> () {
+        close_token(self.token);
+        return;
+    }
+    fn drop(self: FileLike) -> () {
+        self.close();
+        return;
+    }
+}
+
+fn process(flag: bool) -> i32 {
+    auto first = open_file();          // calls first.drop() on any scope exit
+    if flag {
+        auto explicit = open_file() defer explicit.close();
+        // explicit.close() runs exactly once; implicit drop is suppressed
+        return 10;
+    }
+    defer close_token(777);
+    for i in 0..3 {
+        auto nested = open_file();
+        if i == 1 { continue; }
+        if i == 2 { break; }
+    }
+    return 20;
+}
+fn main() -> i32 {
+    if process(true) != 10 { return 1; }
+    if process(false) != 20 { return 2; }
+    return 0;
+}

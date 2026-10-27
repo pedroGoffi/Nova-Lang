@@ -1,0 +1,38 @@
+// Contract for time.nova: Unsigned duration/time counter measured in milliseconds.
+pub concept TimeAmount<T> = unsigned<T>;
+
+// Nova STD time — compiled with the builtin runtime.
+// Wall clock, not monotonic. Do not use for benchmarking durations.
+extern fn native_unix_millis() -> u64;
+extern fn native_monotonic_millis() -> u64;
+
+
+// Unix wall clock is appropriate for timestamps, not precise elapsed time.
+pub fn now_millis() -> u64 { return native_unix_millis(); }
+
+// Use native_monotonic_millis() for deadlines and intervals, never native_unix_millis().
+// Monotonic timestamps are not serialized as real-world UTC dates.
+pub fn elapsed_since(start: u64) -> u64 {
+    let now: u64 = native_monotonic_millis();
+    if now < start { return 0; }
+    return now - start;
+}
+
+pub struct Instant { ticks: u64 }
+pub struct Duration { milliseconds: u64 }
+
+pub fn instant_now() -> Instant {
+    return new Instant { ticks: native_monotonic_millis() };
+}
+pub fn duration_millis(value: u64) -> Duration {
+    return new Duration { milliseconds: value };
+}
+impl Instant {
+    fn elapsed(self: &Instant) -> Duration {
+        return new Duration {milliseconds: std::time::elapsed_since(self.ticks)};
+    }
+}
+impl Duration {
+    fn as_millis(self: &Duration) -> u64 {return self.milliseconds;}
+    fn is_zero(self: &Duration) -> bool {return self.milliseconds == 0;}
+}

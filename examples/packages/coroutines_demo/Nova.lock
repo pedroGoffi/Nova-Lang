@@ -1,0 +1,4 @@
+# Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
+coroutines_demo 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/coroutines_demo hash=e41bf1b6afcbfd8e
+std 0.8.0 builtin hash=f4d25dab9c254cff
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/coroutines_demo/src/main.nova hash=e41bf1b6afcbfd8e

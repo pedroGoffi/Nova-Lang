@@ -1,0 +1,25 @@
+// Contract for option.nova: Optional-like value exposing presence queries.
+pub concept Optional<T> = has_method<T,is_some> && has_method<T,is_none>;
+
+// Optional values. Operations are by value until borrow semantics land.
+pub enum Option<T> { Some(T), None }
+impl<T> Option<T> {
+    fn is_some(self: Option<T>) -> bool {
+        match self {
+            Some(value) => { return true; }
+            None => { return false; }
+        }
+    }
+    fn is_none(self: Option<T>) -> bool {
+        match self {
+            Some(value) => { return false; }
+            None => { return true; }
+        }
+    }
+    fn unwrap_or(self: Option<T>, fallback: T) -> T {
+        match self {
+            Some(value) => { return value; }
+            None => { return fallback; }
+        }
+    }
+}

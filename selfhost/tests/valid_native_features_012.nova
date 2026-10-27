@@ -1,0 +1,11 @@
+// Parser parity fixture for Nova 0.12.
+macro double($value:expr) => $value + $value;
+macro verify($expression:expr) => { if $expression {return 1;} }
+struct Cursor { position: i64 }
+impl Cursor {
+    fn next(self: Cursor) -> Cursor {return new Cursor {position:self.position+1};}
+}
+fn main()->i32 {
+    for item in range { verify!(item==3); }
+    return double!(2);
+}

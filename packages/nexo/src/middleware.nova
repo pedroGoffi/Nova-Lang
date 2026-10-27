@@ -1,0 +1,80 @@
+// Ordered request guards, with uniquely owned nodes and typed callbacks.
+use super::request::Request;
+use super::response::Response;
+
+pub struct MiddlewareEntry {
+    callback: fn(Request, Response) -> bool,
+    next: *mut MiddlewareEntry,
+    last: *mut MiddlewareEntry,
+    count: i64
+}
+pub struct MiddlewareCollection { first: *mut MiddlewareEntry }
+
+fn allow_all(request: Request, response: Response) -> bool { return true; }
+[[unsafe]] fn allocate_middleware() -> *mut MiddlewareEntry {
+    unsafe {
+        let middleware: *mut MiddlewareEntry = std::raw::alloc_record::<MiddlewareEntry>();
+        middleware.callback = allow_all;
+        middleware.next = middleware;
+        middleware.last = middleware;
+        middleware.count = 0;
+        return middleware;
+    }
+}
+
+pub fn new_middlewares() -> MiddlewareCollection {
+    unsafe { return new MiddlewareCollection { first: allocate_middleware() }; }
+}
+
+[[unsafe]] pub fn register_middleware(sentinel: *mut MiddlewareEntry,
+                                       callback: fn(Request,Response)->bool) -> i32 {
+    unsafe {
+            if sentinel.count >= 64 { return -1; }
+            let middleware: *mut MiddlewareEntry = allocate_middleware();
+            middleware.callback = callback;
+            middleware.next = sentinel;
+            let previous_last: *mut MiddlewareEntry = sentinel.last;
+            previous_last.next = middleware;
+            sentinel.last = middleware;
+            sentinel.count += 1;
+            return 0;
+        }
+    }
+
+impl MiddlewareCollection {
+    fn add(self: &MiddlewareCollection, callback: fn(Request,Response)->bool) -> i32 {
+        unsafe { return register_middleware(self.first,callback); }
+    }
+
+    fn drop(self: MiddlewareCollection) -> () {
+        unsafe {
+            let sentinel: *mut MiddlewareEntry = self.first;
+            let mut current: *mut MiddlewareEntry = sentinel.next;
+            let mut middleware_index: i64 = 0;
+            while middleware_index < sentinel.count {
+                let next_middleware: *mut MiddlewareEntry = current.next;
+                std::raw::free_record::<MiddlewareEntry>(current);
+                current = next_middleware;
+                middleware_index += 1;
+            }
+            std::raw::free_record::<MiddlewareEntry>(sentinel);
+            return;
+        }
+    }
+}
+
+// Only the owning App passes its live sentinel here. Do not expose a second
+// owner or borrow an App field as a temporary (Nova 0.20 limitation).
+[[unsafe]] pub fn allows(sentinel: *mut MiddlewareEntry, request: Request, response: Response) -> bool {
+    unsafe {
+        let mut current: *mut MiddlewareEntry = sentinel.next;
+        let mut middleware_index: i64 = 0;
+        while middleware_index < sentinel.count {
+            let middleware_callback: fn(Request,Response)->bool = current.callback;
+            if !middleware_callback(request,response) { return false; }
+            current = current.next;
+            middleware_index += 1;
+        }
+        return true;
+    }
+}

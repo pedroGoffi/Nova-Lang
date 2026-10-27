@@ -1,0 +1,21 @@
+// HTTP request view. All str fields borrow the current connection's buffer.
+// Keep request values inside route/middleware callbacks: they do not own bytes.
+use super::query::query_value;
+use super::path::param_value;
+use super::headers::header_value;
+
+pub struct Request {
+    method: str,
+    path: str,
+    query: str,
+    body: str,
+    headers: str,
+    route_pattern: str,
+    id: i64
+}
+
+impl Request {
+    fn query_value(self: Request, key: str) -> std::string::String { return query_value(self.query,key); }
+    fn param(self: Request, key: str) -> std::string::String { return param_value(self.route_pattern,self.path,key); }
+    fn header(self: Request, key: str) -> std::string::String { return header_value(self.headers,key); }
+}

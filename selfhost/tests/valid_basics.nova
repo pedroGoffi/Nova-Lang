@@ -1,0 +1,18 @@
+// Lexer, precedence, generic calls, named fields, methods, and all statements.
+pub struct Pair<T> { left: T, right: T }
+enum Optional<T> { Some(T), None }
+extern fn puts(text: str) -> i32;
+fn add(a: i32, b: i32) -> i32 { return a + b; }
+fn main() -> i32 {
+    let mut n: i32 = 1;
+    let value: Pair<i32> = new Pair<i32> { left: 1, right: 2 };
+    let values: [i32; 2] = [value.left, value.right];
+    n += values[0];
+    for i in 0..2 { n += i; }
+    while n < 10 { n += 1; }
+    loop { break; }
+    if n == 10 && true { n = add::<i32>(n, 1); } else { n = 0; }
+    match Some(n) { Some(x) => { n = x; }, None => { n = 0; } }
+    unsafe { puts("ok"); }
+    return n - 11;
+}

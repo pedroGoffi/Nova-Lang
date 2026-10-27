@@ -1,0 +1,12 @@
+class Resource { handle: u64 }
+impl Resource {
+    fn close(self: Resource) -> () { return; }
+    fn drop(self: Resource) -> () { return; }
+}
+fn resource() -> Resource { return new Resource { handle: 1 as u64 }; }
+fn main() -> i32 {
+    auto obj = resource() defer obj.close();
+    defer obj.close();
+    if true { auto nested = resource(); }
+    return 0;
+}

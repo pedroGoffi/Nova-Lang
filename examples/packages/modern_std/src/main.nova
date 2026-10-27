@@ -1,0 +1,28 @@
+// Ergonomic public API: runtime details remain behind private __ symbols.
+fn main() -> i32 {
+    let bytes: std::vec::ByteVector = std::vec::new_byte_vector();
+    bytes.reserve(64);
+    bytes.push(20);
+    bytes.push(22);
+    if bytes.len() != 2 { return 1; }
+    if bytes.at(0) + bytes.at(1) != 42 { return 2; }
+    bytes.set(0, 21);
+    if bytes.pop() != 22 { return 3; }
+    if bytes.at(0) != 21 { return 4; }
+    bytes.clear();
+    if !bytes.is_empty() { return 5; }
+
+    let ints: std::vec::Int64Vector = std::vec::new_int64_vector();
+    ints.push(41);
+    if ints.at(0) != 41 { return 6; }
+    ints.clear();
+    if !ints.is_empty() { return 7; }
+
+    let table: std::symbol::SymbolTable = std::symbol::new_table();
+    table.define("answer",42);
+    if table.resolve_or("answer",0) != 42 { return 8; }
+
+    let message: std::string::String = std::string::from_text("Nova");
+    if !message.equals("Nova") { return 9; }
+    return 0;
+}

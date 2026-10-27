@@ -1,0 +1,41 @@
+// Nova 0.19 preview: structural concepts + static reflection + JSON + effects.
+#[derive(Json)]
+struct Person { id: i64, active: bool }
+
+concept HasId<T> = requires(T person) {
+    { person.id } -> i64;
+};
+
+concept Addable<T> = requires(T a, T b) {
+    { a + b } -> T;
+};
+
+static_assert(HasId<Person>);
+static_assert(Addable<i64>);
+static_assert(has_field<Person,active>);
+
+[[pure]] fn sum<T: Addable>(a: T,b: T)->T {return a+b;}
+[[pure]] fn value()->i64 {return sum(20,22);}
+
+fn main()->i32 {
+    let descriptor: str = reflect::<Person>();
+    let name: str = type_name::<Person>();
+    if value() == 42 && factorial(5) == 120 {return 0;}
+    return 1;
+}
+
+// Const evaluator accepts bounded i32/i64 recursive functions.
+const fn factorial(n: i64) -> i64 {
+    if n <= 1 { return 1; }
+    return n * factorial(n - 1);
+}
+
+// Associated type bound in the trait implementation (non-generic case).
+trait ValueSource {
+    type Item;
+    fn current(self: Self) -> Self::Item;
+}
+impl ValueSource for i64 {
+    type Item = i64;
+    fn current(self: i64) -> i64 {return self;}
+}

@@ -1,0 +1,21 @@
+// Self-contained DSL example: a Nova macro defines a new compile-time
+// component constructor; runtime rendering is ordinary typed Nova code.
+struct UiNode { label: str, width: i64 }
+
+fn render_node(label: str, width: i64) -> UiNode {
+    return new UiNode { label: label, width: width };
+}
+
+// This is user-defined; the compiler has no hardcoded "component" keyword.
+macro component(label, width) => render_node(label, width);
+
+fn main() -> i32 {
+    auto width = 32;                  // infers i32
+    auto mut padding = 4;            // mutable inferred i32
+    padding += 1;
+    let scale: f64 = 2.5;
+    let total = (width as i64) + (scale as i64) + (padding as i64);
+    auto card = component!("Hello from Nova", total);
+    let small: i32 = card.width as i32;
+    return small - 39;
+}

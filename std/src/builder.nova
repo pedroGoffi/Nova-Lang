@@ -1,0 +1,90 @@
+// Contract for builder.nova: Builder whose accumulated text has a byte length.
+pub concept StringBuilderLike<T> = requires(T value) { { value.len() } -> u64; };
+
+// Nova STD builder — compiled with the builtin runtime.
+extern fn native_create() -> u64;
+extern fn native_with_capacity(capacity: u64) -> u64;
+extern fn native_append(handle: u64, text: str) -> ();
+extern fn native_append_i64(handle: u64, value: i64) -> ();
+extern fn native_append_bool(handle: u64, value: bool) -> ();
+extern fn native_len(handle: u64) -> u64;
+extern fn native_finish(handle: u64) -> u64;
+extern fn native_drop(handle: u64) -> ();
+
+// The runtime only supplies allocation/append/ownership primitives.
+// Composition and convenient APIs are implemented in Nova.
+extern fn native_snapshot(handle: u64) -> u64;
+
+// Copies the current builder contents into an independent managed String.
+// The builder remains valid and can continue receiving text.
+pub fn to_string(handle: u64) -> u64 {
+    return native_snapshot(handle);
+}
+
+// Moves the builder's allocation to a managed String without copying.
+// The builder handle MUST NOT be used after this call.
+pub fn into_string(handle: u64) -> u64 {
+    return native_finish(handle);
+}
+
+// Append an existing managed String to a builder.
+pub fn append_string(handle: u64, value: u64) -> () {
+    native_append(handle, std::string::native_string_borrow_text(value));
+    return;
+}
+
+// Typed variadic append, implemented in Nova.
+pub fn append_many(handle: u64, ...parts: str) -> () {
+    for part_index in 0..parts.len() {
+        native_append(handle, parts[part_index]);
+    }
+    return;
+}
+
+// Print the builder without consuming it.
+pub fn println(handle: u64) -> () {
+    let text: u64 = to_string(handle);
+    std::string::native_println(text);
+    std::string::native_string_destroy(text);
+    return;
+}
+
+// Typed builder reuses the single owned String implementation instead of
+// duplicating a native builder representation. Legacy u64 builder APIs above
+// remain available only for the stage-0 compiler. This keeps
+// reference receiver operations well-defined without field-borrow lowering.
+pub struct StringBuilder { handle: u64 }
+
+pub fn make() -> StringBuilder {
+    return new StringBuilder { handle: std::string::native_string_create_empty() };
+}
+pub fn make_with_capacity(bytes: u64) -> StringBuilder {
+    let builder = make();
+    builder.reserve(bytes);
+    return builder;
+}
+impl StringBuilder {
+    fn append(self: &StringBuilder, text: str) -> () {
+        std::string::native_push(self.handle, text); return;
+    }
+    fn append_i64(self: &StringBuilder, value: i64) -> () {
+        std::string::native_append_i64(self.handle, value); return;
+    }
+    fn append_bool(self: &StringBuilder, value: bool) -> () {
+        if value { std::string::native_push(self.handle, "true"); }
+        else { std::string::native_push(self.handle, "false"); }
+        return;
+    }
+    fn append_string(self: &StringBuilder, value: &std::string::String) -> () {
+        std::string::native_push(self.handle, value.as_str()); return;
+    }
+    fn len(self: &StringBuilder) -> u64 { return std::string::native_len(self.handle); }
+    fn reserve(self: &StringBuilder, bytes: u64) -> () {
+        std::string::native_reserve(self.handle,bytes); return;
+    }
+    fn to_string(self: &StringBuilder) -> std::string::String {
+        return new std::string::String {handle:std::string::native_string_clone(self.handle)};
+    }
+    fn clear(self: &StringBuilder) -> () { std::string::native_clear(self.handle); return; }
+    fn drop(self: StringBuilder) -> () { std::string::native_string_destroy(self.handle); return; }
+}

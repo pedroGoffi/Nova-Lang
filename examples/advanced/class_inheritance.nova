@@ -1,0 +1,32 @@
+// Nova 0.9.2: class and struct templates share the SAME storage model.
+// `virtual` marks a method for overriding in derived concrete specializations.
+// Dynamic dispatch through an erased Base handle / LLVM vtable is NOT implemented.
+class Base<T> { value: T }
+
+impl<T> Base<T> {
+    virtual fn get(self: Base<T>) -> T {
+        return self.value;
+    }
+    fn inherited(self: Base<T>) -> T {
+        return self.value;
+    }
+}
+
+class Derived<T> : Base<T> { replacement: T }
+
+impl<T> Derived<T> {
+    override fn get(self: Derived<T>) -> T {
+        return self.replacement;
+    }
+    fn parent_value(self: Derived<T>) -> T {
+        return super.get();
+    }
+}
+
+fn main() -> i32 {
+    auto obj = new Derived<i32> { value: 12, replacement: 41 };
+    if obj.get() != 41 { return 1; }
+    if obj.inherited() != 12 { return 2; }
+    if obj.parent_value() != 12 { return 3; }
+    return 0;
+}

@@ -1,0 +1,16 @@
+fn main() -> i32 {
+    auto builder = std::builder::make();
+
+    builder.append("Hello");
+    builder.append(" Nova");
+    builder.append_i64(9);
+
+    auto text = builder.to_string();
+    text.println();
+
+    if text.len() != 11 as u64 {
+        return 1;
+    }
+
+    return 0;
+}

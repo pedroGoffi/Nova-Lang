@@ -1,0 +1,111 @@
+
+import std;
+
+fn rule110(left: i64, center: i64, right: i64) -> i64 {
+    let pattern = left * 4 + center * 2 + right;
+
+    if pattern == 0 { return 0; }
+    if pattern == 4 { return 0; }
+    if pattern == 7 { return 0; }
+
+    return 1;
+}
+
+fn rulemain() -> i32 {
+    let width: i64 = 61;
+    let generations: i64 = 32;
+
+    let state = std::sync::new_i64(0);
+    let counter = std::sync::new_i64(0);
+
+    let row = std::vec::new_int64_vector();
+    let next_row = std::vec::new_int64_vector();
+
+    for i in 0..61 {
+        if i == 30 {
+            row.push(1);
+        } else {
+            row.push(0);
+        }
+    }
+
+    std::io::println("RULE 110 - NOVA");
+    std::io::println("================================");
+
+    for generation in 0..32 {
+        // Imprime a geração atual, célula por célula.
+        for i in 0..61 {
+            if row.get(i) == 1 {
+                std::io::print("#");
+            } else {
+                std::io::print(" ");
+            }
+        }
+
+        std::io::println("");
+
+        // Calcula a próxima geração.
+        next_row.clear();
+
+        for i in 0..61 {
+            let mut left: i64 = 0;
+            let mut right: i64 = 0;
+
+            if i > 0 {
+                left = row.get(i - 1);
+            }
+
+            if i < 60 {
+                right = row.get(i + 1);
+            }
+
+            let center = row.get(i);
+            next_row.push(rule110(left, center, right));
+        }
+
+        // Registra a geração protegida pelos mutexes.
+        sync(state, counter) as guard {
+            guard.set_first(generation);
+            guard.set_second(generation + 1);
+        }
+
+        // Atualiza o estado sem transferir ownership.
+        row.clear();
+
+        for i in 0..61 {
+            row.push(next_row.get(i));
+        }
+    }
+
+    sync(state, counter) as guard {
+        if guard.get_second() != 32 {
+            std::io::println("ERROR: invalid generation count");
+            return 1;
+        }
+    }
+
+    std::io::println("================================");
+    std::io::println("RULE 110: OK");
+
+    return 0;
+}
+
+fn benchmark(callback: fn() -> i32) -> i32 {
+    let start = std::time::now_millis();
+
+    let result = callback();
+
+    let elapsed = std::time::now_millis() - start;
+
+    std::io::println("Rule 110 finalizado");
+    std::io::print("Tempo: ");
+    std::io::print_values_i64(elapsed as i64);
+    std::io::println(" ms");
+
+    return result;
+}
+
+
+fn main() -> i32 {
+    return benchmark(rulemain);
+}

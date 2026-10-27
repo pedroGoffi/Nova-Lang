@@ -1,0 +1,27 @@
+// Contract for arena.nova: Arena allocator capable of allocating bytes.
+pub concept ArenaLike<T> = has_method<T,allocate>;
+
+// Nova STD arena — compiled with the builtin runtime.
+extern fn native_create(capacity: u64) -> u64;
+extern fn native_alloc(arena: u64, size: u64) -> u64;
+extern fn native_used(arena: u64) -> u64;
+extern fn native_capacity(arena: u64) -> u64;
+extern fn native_reset(arena: u64) -> ();
+extern fn native_drop(arena: u64) -> ();
+
+
+// Owner of arena allocations. Child handles are invalidated on clear or drop.
+// The raw handle API remains for bootstrap code; it is not an owning reference.
+pub struct Arena { handle: u64 }
+
+pub fn new(capacity_bytes: u64) -> Arena {
+    return new Arena { handle: native_create(capacity_bytes) };
+}
+impl Arena {
+    fn allocate(self: &Arena, byte_count: u64) -> u64 { return native_alloc(self.handle, byte_count); }
+    fn used_bytes(self: &Arena) -> u64 { return native_used(self.handle); }
+    fn capacity_bytes(self: &Arena) -> u64 { return native_capacity(self.handle); }
+    // All previously allocated child handles become invalid.
+    [[unsafe]] fn clear(self: &Arena) -> () { native_reset(self.handle); return; }
+    fn drop(self: Arena) -> () { std::arena::native_drop(self.handle); return; }
+}

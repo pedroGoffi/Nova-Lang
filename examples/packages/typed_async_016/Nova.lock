@@ -1,0 +1,4 @@
+# Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
+typed_async_016 0.16.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/typed_async_016 hash=af8bfe0f95b815c2
+std 0.20.0 builtin hash=e9fbac7494a68486
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/typed_async_016/src/main.nova hash=af8bfe0f95b815c2

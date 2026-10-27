@@ -1,0 +1,8 @@
+// Contract for libc/time.nova: Integral signed time representation used by POSIX.
+pub concept CTime<T> = signed<T>;
+
+// <time.h> subset. Linux x86_64 time_t and clock_t are 64-bit signed.
+// `struct tm`, timespec and timezone C structs need ABI-specific definitions.
+[[unsafe]] pub extern fn time(out: *mut i64) -> i64;
+[[unsafe]] pub extern fn clock() -> i64;
+[[unsafe]] pub extern fn difftime(end_time: i64, start_time: i64) -> f64;

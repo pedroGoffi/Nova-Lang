@@ -1,0 +1,21 @@
+// Contract for error.nova: Error record containing a numeric error code.
+pub concept ErrorValue<T> = has_field<T,code>;
+
+// A borrowed diagnostic view, for static messages and short-lived scope use.
+// This legacy type is not an owning String and cannot safely outlive its input.
+pub struct Error { code: i32, message: str }
+
+pub fn with_message(code: i32, message: str) -> Error {
+    return new Error { code: code, message: message };
+}
+
+// Use OwnedError when returning or storing a diagnostic across scopes.
+// The compiler synthesizes recursive RAII Drop for the managed message field.
+pub struct OwnedError { code: i32, message: std::string::String }
+pub fn owned(code: i32, message: str) -> OwnedError {
+    return new OwnedError { code: code, message: std::string::from_text(message) };
+}
+impl OwnedError {
+    fn code(self: &OwnedError) -> i32 { return self.code; }
+    fn as_str(self: &OwnedError) -> str { return std::string::native_string_borrow_text(self.message.handle); }
+}

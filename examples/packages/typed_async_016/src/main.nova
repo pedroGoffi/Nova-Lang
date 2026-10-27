@@ -1,0 +1,36 @@
+// Result types are visible to the compiler. Internally stage-0 still uses
+// one u64 handle and one i64 ABI result per coroutine.
+async fn double(value: i64) -> i64 {
+    return value * 2;
+}
+
+async fn nested(value: i64) -> i64 {
+    let child: std::task::Task<i64> = std::task::manage(double(value));
+    let inner: i64 = await child;
+    return inner + 1;
+}
+
+gen fn sequence() -> i64 {
+    yield 3;
+    return 0;
+}
+
+fn main() -> i32 {
+    let task: std::task::Task<i64> = std::task::manage(nested(20));
+    let answer: i64 = join task;
+    if answer != 41 { return 1; }
+
+    let future: std::task::Future<i64> = std::task::future(double(3));
+    let output: i64 = future.wait();
+    if output != 6 { return 2; }
+
+    let generator: std::generator::Generator<i64> = std::generator::manage(sequence());
+    let first: i64 = next generator;
+    if first != 3 { return 3; }
+
+    let coroutine: std::coro::Coroutine<i64> = std::coro::manage(sequence());
+    let yielded: i64 = resume coroutine;
+    if yielded != 3 { return 4; }
+
+    return 0;
+}

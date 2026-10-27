@@ -1,0 +1,140 @@
+// Nova lexer, written in Nova. UTF-8 byte offsets, line/column positions.
+// Tokens are five consecutive i64 vector slots: kind,start,end,line,column.
+// 1 identifier, 2 integer, 3 float, 4 string, 5 punctuation, 6 EOF,
+// 7 lexical error. Keywords are contextually recognized by their lexemes.
+pub struct Scan { source: u64, tokens: u64 }
+
+fn push_token(tokens: u64, kind: i64, start: i64, end: i64, line: i64, column: i64) -> () {
+    std::vec::native_int64_vector_append(tokens, kind);
+    std::vec::native_int64_vector_append(tokens, start);
+    std::vec::native_int64_vector_append(tokens, end);
+    std::vec::native_int64_vector_append(tokens, line);
+    std::vec::native_int64_vector_append(tokens, column);
+    return;
+}
+pub fn count(scan: Scan) -> i64 { return std::vec::native_int64_vector_count(scan.tokens) / 5; }
+pub fn cell(scan: Scan, index: i64, field: i64) -> i64 {
+    return std::vec::native_int64_vector_at(scan.tokens, index * 5 + field);
+}
+pub fn is(scan: Scan, index: i64, text: str) -> bool {
+    if index < 0 || index >= count(scan) { return false; }
+    let from: i64 = cell(scan,index,1);
+    let end: i64 = cell(scan,index,2);
+    return std::string::native_span_equals(scan.source, from, end - from, text);
+}
+fn byte(source: u64, position: i64) -> i32 {
+    if position < 0 { return -1; }
+    return std::string::native_byte_at(source, position);
+}
+fn alpha(ch: i32) -> bool {
+    return (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) || ch == 95;
+}
+fn digit(ch: i32) -> bool { return ch >= 48 && ch <= 57; }
+fn alnum(ch: i32) -> bool { return alpha(ch) || digit(ch); }
+fn valid_escape(ch: i32) -> bool {
+    return ch == 110 || ch == 114 || ch == 116 || ch == 48 || ch == 34 || ch == 92;
+}
+
+pub fn scan(source: u64) -> Scan {
+    let tokens: u64 = std::vec::native_int64_vector_create();
+    let length: i64 = std::string::native_byte_len(source);
+    let mut offset: i64 = 0;
+    let mut line: i64 = 1;
+    let mut column: i64 = 1;
+    while offset < length {
+        let c: i32 = byte(source,offset);
+        if c == 32 || c == 9 || c == 13 || c == 10 {
+            if c == 10 { line += 1; column = 1; }
+            else { column += 1; }
+            offset += 1;
+            continue;
+        }
+        if c == 47 && byte(source,offset + 1) == 47 {
+            while offset < length && byte(source,offset) != 10 { offset += 1; column += 1; }
+            continue;
+        }
+        let start: i64 = offset;
+        let initial_line: i64 = line;
+        let initial_column: i64 = column;
+        if alpha(c) {
+            offset += 1;
+            while alnum(byte(source,offset)) { offset += 1; }
+            push_token(tokens,1,start,offset,line,column);
+            column += offset - start;
+            continue;
+        }
+        if digit(c) {
+            offset += 1;
+            while digit(byte(source,offset)) { offset += 1; }
+            let mut kind: i64 = 2;
+            if byte(source,offset) == 46 && digit(byte(source,offset + 1)) {
+                kind = 3;
+                offset += 1;
+                while digit(byte(source,offset)) { offset += 1; }
+            }
+            push_token(tokens,kind,start,offset,line,column);
+            column += offset - start;
+            continue;
+        }
+        if c == 34 {
+            offset += 1;
+            let mut closed: bool = false;
+            let mut valid: bool = true;
+            while offset < length {
+                let b: i32 = byte(source,offset);
+                if b == 34 { offset += 1; closed = true; break; }
+                if b == 10 { valid = false; break; }
+                if b == 92 {
+                    offset += 1;
+                    if !valid_escape(byte(source,offset)) { valid = false; break; }
+                }
+                offset += 1;
+            }
+            if valid && closed { push_token(tokens,4,start,offset,initial_line,initial_column); }
+            else { push_token(tokens,7,start,offset,initial_line,initial_column); }
+            column += offset - start;
+            continue;
+        }
+        // Maximal-munch punctuation. ':' vs '::', '.' vs '..' vs '...'.
+        if std::string::native_span_equals(source,offset,3,"...") { offset += 3; }
+        else {
+            if std::string::native_span_equals(source,offset,2,"::") ||
+                std::string::native_span_equals(source,offset,2,"->") ||
+                std::string::native_span_equals(source,offset,2,"=>") ||
+                std::string::native_span_equals(source,offset,2,"..") ||
+                std::string::native_span_equals(source,offset,2,"==") ||
+                std::string::native_span_equals(source,offset,2,"!=") ||
+                std::string::native_span_equals(source,offset,2,"<=") ||
+                std::string::native_span_equals(source,offset,2,">=") ||
+                std::string::native_span_equals(source,offset,2,"<<") ||
+                std::string::native_span_equals(source,offset,2,">>") ||
+                std::string::native_span_equals(source,offset,2,"&&") ||
+                std::string::native_span_equals(source,offset,2,"||") ||
+                std::string::native_span_equals(source,offset,2,"+=") ||
+                std::string::native_span_equals(source,offset,2,"-=") ||
+                std::string::native_span_equals(source,offset,2,"*=") ||
+                std::string::native_span_equals(source,offset,2,"/=") ||
+                std::string::native_span_equals(source,offset,2,"%=") { offset += 2; }
+            else { offset += 1; }
+        }
+        let mut kind: i64 = 5;
+        if offset == start + 1 {
+            if c != 40 && c != 41 && c != 123 && c != 125 &&
+               c != 91 && c != 93 && c != 44 && c != 58 &&
+               c != 59 && c != 46 && c != 43 && c != 45 &&
+               c != 42 && c != 47 && c != 37 && c != 61 &&
+               c != 33 && c != 126 && c != 38 && c != 124 &&
+               c != 94 && c != 60 && c != 62 && c != 35 &&
+               c != 36 { kind = 7; }
+        }
+        push_token(tokens,kind,start,offset,initial_line,initial_column);
+        column += offset - start;
+    }
+    push_token(tokens,6,length,length,line,column);
+    return new Scan { source: source, tokens: tokens };
+}
+
+pub fn drop(scan: Scan) -> () {
+    std::vec::native_int64_vector_destroy(scan.tokens);
+    return;
+}

@@ -1,0 +1,36 @@
+// Test raw heterogeneous libc printf alongside typed Nova variadic packs.
+// Raw C ABI calls are always in unsafe blocks; ABI Linux x86_64 LP64.
+fn main() -> i32 {
+    let value: i64 = 42;
+    let ratio: f64 = 1.5;
+    let length: u64 = 4;
+    let small: i32 = 7;
+
+    unsafe {
+        // i32 (%d), long (%ld), double (%f), and char* (%s).
+        std::libc::stdio::printf("Nova libc ABI: %d %ld %.1f %s\n", small, value, ratio, "OK");
+    }
+    // Typed Nova pack specialized for two i64 values.
+    unsafe {
+        // Formatting a user-specified C string is unsafe even with typed packs.
+        std::io::printf_i64("Nova pack: %ld %ld\n", value, value);
+    }
+    std::io::print_values_i64(value);
+
+    unsafe {
+        if std::libc::string::strlen("Nova") != length {return 11;}
+        if std::libc::stdlib::atoi("42") != 42 {return 12;}
+
+        // libc sscanf is C-variadic and receives a typed pointer.
+        let mut parsed: i32 = 0;
+        let count: i32 = std::libc::stdio::sscanf("123", "%d", &mut parsed);
+        if count != 1 || parsed != 123 {return 13;}
+
+        // malloc and snprintf exercise C pointers and another variadic API.
+        let buf: *mut u8 = std::libc::stdlib::malloc(64);
+        std::libc::stdio::snprintf(buf, 64, "buffer=%d", 99);
+        std::libc::stdio::printf("Nova buffer: %s\n", buf);
+        std::libc::stdlib::free(buf);
+    }
+    return 0;
+}

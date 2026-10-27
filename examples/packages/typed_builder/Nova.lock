@@ -1,0 +1,4 @@
+# Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
+typed_builder 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/typed_builder hash=2044408010d50790
+std 0.9.3 builtin hash=791b89216740e284
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/typed_builder/src/main.nova hash=2044408010d50790

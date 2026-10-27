@@ -1,0 +1,6 @@
+# Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
+nova_selfhost 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/selfhost hash=98a337935d06d516
+std 0.9.0 builtin hash=de4b9a826154c965
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/selfhost/src/main.nova hash=98a337935d06d516
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/selfhost/src/lexer.nova hash=7c9dd4e34fbd600e
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/selfhost/src/parser.nova hash=b946d7ee7f74d4f4

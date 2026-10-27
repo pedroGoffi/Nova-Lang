@@ -1,0 +1,39 @@
+// Contract for lib.nova: Collection value with size and emptiness queries.
+pub concept StandardCollection<T> = has_method<T,len> && has_method<T,is_empty>;
+
+// Nova Standard Library: modular public API (each module in its own source file).
+pub mod string;
+pub mod builder;
+pub mod memory;
+pub mod arena;
+pub mod vec;
+pub mod map;
+pub mod set;
+pub mod symbol;
+pub mod option;
+pub mod result;
+pub mod error;
+pub mod panic;
+pub mod io;
+pub mod convert;
+pub mod raw;
+pub mod json;
+pub mod math;
+pub mod fs;
+pub mod env;
+pub mod time;
+pub mod net;
+pub mod generator;
+pub mod coro;
+pub mod task;
+pub mod ownership;
+pub mod atomic;
+pub mod sync;
+pub mod thread;
+pub mod ops;
+pub mod concepts;
+// Restricted to standard-library compilation by src/modules.rs.
+pub mod internal;
+
+// Raw Linux/glibc FFI layer (C-ABI symbols, unsafe by design).
+pub mod libc;

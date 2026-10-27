@@ -1,0 +1,4 @@
+pub fn greet() -> i32 {
+    std::io::native_println("Nova 0.7: compiler + STD + modules");
+    return 0;
+}

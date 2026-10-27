@@ -1,0 +1,78 @@
+// Public application facade: registration, lifetime, and server ownership.
+use super::routing::RouteCollection;
+use super::routing::new_routes;
+use super::routing::register_route;
+use super::routing::dispatch_routes;
+use super::middleware::MiddlewareCollection;
+use super::middleware::new_middlewares;
+use super::middleware::register_middleware;
+use super::middleware::allows;
+use super::request::Request;
+use super::response::Response;
+use super::server;
+use super::method::Method;
+use super::method::code;
+use super::config::ServerConfig;
+
+pub struct App {
+    port: u64,
+    routes: RouteCollection,
+    middlewares: MiddlewareCollection
+}
+
+pub fn create(port: u64) -> App {
+    return new App {
+        port: port,
+        routes: new_routes(),
+        middlewares: new_middlewares()
+    };
+}
+
+pub fn from_config(config: &ServerConfig) -> App {
+    let port: i64 = config.port;
+    if port <= 0 || port > 65535 { return create(0); }
+    return create(port as u64);
+}
+
+impl App {
+    fn route(self: &App, method_code: i64, path: str, callback: fn(Request,Response)->i32) -> i32 {
+        unsafe { return register_route(self.routes.first,method_code,path,callback); }
+    }
+    // Typed method registration complements conventional get/post helpers.
+    fn on(self: &App, method: Method, path: str, callback: fn(Request,Response)->i32) -> i32 {
+        return self.route(code(method),path,callback);
+    }
+    fn get(self: &App, path: str, callback: fn(Request,Response)->i32) -> i32 {return self.route(1,path,callback);}
+    fn post(self: &App, path: str, callback: fn(Request,Response)->i32) -> i32 {return self.route(2,path,callback);}
+    fn put(self: &App, path: str, callback: fn(Request,Response)->i32) -> i32 {return self.route(3,path,callback);}
+    fn patch(self: &App, path: str, callback: fn(Request,Response)->i32) -> i32 {return self.route(4,path,callback);}
+    fn delete(self: &App, path: str, callback: fn(Request,Response)->i32) -> i32 {return self.route(5,path,callback);}
+    fn options(self: &App, path: str, callback: fn(Request,Response)->i32) -> i32 {return self.route(6,path,callback);}
+    fn head(self: &App, path: str, callback: fn(Request,Response)->i32) -> i32 {return self.route(7,path,callback);}
+    fn all(self: &App, path: str, callback: fn(Request,Response)->i32) -> i32 {return self.route(0,path,callback);}
+    fn use(self: &App, callback: fn(Request,Response)->bool) -> i32 {unsafe { return register_middleware(self.middlewares.first,callback); }}
+
+    // Named App receiver is borrowed for the complete HTTP dispatch.
+    // Inner collections cannot be used as implicit temporary borrow receivers
+    // until Nova supports projected borrows in its MIR.
+    fn permits(self: &App, request: Request, response: Response) -> bool {
+        unsafe { return allows(self.middlewares.first,request,response); }
+    }
+    fn dispatch(self: &App, request: Request, response: Response) -> bool {
+        unsafe { return dispatch_routes(self.routes.first,request,response); }
+    }
+
+    // Consumes App. The compiler-generated App destructor releases both
+    // owning collections in reverse field order. Do not partially move fields
+    // from `self`: Nova's partial-move/drop-flag analysis is not implemented.
+    fn close(self: App) -> () { return; }
+
+    fn listen_config(self: &App, config: &ServerConfig) -> i64 {
+        return self.listen(config.max_requests);
+    }
+
+    // max_requests == 0 means serve until a socket error.
+    fn listen(self: &App, max_requests: i64) -> i64 {
+        return server::listen(self, max_requests);
+    }
+}

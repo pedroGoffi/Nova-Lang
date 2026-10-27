@@ -1,0 +1,15 @@
+// Contract for libc/mod.nova: Raw pointer admissible in explicit unsafe C interfaces.
+pub concept CAbiPointer<T> = pointer<T>;
+
+// Nova standard-library libc FFI. Linux x86_64 LP64 ABI.
+// All APIs are unsafe, exposed as raw C signatures; these do not own memory.
+// C pointers are opaque where Nova does not yet model native C structs.
+pub mod stdio;
+pub mod stdlib;
+pub mod string;
+pub mod ctype;
+pub mod math;
+pub mod time;
+pub mod unistd;
+pub mod fcntl;
+pub mod errno;

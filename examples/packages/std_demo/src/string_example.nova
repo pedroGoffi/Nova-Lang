@@ -1,0 +1,10 @@
+// Loaded as a separate source file by `mod string_example;` in main.nova.
+pub fn sample() -> i32 {
+    let name: u64 = std::string::native_string_create_from_text("Olá, 🌎!");
+    if std::string::native_chars(name) != 7 { return 1; }
+    let quoted: u64 = std::json::native_quote_string(name);
+    std::string::native_println(quoted);
+    std::string::native_string_destroy(quoted);
+    std::string::native_string_destroy(name);
+    return 0;
+}

@@ -1,0 +1,13 @@
+class Record<T> { value:T }
+impl<T> Record<T> {
+    virtual fn get(self:Record<T>)->T { return self.value; }
+}
+class Special<T> : Record<T> { extra:T }
+impl<T> Special<T> {
+    override fn get(self:Special<T>)->T { return self.extra; }
+    fn original(self:Special<T>)->T { return super.get(); }
+}
+fn main()->i32 {
+    auto item = new Special<i32>{ value:5, extra:10 };
+    return item.original() - 5;
+}

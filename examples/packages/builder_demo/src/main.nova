@@ -1,0 +1,30 @@
+fn main() -> i32 {
+    let b: u64 = std::builder::native_with_capacity(64);
+    std::builder::append_many(b, "Pedido #", "42", ": ");
+    std::builder::native_append_i64(b, 150);
+    std::builder::native_append(b, " unidades");
+
+    // Snapshot: returns a managed String, builder stays usable.
+    let first: u64 = std::builder::to_string(b);
+    std::string::native_println(first);
+    if !std::string::native_equals(first, "Pedido #42: 150 unidades") {
+        std::string::native_string_destroy(first);
+        std::builder::native_drop(b);
+        return 1;
+    }
+    std::string::native_string_destroy(first);
+
+    std::builder::native_append(b, " - pronto");
+    std::builder::println(b);
+
+    // Zero-copy transfer. Do not use b after into_string.
+    let final_text: u64 = std::builder::into_string(b);
+    if !std::string::native_equals(final_text, "Pedido #42: 150 unidades - pronto") {
+        std::string::native_string_destroy(final_text);
+        return 2;
+    }
+    // Use the borrowed str view with normal Nova APIs.
+    std::io::native_println(std::string::native_string_borrow_text(final_text));
+    std::string::native_string_destroy(final_text);
+    return 0;
+}

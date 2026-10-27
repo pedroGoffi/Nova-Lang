@@ -1,0 +1,13 @@
+// Serializable server configuration, using Nova's existing JSON derive.
+#[derive(Json)]
+pub struct ServerConfig {
+    port: i64,
+    max_requests: i64
+}
+
+pub fn defaults(port: i64) -> ServerConfig {
+    return new ServerConfig { port: port, max_requests: 0 };
+}
+
+// Bounded stage-0 const evaluator; callers may use this in other Nova code.
+pub const fn default_request_timeout_millis() -> i64 { return 5000; }

@@ -1,0 +1,40 @@
+// Express routing, middleware, lambda callbacks and async/generator runtime.
+// All route registration and HTTP parsing are implemented in Nova.
+#[derive(Serialize, Deserialize)]
+struct User { id: i64 }
+
+fn user_route(request: nexo::request::Request, response: nexo::response::Response) -> i32 {
+    let user = new User { id: request.id };
+    let json_text: std::json::JsonText = std::json::manage_serialized(user.toJson());
+    let result: i32 = response.json(json_text.as_str());
+    return result;
+}
+
+fn echo_route(request: nexo::request::Request, response: nexo::response::Response) -> i32 {
+    return response.text(request.body);
+}
+
+async fn run_server() -> i64 {
+    let app = nexo::create(7888) defer app.close();
+    // A named function is a first-class callback.
+    if app.get("/user", user_route) != 0 { return -1; }
+    if app.post("/echo", echo_route) != 0 { return -2; }
+    // An anonymous function is lifted to a typed function reference.
+    if app.get("/health", fn(request: nexo::request::Request, response: nexo::response::Response) -> i32 {
+        return response.text("ok");
+    }) != 0 { return -3; }
+    // A middleware callback can short-circuit the chain.
+    if app.use(fn(request: nexo::request::Request, response: nexo::response::Response) -> bool {
+        return request.id > 0;
+    }) != 0 { return -4; }
+    let served: i64=app.listen(5);
+    return served;
+}
+
+fn main() -> i32 {
+    std::io::native_println("Nova Nexo (package) running at http://127.0.0.1:7888");
+    let task: std::task::Task<i64> = std::task::manage(run_server());
+    let result: i64 = task.wait();
+    if result<0 { return 1; }
+    return 0;
+}

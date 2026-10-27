@@ -1,0 +1,28 @@
+import std;
+
+struct Message { text: str }
+impl Message {
+    fn to_string(self: &Message) -> str { return self.text; }
+    fn to_debug_string(self: &Message) -> str { return self.text; }
+}
+
+macro_rules! welcome {
+    ($name:expr) => format!("Olá, {}!", $name);
+}
+
+fn main() -> i32 {
+    let name: str = "Nova";
+    let version: i64 = 38;
+    let price: f64 = 29.90;
+    let object = new Message { text: "custom value" };
+    let greeting = welcome!(name);
+    let result = format!("{} Versão: {} | preço R$ {:.2}", greeting, version, price);
+    let debug = format!("texto={:?}, objeto={:?}", name, object);
+    let escaped = format!("{{ok}} e {name}");
+    let empty = format!("");
+    println!("{}", result);
+    println!("{}", debug);
+    println!("{}", escaped);
+    println!("{}", empty);
+    return 0;
+}

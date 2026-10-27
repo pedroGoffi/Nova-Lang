@@ -1,0 +1,17 @@
+// Nexo HTTP/1.1 router. Each component owns its own module and implementation.
+// No HTTP-specific code is embedded in std or the Nova C runtime.
+pub mod request;
+pub mod response;
+pub mod method;
+pub mod path;
+pub mod query;
+pub mod headers;
+pub mod routing;
+pub mod middleware;
+pub mod app;
+pub mod server;
+pub mod connection;
+pub mod config;
+
+// Small, source-compatible convenience constructor; types live in named modules.
+pub fn create(port: u64) -> app::App { return app::create(port); }

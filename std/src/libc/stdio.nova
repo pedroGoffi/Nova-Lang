@@ -1,0 +1,36 @@
+// Contract for libc/stdio.nova: Raw FILE* shaped stream handle.
+pub concept CStream<T> = pointer<T>;
+
+// <stdio.h> — FILE is currently represented by *mut u8 (opaque pointer).
+// Calls to libc require unsafe blocks. Format strings MUST agree with varargs.
+// Never pass a Nova-managed handle (u64) as FILE* or void*.
+// The first argument is mandatory; trailing C ABI `...` supports heterogenous
+// scalars/pointers with default promotions (NOT Nova's homogeneous typed packs).
+[[unsafe]] pub extern fn printf(format: str, ...) -> i32;
+[[unsafe]] pub extern fn fprintf(stream: *mut u8, format: str, ...) -> i32;
+[[unsafe]] pub extern fn sprintf(buffer: *mut u8, format: str, ...) -> i32;
+[[unsafe]] pub extern fn snprintf(buffer: *mut u8, capacity: usize, format: str, ...) -> i32;
+[[unsafe]] pub extern fn dprintf(descriptor: i32, format: str, ...) -> i32;
+[[unsafe]] pub extern fn scanf(format: str, ...) -> i32;
+[[unsafe]] pub extern fn fscanf(stream: *mut u8, format: str, ...) -> i32;
+[[unsafe]] pub extern fn sscanf(input: str, format: str, ...) -> i32;
+[[unsafe]] pub extern fn puts(text: str) -> i32;
+[[unsafe]] pub extern fn putchar(value: i32) -> i32;
+[[unsafe]] pub extern fn getchar() -> i32;
+[[unsafe]] pub extern fn fputs(text: str, stream: *mut u8) -> i32;
+[[unsafe]] pub extern fn fputc(value: i32, stream: *mut u8) -> i32;
+[[unsafe]] pub extern fn fgets(destination: *mut u8, size: i32, stream: *mut u8) -> *mut u8;
+[[unsafe]] pub extern fn fread(destination: *mut u8, size: usize, count: usize, stream: *mut u8) -> usize;
+[[unsafe]] pub extern fn fwrite(source: *const u8, size: usize, count: usize, stream: *mut u8) -> usize;
+[[unsafe]] pub extern fn fflush(stream: *mut u8) -> i32;
+[[unsafe]] pub extern fn fopen(path: str, mode: str) -> *mut u8;
+[[unsafe]] pub extern fn freopen(path: str, mode: str, stream: *mut u8) -> *mut u8;
+[[unsafe]] pub extern fn fclose(stream: *mut u8) -> i32;
+[[unsafe]] pub extern fn remove(path: str) -> i32;
+[[unsafe]] pub extern fn rename(from: str, to: str) -> i32;
+[[unsafe]] pub extern fn tmpfile() -> *mut u8;
+[[unsafe]] pub extern fn fileno(stream: *mut u8) -> i32;
+[[unsafe]] pub extern fn feof(stream: *mut u8) -> i32;
+[[unsafe]] pub extern fn ferror(stream: *mut u8) -> i32;
+[[unsafe]] pub extern fn clearerr(stream: *mut u8) -> ();
+[[unsafe]] pub extern fn perror(message: str) -> ();

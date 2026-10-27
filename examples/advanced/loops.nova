@@ -1,0 +1,20 @@
+fn main() -> i32 {
+    let mut total: i32 = 0;
+    for i in 0..6 {
+        if i == 2 { continue; }
+        if i == 5 { break; }
+        total += i;
+    }
+    let mut count: i32 = 0;
+    loop {
+        count += 1;
+        if count == 3 { break; }
+    }
+    let mut j: i32 = 0;
+    while j < 3 {
+        j += 1;
+        if j == 2 { continue; }
+        total += 1;
+    }
+    return total - 10 + count - 3;
+}

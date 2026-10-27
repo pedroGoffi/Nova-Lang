@@ -1,0 +1,4 @@
+# Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
+std_concurrency_028 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/std_concurrency_028 hash=0efe61bcc6461d7b
+std 0.20.0 builtin hash=e9fbac7494a68486
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/std_concurrency_028/src/main.nova hash=0efe61bcc6461d7b

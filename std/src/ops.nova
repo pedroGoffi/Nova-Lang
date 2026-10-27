@@ -1,0 +1,28 @@
+// Contract for ops.nova: Type that defines the addition operator contract.
+pub concept Addable<T> = has_method<T,add>;
+
+// Trait contracts used for user-defined operator dispatch.
+// The compiler lowers `left + right` to `left.add(right)` on user structs;
+// unlike intrinsic arithmetic these methods are normal Nova functions.
+// For now both operands have the same type; mixed-type operator bounds and
+// specializations await the generic trait system.
+pub trait Add {fn add(self: Self, other: Self) -> Self;}
+pub trait Sub {fn sub(self: Self, other: Self) -> Self;}
+pub trait Mul {fn mul(self: Self, other: Self) -> Self;}
+pub trait Div {fn div(self: Self, other: Self) -> Self;}
+pub trait Rem {fn rem(self: Self, other: Self) -> Self;}
+pub trait Eq {
+    fn eq(self: Self, other: Self) -> bool;
+    fn ne(self: Self, other: Self) -> bool;
+}
+pub trait Ord {
+    fn lt(self: Self, other: Self) -> bool;
+    fn le(self: Self, other: Self) -> bool;
+    fn gt(self: Self, other: Self) -> bool;
+    fn ge(self: Self, other: Self) -> bool;
+}
+pub trait BitAnd {fn bit_and(self: Self, other: Self) -> Self;}
+pub trait BitOr {fn bit_or(self: Self, other: Self) -> Self;}
+pub trait BitXor {fn bit_xor(self: Self, other: Self) -> Self;}
+pub trait ShiftLeft {fn shift_left(self: Self, other: Self) -> Self;}
+pub trait ShiftRight {fn shift_right(self: Self, other: Self) -> Self;}

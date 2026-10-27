@@ -1,0 +1,64 @@
+// Contract for atomic.nova: Atomic value exposing an atomic load operation.
+pub concept AtomicValue<T> = has_method<T,load>;
+
+// C11 atomics: explicit memory ordering, with ownership of the atomic cell.
+// This is a shared-memory primitive. Thread-safe value does not make a
+// containing Nova struct automatically safe to move across threads.
+[[unsafe]] extern fn native_new_i64(initial_value: i64) -> *mut i64;
+[[unsafe]] extern fn native_free_i64(pointer: *mut i64) -> ();
+[[unsafe]] extern fn native_load_i64(pointer: *mut i64, ordering: i32) -> i64;
+[[unsafe]] extern fn native_store_i64(pointer: *mut i64, value: i64, ordering: i32) -> ();
+[[unsafe]] extern fn native_swap_i64(pointer: *mut i64, value: i64, ordering: i32) -> i64;
+[[unsafe]] extern fn native_fetch_add_i64(pointer: *mut i64, amount: i64, ordering: i32) -> i64;
+[[unsafe]] extern fn native_fetch_sub_i64(pointer: *mut i64, amount: i64, ordering: i32) -> i64;
+[[unsafe]] extern fn native_fetch_and_i64(pointer: *mut i64, mask: i64, ordering: i32) -> i64;
+[[unsafe]] extern fn native_fetch_or_i64(pointer: *mut i64, mask: i64, ordering: i32) -> i64;
+[[unsafe]] extern fn native_fetch_xor_i64(pointer: *mut i64, mask: i64, ordering: i32) -> i64;
+[[unsafe]] extern fn native_compare_exchange_i64(pointer: *mut i64, expected: i64, desired: i64, success: i32, failure: i32) -> i32;
+
+// Memory order values: 0=Relaxed, 1=Acquire, 2=Release, 3=AcqRel, 4=SeqCst.
+// Illegal load/store combinations and CAS ordering are rejected by the runtime.
+pub fn relaxed() -> i32 {return 0;}
+pub fn acquire() -> i32 {return 1;}
+pub fn release() -> i32 {return 2;}
+pub fn acquire_release() -> i32 {return 3;}
+pub fn sequentially_consistent() -> i32 {return 4;}
+
+pub struct AtomicI64 { pointer: *mut i64 }
+pub fn create_i64(initial_value: i64) -> AtomicI64 {
+    unsafe { return new AtomicI64 { pointer: std::atomic::native_new_i64(initial_value) }; }
+}
+impl AtomicI64 {
+    fn load(self: &AtomicI64, ordering: i32) -> i64 {
+        unsafe { return std::atomic::native_load_i64(self.pointer, ordering); }
+    }
+    fn store(self: &AtomicI64, value: i64, ordering: i32) -> () {
+        unsafe { std::atomic::native_store_i64(self.pointer, value, ordering); }
+        return;
+    }
+    fn swap(self: &AtomicI64, value: i64, ordering: i32) -> i64 {
+        unsafe { return std::atomic::native_swap_i64(self.pointer, value, ordering); }
+    }
+    fn fetch_add(self: &AtomicI64, amount: i64, ordering: i32) -> i64 {
+        unsafe { return std::atomic::native_fetch_add_i64(self.pointer, amount, ordering); }
+    }
+    fn fetch_sub(self: &AtomicI64, amount: i64, ordering: i32) -> i64 {
+        unsafe { return std::atomic::native_fetch_sub_i64(self.pointer, amount, ordering); }
+    }
+    fn fetch_and(self: &AtomicI64, mask: i64, ordering: i32) -> i64 {
+        unsafe { return std::atomic::native_fetch_and_i64(self.pointer, mask, ordering); }
+    }
+    fn fetch_or(self: &AtomicI64, mask: i64, ordering: i32) -> i64 {
+        unsafe { return std::atomic::native_fetch_or_i64(self.pointer, mask, ordering); }
+    }
+    fn fetch_xor(self: &AtomicI64, mask: i64, ordering: i32) -> i64 {
+        unsafe { return std::atomic::native_fetch_xor_i64(self.pointer, mask, ordering); }
+    }
+    fn compare_exchange(self: &AtomicI64, expected: i64, desired: i64, success_order: i32, failure_order: i32) -> bool {
+        unsafe { return std::atomic::native_compare_exchange_i64(self.pointer, expected, desired, success_order, failure_order) != 0; }
+    }
+    fn drop(self: AtomicI64) -> () {
+        unsafe { std::atomic::native_free_i64(self.pointer); }
+        return;
+    }
+}

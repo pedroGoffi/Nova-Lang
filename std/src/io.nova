@@ -1,0 +1,93 @@
+// Contract for io.nova: Value with a printable borrowed UTF-8 representation.
+pub concept Printable<T> = requires(T value) { { value.to_string() } -> str; };
+
+// Nova STD io — compiled with the builtin runtime.
+extern fn native_print(text: str) -> ();
+extern fn native_println(text: str) -> ();
+extern fn native_print_i64(value: i64) -> ();
+extern fn native_println_i64(value: i64) -> ();
+
+// Public IO API. Native FFI bindings use `native_*`; only C symbols use `__`.
+pub fn print(text: str) -> () { native_print(text); return; }
+pub fn println(text: str) -> () { native_println(text); return; }
+pub fn print_int(value: i64) -> () { native_print_i64(value); return; }
+pub fn println_int(value: i64) -> () { native_println_i64(value); return; }
+
+// Safe blocking POSIX write to a file descriptor; -1 on error, or bytes sent.
+// No `unsafe` and no variadic syscall signature are required by the caller.
+extern fn native_write_fd(descriptor: i32, text: str) -> i64;
+pub fn write_stdout(text: str) -> i64 { return native_write_fd(1,text); }
+
+
+// C printf-family wrappers: typed i64 packs specialize per arity.
+// `%lld` / `%ld` must match passed i64 on Linux LP64.
+// User-controlled formats are unsafe in raw libc; these wrappers use the same
+// ABI but do not parse/validate format strings. Treat fmt as trusted input.
+[[unsafe]] pub fn printf_i64(format_string: str, ...values: i64) -> i32 {
+    unsafe { return std::libc::stdio::printf(format_string, ...values); }
+}
+[[unsafe]] pub fn dprintf_i64(descriptor: i32, format_string: str, ...values: i64) -> i32 {
+    unsafe { return std::libc::stdio::dprintf(descriptor, format_string, ...values); }
+}
+
+// Type-safe variadic output: every element is formatted as an i64 by Nova's
+// managed runtime, so there is NO format-string/ABI mismatch possible.
+pub fn print_values_i64(...values: i64) -> () {
+    for value_index in 0..values.len() {
+        native_print_i64(values[value_index]);
+        native_println("");
+    }
+    return;
+}
+
+
+// Format-free integer output; avoids printf ABI and untrusted format strings.
+pub fn print_int64_lines(...numbers: i64) -> () {
+    for index in 0..numbers.len() {
+        native_println_i64(numbers[index]);
+    }
+    return;
+}
+
+// Structural concept checked before LLVM emission.
+pub fn display<T: std::io::Printable>(value: T) -> () {
+    native_print(value.to_string());
+    return;
+}
+pub fn displayln<T: std::io::Printable>(value: T) -> () {
+    native_println(value.to_string());
+    return;
+}
+
+// Built-in print!/println!/eprint!/eprintln! lower into these typed
+// primitives. Callers never pass C printf format strings or variadic values.
+extern fn native_eprint(text: str) -> ();
+extern fn native_print_bool(value: bool) -> ();
+extern fn native_eprint_bool(value: bool) -> ();
+extern fn native_eprint_i64(value: i64) -> ();
+extern fn native_print_u64(value: u64) -> ();
+extern fn native_eprint_u64(value: u64) -> ();
+// precision = -1 for default, or 0..18 for `{:.*}`-style fixed decimal output.
+extern fn native_print_f64(value: f64, precision: i32) -> ();
+extern fn native_eprint_f64(value: f64, precision: i32) -> ();
+extern fn native_print_debug_str(text: str) -> ();
+extern fn native_eprint_debug_str(text: str) -> ();
+
+// Print temporary String owners without taking a borrow of a non-place AST.
+// Named String variables still use the normal borrowed `to_string()` path.
+pub fn print_owned_string(value: std::string::String) -> () {
+    native_print(value.to_string());
+    return;
+}
+pub fn print_owned_string_debug(value: std::string::String) -> () {
+    native_print_debug_str(value.to_string());
+    return;
+}
+pub fn eprint_owned_string(value: std::string::String) -> () {
+    native_eprint(value.to_string());
+    return;
+}
+pub fn eprint_owned_string_debug(value: std::string::String) -> () {
+    native_eprint_debug_str(value.to_string());
+    return;
+}

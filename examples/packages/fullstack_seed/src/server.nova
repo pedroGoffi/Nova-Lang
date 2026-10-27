@@ -1,0 +1,10 @@
+// Set the package entry to src/server.nova to run this optional HTTP demo.
+fn reply(req:nexo::request::Request,res:nexo::response::Response)->i32 {return res.text("Hello from Nova HTTP!");}
+fn main()->i32 {
+    let app=nexo::create(7878);
+    app.get("/",reply);
+    let served:i64=app.listen(1);
+    app.close();
+    if served!=1{return 1;}
+    return 0;
+}

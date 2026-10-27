@@ -1,0 +1,26 @@
+// Contract for coro.nova: Coroutine-like value exposing completion state.
+pub concept CoroutineHandle<T> = has_method<T,completed>;
+
+// Typed coroutine wrapper for the i64-word bootstrap ABI.
+extern fn native_resume(handle: u64, input: i64) -> i64;
+extern fn native_done(handle: u64) -> bool;
+extern fn native_yielded(handle: u64) -> bool;
+extern fn native_drop(handle: u64) -> ();
+extern fn native_yield_value(value: i64) -> i64;
+
+// ABI: single i64 word; arbitrary T is not supported by stage-0.
+pub struct Coroutine<T> { handle: u64, marker: [T; 0] }
+pub fn manage(handle: u64) -> Coroutine<i64> {
+    return new Coroutine<i64> { handle: handle, marker: [] };
+}
+[[unsafe]] pub fn manage_typed<T>(handle: u64) -> Coroutine<T> {
+    return new Coroutine<T> { handle: handle, marker: [] };
+}
+impl<T> Coroutine<T> {
+    fn resume(self: &Coroutine<T>, value: i64) -> T {
+        return std::coro::native_resume(self.handle, value) as T;
+    }
+    fn completed(self: &Coroutine<T>) -> bool { return std::coro::native_done(self.handle); }
+    fn has_yielded(self: &Coroutine<T>) -> bool { return std::coro::native_yielded(self.handle); }
+    fn drop(self: Coroutine<T>) -> () { std::coro::native_drop(self.handle); return; }
+}

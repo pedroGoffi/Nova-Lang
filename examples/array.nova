@@ -1,0 +1,10 @@
+fn main() -> i32 {
+    let numbers: [i32; 3] = [10, 20, 30];
+    let mut i: i32 = 0;
+    let mut sum: i32 = 0;
+    while i < 3 {
+        sum = sum + numbers[i];
+        i = i + 1;
+    }
+    if sum == 60 { return 0; } else { return 1; }
+}

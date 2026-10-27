@@ -1,0 +1,19 @@
+// HTTP is provided by the application package, never the STD runtime.
+fn reply(req: nexo::request::Request, res: nexo::response::Response) -> i32 {
+    return res.text("Hello from Nova HTTP!");
+}
+async fn serve() -> i64 {
+    let app = nexo::create(7878);
+    app.all("/*",reply);
+    let total:i64 = app.listen(1);
+    app.close();
+    return total;
+}
+fn main() -> i32 {
+    let future: u64=serve();
+    let served: i64=std::task::native_block_on(future);
+    std::coro::native_drop(future);
+    if served!=1 { return 13; }
+    std::io::native_println("Nova async HTTP completed");
+    return 0;
+}

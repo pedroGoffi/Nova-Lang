@@ -1,0 +1,14 @@
+mod greeting;
+use greeting::greet;
+
+fn main() -> i32 {
+    greet();
+    let mut sum: i32 = 0;
+    for i in 0..4 {
+        sum += i;
+    }
+    if sum != 6 { return 1; }
+    let time: u64 = std::time::native_unix_millis();
+    if time == 0 { return 2; }
+    return 0;
+}

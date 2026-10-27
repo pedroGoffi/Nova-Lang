@@ -1,0 +1,4 @@
+# Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
+stdlib_contracts_017 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/stdlib_contracts_017 hash=c79279a5ba0aa8aa
+std 0.20.0 builtin hash=e9fbac7494a68486
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/stdlib_contracts_017/src/main.nova hash=c79279a5ba0aa8aa

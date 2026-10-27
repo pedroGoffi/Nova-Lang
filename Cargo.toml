@@ -1,0 +1,13 @@
+[package]
+name = "nova"
+version = "0.20.0-alpha.1"
+edition = "2021"
+
+[dependencies]
+lalrpop-util = { version = "0.22", features = ["lexer"] }
+
+[build-dependencies]
+lalrpop = "0.22"
+
+[profile.release]
+opt-level = 3

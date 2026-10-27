@@ -1,0 +1,44 @@
+// Contract for json.nova: Managed JSON text owner exposing a borrowed serialized view.
+pub concept JsonTextView<T> = requires(T value) { { value.as_str() } -> str; };
+
+// Nova STD json — compiled with the builtin runtime.
+// Returns new owned String handle with JSON quotes and escapes.
+extern fn native_quote(text: str) -> u64;
+extern fn native_quote_string(handle: u64) -> u64;
+
+// Release the temporary str allocation returned by a derived toJson().
+// Only call after the consumer has copied the text; returns 0 on success.
+// Do not call for string literals, borrowed str or fromJson() field values.
+[[unsafe]] extern fn native_release_text(text: str) -> i32;
+
+
+// Safe JSON quoting returns an owned managed string.
+pub fn quoted(text: str) -> std::string::String {
+    return new std::string::String { handle: native_quote(text) };
+}
+pub fn quoted_string(value: &std::string::String) -> std::string::String {
+    return new std::string::String { handle: native_quote_string(value.handle) };
+}
+
+// Generated #[derive(Serialize)] toJson() yields an owned temporary `str`.
+// JsonText is its unique owner and releases it at the end of its scope.
+// Do NOT wrap string literals or borrowed/request strings with manage_serialized.
+pub struct JsonText { value: str }
+// The caller must supply a pointer created by generated toJson(). This
+// cannot be verified through a bare `str` until provenance/lifetimes exist.
+pub fn manage_serialized(value: str) -> JsonText {
+    return new JsonText { value: value };
+}
+impl JsonText {
+    // Returning a view must not consume the owner: drop would invalidate it.
+    fn as_str(self: &JsonText) -> str { return self.value; }
+    // Compare the UTF-8 byte length, not the addresses of `str` pointers.
+    // The generated JSON text is NUL-terminated and owned by this wrapper.
+    fn is_empty(self: &JsonText) -> bool {
+        return std::string::native_text_length(self.value) == 0;
+    }
+    fn drop(self: JsonText) -> () {
+        unsafe { std::json::native_release_text(self.value); }
+        return;
+    }
+}

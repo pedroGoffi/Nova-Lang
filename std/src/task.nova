@@ -1,0 +1,69 @@
+// Contract for task.nova: Task-like value providing a cooperative await operation.
+pub concept Awaitable<T> = has_method<T,await_result>;
+
+// Nova STDLIB — typed asynchronous ownership.
+// Only the private runtime ABI carries raw u64 handles; public owners carry T.
+// Stage-0 coroutine results are i64 ABI words. Task<T> permits i64 or u64
+// until the compiler can lower arbitrary generic coroutine result layouts.
+extern fn native_block_on(handle: u64) -> i64;
+extern fn native_spawn(handle: u64) -> ();
+extern fn native_sleep_ms(milliseconds: u64) -> u64;
+extern fn native_await_value(handle: u64) -> i64;
+extern fn native_tick() -> i32;
+extern fn native_run_until_idle() -> ();
+extern fn native_yield_now() -> i64;
+
+// [T;0] is a zero-sized marker: the type is checked at compile-time, but
+// the runtime ABI and resource layout remain a single u64 handle.
+// WARNING: the bootstrap runtime transports exactly one i64 ABI word.
+// Arbitrary T layouts and borrowing across suspension are not supported.
+pub struct Task<T> { handle: u64, marker: [T; 0] }
+pub struct Future<T> { handle: u64, marker: [T; 0] }
+
+// A lowered 'async fn -> i64' returns an i64-result handle.
+pub fn manage(handle: u64) -> Task<i64> {
+    return new Task<i64> { handle: handle, marker: [] };
+}
+// Explicitly choosing a different representation is an unsafe ABI assertion.
+// In stage-0, the compiler rejects T other than i64/u64.
+[[unsafe]] pub fn manage_typed<T>(handle: u64) -> Task<T> {
+    return new Task<T> { handle: handle, marker: [] };
+}
+[[unsafe]] pub fn future_typed<T>(handle: u64) -> Future<T> {
+    return new Future<T> { handle: handle, marker: [] };
+}
+pub fn future(handle: u64) -> Future<i64> {
+    return new Future<i64> { handle: handle, marker: [] };
+}
+pub fn delay(milliseconds: u64) -> Task<i64> {
+    return new Task<i64> { handle: native_sleep_ms(milliseconds), marker: [] };
+}
+pub fn start(handle: u64) -> Task<i64> {
+    std::task::native_spawn(handle);
+    return new Task<i64> { handle: handle, marker: [] };
+}
+
+impl<T> Task<T> {
+    // Each invocation produces a T, not an untyped coroutine handle.
+    fn wait(self: &Task<T>) -> T { return std::task::native_block_on(self.handle) as T; }
+    // Cooperative suspension when called from another coroutine; blocks
+    // synchronously only when there is no active coroutine.
+    fn await_result(self: &Task<T>) -> T { return std::task::native_await_value(self.handle) as T; }
+    fn finished(self: &Task<T>) -> bool { return std::coro::native_done(self.handle); }
+    fn schedule(self: &Task<T>) -> () { std::task::native_spawn(self.handle); return; }
+    fn drop(self: Task<T>) -> () { std::coro::native_drop(self.handle); return; }
+}
+impl<T> Future<T> {
+    fn wait(self: &Future<T>) -> T { return std::task::native_block_on(self.handle) as T; }
+    fn await_result(self: &Future<T>) -> T { return std::task::native_await_value(self.handle) as T; }
+    fn finished(self: &Future<T>) -> bool { return std::coro::native_done(self.handle); }
+    fn schedule(self: &Future<T>) -> () { std::task::native_spawn(self.handle); return; }
+    fn drop(self: Future<T>) -> () { std::coro::native_drop(self.handle); return; }
+}
+
+pub struct Scheduler { active: bool }
+pub fn new_scheduler() -> Scheduler { return new Scheduler { active: true }; }
+impl Scheduler {
+    fn poll(self: &Scheduler) -> i32 { return std::task::native_tick(); }
+    fn run(self: &Scheduler) -> () { std::task::native_run_until_idle(); return; }
+}

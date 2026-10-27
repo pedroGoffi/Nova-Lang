@@ -1,0 +1,14 @@
+// Concepts are purely compile-time. There are no concept objects at runtime.
+concept Numeric<T> = integer<T> || floating<T>;
+concept SmallNumber<T> = Numeric<T> && !same_as<T,f64>;
+concept Matching<A,B> = same_as<A,B>;
+
+fn add<T: SmallNumber>(a:T,b:T)->T { return a+b; }
+fn difference<T,U>(left:T,right:U)->i32 where Matching<T,U>, integer<T> {
+    return 0;
+}
+fn main()->i32 {
+    let result:i32 = add(19,23);
+    if result != 42 {return 1;}
+    return difference(1,2);
+}

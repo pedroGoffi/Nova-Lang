@@ -1,0 +1,34 @@
+// Transparent alias. Number and i32 are the same type.
+typedef Number = i32;
+
+// Trait inheritance and a closed family of permitted primitive types.
+trait Arithmetic {
+    fn twice(self: Self) -> Self;
+}
+trait<T in i8, i16, i32, i64> IntegerOperations extends Arithmetic {
+    fn add(self: T, additional: T) -> T;
+}
+impl IntegerOperations for Number {
+    fn twice(self: Number) -> Number { return self + self; }
+    fn add(self: Number, additional: Number) -> Number {
+        return self + additional;
+    }
+}
+
+// A resource with a checked destructor contract. HIR lowers its drop()
+// into lexical cleanup on normal exit, break, continue and return.
+struct ExampleResource { value: Number }
+impl std::ownership::Drop for ExampleResource {
+    fn drop(self: ExampleResource) -> () { return; }
+}
+
+fn main() -> i32 {
+    let resource = new ExampleResource { value: 42 };
+    let increment: Number = 2;
+    // Capturing lambda is a compiler-generated callable struct.
+    let operation = fn(value: Number) -> Number {
+        return value + increment;
+    };
+    let answer: Number = operation(40);
+    return answer.add(0) - 42;
+}

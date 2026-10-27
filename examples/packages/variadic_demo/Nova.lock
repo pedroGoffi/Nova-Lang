@@ -1,0 +1,4 @@
+# Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
+variadic_demo 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/variadic_demo hash=642a1f9346a44f83
+std 0.8.0 builtin hash=f4d25dab9c254cff
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/variadic_demo/src/main.nova hash=642a1f9346a44f83

@@ -1,0 +1,38 @@
+// Bounded HTTP/1.1 server over std::net's nonblocking TCP transport.
+// One connection is owned and closed per iteration; Nexo does not own a C web runtime.
+use super::app::App;
+use super::connection;
+
+gen fn request_ids() -> i64 {
+    let mut next_request_id: i64 = 0;
+    loop {
+        next_request_id += 1;
+        yield next_request_id;
+    }
+    return -1;
+}
+
+pub fn listen(app: &App, max_requests: i64) -> i64 {
+        let listener: std::net::TcpListener = std::net::listen_loopback(app.port);
+        if !listener.is_valid() { return -1; }
+        let request_counter: std::generator::Generator<i64> = std::generator::manage(request_ids());
+        let mut requests_served: i64 = 0;
+        loop {
+            if max_requests > 0 && requests_served >= max_requests { break; }
+            let connection: std::net::TcpConnection = listener.accept();
+            let accepted_descriptor: i32 = connection.descriptor_number();
+            if accepted_descriptor == -2 {
+                let delay: std::task::Task<i64> = std::task::delay(1);
+                delay.await_result();
+                // Generic Task<T> cleanup must release its native coroutine handle.
+                // This explicit consuming drop also works until HIR eagerly
+                // instantiates automatic destructors for generic Task<T>.
+                delay.drop();
+                continue;
+            }
+            if accepted_descriptor < 0 { break; }
+            connection::process(app,&connection,request_counter.next());
+            requests_served += 1;
+        }
+        return requests_served;
+}

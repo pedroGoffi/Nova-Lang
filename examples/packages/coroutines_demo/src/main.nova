@@ -1,0 +1,22 @@
+coro fn accumulator() -> i64 {
+    let mut total: i64 = 0;
+    let first: i64 = yield total;
+    total += first;
+    let second: i64 = yield total;
+    total += second;
+    return total;
+}
+
+fn main() -> i32 {
+    let handle: u64 = accumulator();
+    let first: i64 = std::coro::native_resume(handle, 0);
+    let second: i64 = std::coro::native_resume(handle, 10);
+    let third: i64 = std::coro::native_resume(handle, 5);
+    if first != 0 || second != 10 || third != 15 || !std::coro::native_done(handle) {
+        std::coro::native_drop(handle);
+        return 11;
+    }
+    std::coro::native_drop(handle);
+    std::io::native_println("coroutine OK");
+    return 0;
+}

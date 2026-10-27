@@ -1,0 +1,57 @@
+// Native syntax, AST macros and user-defined struct iteration.
+macro double($expression:expr) => $expression + $expression;
+macro when($condition:expr, $result:literal) => {
+    if $condition { return $result; }
+}
+
+struct NumberRange { start: i64, finish: i64 }
+struct NumberCursor { position: i64 }
+
+impl NumberRange {
+    fn begin(self: NumberRange) -> NumberCursor {
+        return new NumberCursor { position: self.start };
+    }
+    fn end(self: NumberRange) -> NumberCursor {
+        return new NumberCursor { position: self.finish };
+    }
+}
+impl NumberCursor {
+    fn equals(self: NumberCursor, other: NumberCursor) -> bool {
+        return self.position == other.position;
+    }
+    fn value(self: NumberCursor) -> i64 { return self.position; }
+    fn next(self: NumberCursor) -> NumberCursor {
+        return new NumberCursor { position: self.position + 1 };
+    }
+}
+
+gen fn count_to(limit: i64) -> i64 {
+    let first_position: i64 = 0;
+    for position in first_position..limit {
+        yield position;
+    }
+    return -1;
+}
+
+fn main() -> i32 {
+    let range = new NumberRange { start: 1, finish: 5 };
+    let mut sum: i64 = 0;
+    for current_number in range {
+        if current_number == 3 { continue; }
+        sum += current_number;
+    }
+    // 1 + 2 + 4 = 7
+    when!(sum != 7, 1);
+
+    let stream: u64 = count_to(4) defer dispose stream;
+    let mut generated_sum: i64 = 0;
+    while !(finished stream) {
+        let generated_value: i64 = next stream;
+        // The last resume returns the function result, not a yielded item.
+        if finished stream { break; }
+        generated_sum += generated_value;
+    }
+    // 0 + 1 + 2 + 3 = 6.
+    when!(double!(generated_sum) != 12, 2);
+    return 0;
+}

@@ -1,0 +1,4 @@
+[package]
+name = "language_features_012"
+version = "0.12.0"
+entry = "src/main.nova"

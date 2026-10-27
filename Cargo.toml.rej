@@ -1,0 +1,10 @@
+--- Cargo.toml	2026-10-24 19:00:28.653219575 +0000
++++ Cargo.toml	2026-10-24 19:30:43.273745038 +0000
+@@ -1,6 +1,6 @@
+ [package]
+ name = "nova"
+-version = "0.9.2"
++version = "0.9.3"
+ edition = "2021"
+ build = "build.rs"
+ 

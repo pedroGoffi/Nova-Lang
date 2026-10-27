@@ -1,0 +1,32 @@
+import std;
+
+fn main() -> i32 {
+    let mut users = std::map::new_map::<i64,i64>();
+    if !users.insert(10,100) {return 1;}
+    if !users.insert(20,200) {return 2;}
+    if users.insert(20,250) {return 3;}
+    if users.get_or(20,-1) != 250 {return 4;}
+    if !users.contains(10) {return 5;}
+    if !users.remove(10) {return 6;}
+    if users.contains(10) || users.len() != 1 {return 7;}
+
+    let mut labels = std::map::new_string_map::<i32>();
+    if !labels.insert("nova",1) {return 8;}
+    if labels.get_or("nova",0) != 1 {return 9;}
+
+    let mut seen = std::set::new_set::<i64>();
+    if !seen.insert(42) {return 10;}
+    if seen.insert(42) {return 11;}
+    if !seen.contains(42) {return 12;}
+
+    let mut numbers = std::vec::new_vec::<i64>();
+    numbers.push(8);
+    numbers.push(13);
+    if numbers.get(1) != 13 {return 13;}
+
+    let text = std::string::from_text("Nova");
+    if text.len() != 4 {return 14;}
+
+    std::io::println("std containers 0.21: OK");
+    return 0;
+}

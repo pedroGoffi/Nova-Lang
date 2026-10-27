@@ -1,0 +1,11 @@
+macro add_width(a, b) => a + b;
+struct Node { width: i64 }
+fn build(width: i64) -> Node { return new Node { width: width }; }
+fn main() -> i32 {
+    auto width = 20;
+    let height: auto = 9;
+    let cast_parenthesized: i64 = width as (i64);
+    let doubled: i64 = cast_parenthesized + cast_parenthesized;
+    auto node = build(add_width!(width as i64, height as i64));
+    return (node.width as i32) - 29;
+}

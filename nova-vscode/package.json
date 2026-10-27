@@ -1,0 +1,124 @@
+{
+  "name": "nova-language-tools",
+  "displayName": "Nova Language Tools",
+  "description": "Nova language tools: refined syntax, compiler-backed semantic checking, ownership and RAII with corrected error locations.",
+  "version": "0.5.1",
+  "publisher": "merchonline",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Themes",
+    "Linters",
+    "Formatters"
+  ],
+  "main": "./client/extension.js",
+  "activationEvents": [
+    "onLanguage:nova",
+    "onCommand:nova.check",
+    "onCommand:nova.restartServer"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "nova",
+        "aliases": [
+          "Nova",
+          "nova"
+        ],
+        "extensions": [
+          ".nova"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "nova",
+        "scopeName": "source.nova",
+        "path": "./syntaxes/nova.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "nova",
+        "path": "./snippets/nova.code-snippets"
+      }
+    ],
+    "commands": [
+      {
+        "command": "nova.check",
+        "title": "Nova: Check Current File / Package"
+      },
+      {
+        "command": "nova.restartServer",
+        "title": "Nova: Restart Language Server"
+      },
+      {
+        "command": "nova.showOutput",
+        "title": "Nova: Show Language Server Output"
+      }
+    ],
+    "configuration": {
+      "title": "Nova",
+      "properties": {
+        "nova.compiler.path": {
+          "type": "string",
+          "default": "nova",
+          "description": "Absolute path to the rebuilt Nova compiler with NovaLS 0.4 overlay support, or executable name on PATH."
+        },
+        "nova.diagnostics.onType": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run the full compiler semantic pipeline while typing (including ownership/RAII) when the NovaLS compiler patch is installed. Older compilers fall back to syntax only."
+        },
+        "nova.diagnostics.onSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run full Nova check of the package on save."
+        },
+        "nova.diagnostics.debounceMs": {
+          "type": "integer",
+          "default": 500,
+          "minimum": 100,
+          "maximum": 5000,
+          "description": "Delay in milliseconds before checking unsaved document syntax."
+        }
+      }
+    },
+    "themes": [
+      {
+        "label": "Nova Studio Dark",
+        "uiTheme": "vs-dark",
+        "path": "./themes/nova-studio-dark-color-theme.json"
+      },
+      {
+        "label": "Nova Studio Light",
+        "uiTheme": "vs",
+        "path": "./themes/nova-studio-light-color-theme.json"
+      },
+      {
+        "label": "Nova Aurora Dark",
+        "uiTheme": "vs-dark",
+        "path": "./themes/nova-aurora-dark-color-theme.json"
+      }
+    ]
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "check": "node --check client/extension.js && node --check server/novals.js"
+  },
+  "files": [
+    "client",
+    "server",
+    "syntaxes",
+    "snippets",
+    "language-configuration.json",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "themes"
+  ]
+}

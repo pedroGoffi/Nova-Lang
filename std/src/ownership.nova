@@ -1,0 +1,16 @@
+// Contract for ownership.nova: Resource that implements deterministic destruction.
+pub concept Droppable<T> = has_method<T,drop>;
+
+// Nova 0.15 compiler contract for deterministic destruction.
+//
+// `drop(self)` consumes the owner. The compiler inserts this destructor when
+// an owned local or parameter leaves scope, unless ownership was transferred.
+// A moved-from value cannot be used again, and its prior Drop is disabled in
+// MIR. Plain structs with Drop-bearing members receive generated reverse-order
+// field cleanup when no user destructor is present.
+//
+// This trait is a source-level contract; moves, borrows and Drop flags are
+// checked and emitted by the compiler, not implemented by runtime handles.
+pub trait Drop {
+    fn drop(self: Self) -> ();
+}

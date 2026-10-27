@@ -1,0 +1,74 @@
+// Owned, non-recursive mutexes for signed i64 values.
+// `sync(value) as guard { ... }` is checked by the compiler and lowered to
+// `acquire(&value)` with deterministic scope-based guard destruction.
+// Do not expose the raw operations as safe application functions.
+[[unsafe]] extern fn native_mutex_new(initial: i64) -> *mut i64;
+[[unsafe]] extern fn native_mutex_destroy(pointer: *mut i64) -> ();
+[[unsafe]] extern fn native_mutex_lock(pointer: *mut i64) -> ();
+[[unsafe]] extern fn native_mutex_unlock(pointer: *mut i64) -> ();
+[[unsafe]] extern fn native_mutex_lock_pair(first: *mut i64, second: *mut i64) -> ();
+[[unsafe]] extern fn native_mutex_unlock_pair(first: *mut i64, second: *mut i64) -> ();
+[[unsafe]] extern fn native_mutex_read(pointer: *mut i64) -> i64;
+[[unsafe]] extern fn native_mutex_write(pointer: *mut i64, value: i64) -> ();
+
+pub struct MutexI64 { pointer: *mut i64 }
+pub struct GuardI64 { pointer: *mut i64 }
+pub struct GuardPairI64 { first: *mut i64, second: *mut i64 }
+
+pub fn new_i64(value: i64) -> MutexI64 {
+    unsafe { return new MutexI64 { pointer: std::sync::native_mutex_new(value) }; }
+}
+
+pub fn acquire(mutex: &MutexI64) -> GuardI64 {
+    unsafe {
+        std::sync::native_mutex_lock(mutex.pointer);
+        return new GuardI64 { pointer: mutex.pointer };
+    }
+}
+
+pub fn acquire_pair(first: &MutexI64, second: &MutexI64) -> GuardPairI64 {
+    unsafe {
+        std::sync::native_mutex_lock_pair(first.pointer, second.pointer);
+        return new GuardPairI64 { first: first.pointer, second: second.pointer };
+    }
+}
+
+impl MutexI64 {
+    fn drop(self: MutexI64) -> () {
+        unsafe { std::sync::native_mutex_destroy(self.pointer); }
+        return;
+    }
+}
+impl GuardI64 {
+    fn get(self: &GuardI64) -> i64 {
+        unsafe { return std::sync::native_mutex_read(self.pointer); }
+    }
+    fn set(self: &GuardI64, value: i64) -> () {
+        unsafe { std::sync::native_mutex_write(self.pointer, value); }
+        return;
+    }
+    fn drop(self: GuardI64) -> () {
+        unsafe { std::sync::native_mutex_unlock(self.pointer); }
+        return;
+    }
+}
+impl GuardPairI64 {
+    fn get_first(self: &GuardPairI64) -> i64 {
+        unsafe { return std::sync::native_mutex_read(self.first); }
+    }
+    fn get_second(self: &GuardPairI64) -> i64 {
+        unsafe { return std::sync::native_mutex_read(self.second); }
+    }
+    fn set_first(self: &GuardPairI64, value: i64) -> () {
+        unsafe { std::sync::native_mutex_write(self.first, value); }
+        return;
+    }
+    fn set_second(self: &GuardPairI64, value: i64) -> () {
+        unsafe { std::sync::native_mutex_write(self.second, value); }
+        return;
+    }
+    fn drop(self: GuardPairI64) -> () {
+        unsafe { std::sync::native_mutex_unlock_pair(self.first, self.second); }
+        return;
+    }
+}

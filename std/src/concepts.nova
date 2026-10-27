@@ -1,0 +1,27 @@
+// Contract for concepts.nova: Integer value available to compile-time constraints.
+pub concept PlainInteger<T> = integer<T>;
+
+// Reusable compile-time predicates. Intrinsics live in the compiler; the
+// public standard concepts merely compose them without any runtime code.
+pub concept Integral<T> = integer<T>;
+pub concept SignedIntegral<T> = signed<T>;
+pub concept UnsignedIntegral<T> = unsigned<T>;
+pub concept FloatingPoint<T> = floating<T>;
+pub concept Arithmetic<T> = Integral<T> || FloatingPoint<T>;
+pub concept Boolean<T> = boolean<T>;
+pub concept Pointer<T> = pointer<T>;
+pub concept Reference<T> = reference<T>;
+pub concept SameAs<A,B> = same_as<A,B>;
+// Structural capabilities recognized by the same compile-time concept engine.
+// The second argument is a field/method identifier, not a runtime value.
+pub concept HasId<T> = has_field<T, id>;
+pub concept HasNext<T> = has_method<T, next>;
+
+// Baseline capabilities supported by the current one-word runtime ABI.
+// Do not claim that arbitrary struct/owner types are safely storable yet.
+pub concept Word<T> = Integral<T> || Boolean<T>;
+pub concept WordKey<T> = Integral<T>;
+pub concept WordValue<T> = Integral<T>;
+pub concept Stringable<T> = requires(T v) { { v.to_string() } -> str; };
+pub concept Appendable<T> = has_method<T,append>;
+pub concept Sequence<T> = has_method<T,len> && has_method<T,is_empty>;

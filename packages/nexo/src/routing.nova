@@ -1,0 +1,112 @@
+use super::request::Request;
+use super::response::Response;
+use super::method::method_name;
+use super::path::matches;
+
+pub struct RouteEntry {
+    method_code: i64,
+    // Raw managed-string handle with a single owner: this RouteEntry.
+    // A String owner cannot be field-assigned through an uninitialized *mut
+    // record in Nova 0.20, so allocation and destruction stay in this module.
+    path_handle: u64,
+    callback: fn(Request, Response) -> i32,
+    next: *mut RouteEntry,
+    last: *mut RouteEntry,
+    count: i64
+}
+pub struct RouteCollection { first: *mut RouteEntry }
+
+fn unused_route(request: Request, response: Response) -> i32 { return -1; }
+[[unsafe]] fn allocate_route(path: str) -> *mut RouteEntry {
+    unsafe {
+        let route: *mut RouteEntry = std::raw::alloc_record::<RouteEntry>();
+        route.method_code = 0;
+        route.path_handle = std::string::native_string_create_from_text(path);
+        route.callback = unused_route;
+        route.next = route;
+        route.last = route;
+        route.count = 0;
+        return route;
+    }
+}
+
+pub fn new_routes() -> RouteCollection {
+    unsafe { return new RouteCollection { first: allocate_route("") }; }
+}
+
+[[unsafe]] pub fn register_route(sentinel: *mut RouteEntry, method_code: i64, path: str,
+    callback: fn(Request,Response)->i32) -> i32
+{
+    unsafe {
+            if sentinel.count >= 128 { return -1; }
+            let route: *mut RouteEntry = allocate_route(path);
+            route.method_code = method_code;
+            // allocate_route already creates the registry-owned path copy.
+            route.callback = callback;
+            route.next = sentinel;
+            let previous_last: *mut RouteEntry = sentinel.last;
+            previous_last.next = route;
+            sentinel.last = route;
+            sentinel.count += 1;
+            return 0;
+        }
+    }
+
+impl RouteCollection {
+    fn add(self: &RouteCollection, method_code: i64, path: str, callback: fn(Request,Response)->i32) -> i32 {
+        unsafe { return register_route(self.first,method_code,path,callback); }
+    }
+
+    fn drop(self: RouteCollection) -> () {
+
+        unsafe {
+            let sentinel: *mut RouteEntry = self.first;
+            let mut current: *mut RouteEntry = sentinel.next;
+            let mut route_index: i64 = 0;
+            while route_index < sentinel.count {
+                let next_route: *mut RouteEntry = current.next;
+                std::string::native_string_destroy(current.path_handle);
+                std::raw::free_record::<RouteEntry>(current);
+                current = next_route;
+                route_index += 1;
+            }
+            std::string::native_string_destroy(sentinel.path_handle);
+            std::raw::free_record::<RouteEntry>(sentinel);
+            return;
+        }
+    }
+}
+
+// Route patterns remain owned by the App; dispatch only traverses the live
+// linked nodes. The caller must hold a borrow on the owning App.
+[[unsafe]] pub fn dispatch_routes(sentinel: *mut RouteEntry, request: Request, response: Response) -> bool {
+        let requested_method: std::string::String = std::string::from_text(request.method);
+        unsafe {
+            let mut current: *mut RouteEntry = sentinel.next;
+            let mut route_index: i64 = 0;
+            while route_index < sentinel.count {
+                let route_method: i64 = current.method_code;
+                // The route entry lives behind a raw pointer; use its stable owned-string handle.
+                let registered_path: str = std::string::native_string_borrow_text(current.path_handle);
+                if (route_method == 0 || requested_method.equals(method_name(route_method))) &&
+                    matches(registered_path, request.path) {
+                    let matched_request: Request = new Request {
+                        method: request.method,
+                        path: request.path,
+                        query: request.query,
+                        body: request.body,
+                        headers: request.headers,
+                        route_pattern: registered_path,
+                        id: request.id
+                    };
+                    let route_callback: fn(Request,Response)->i32 = current.callback;
+                    route_callback(matched_request, response);
+                    return true;
+                }
+                current = current.next;
+                route_index += 1;
+            }
+            return false;
+        }
+    }
+

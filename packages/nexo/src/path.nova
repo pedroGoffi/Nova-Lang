@@ -1,0 +1,60 @@
+// Parameter-aware routes; byte parsing, not filesystem paths.
+pub fn matches(template: str, actual: str) -> bool {
+    let template_text: std::string::String = std::string::from_text(template);
+    let actual_text: std::string::String = std::string::from_text(actual);
+    let template_length: i64 = template_text.byte_length();
+    let actual_length: i64 = actual_text.byte_length();
+    let mut template_offset: i64 = 0;
+    let mut actual_offset: i64 = 0;
+    while template_offset < template_length {
+        let template_byte: i32 = template_text.byte_at(template_offset);
+        if template_byte == 42 { return template_offset + 1 == template_length; }
+        if template_byte == 58 {
+            template_offset += 1;
+            while template_offset < template_length && template_text.byte_at(template_offset) != 47 {
+                template_offset += 1;
+            }
+            let segment_start: i64 = actual_offset;
+            while actual_offset < actual_length && actual_text.byte_at(actual_offset) != 47 {
+                actual_offset += 1;
+            }
+            if actual_offset == segment_start { return false; }
+        } else {
+            if actual_offset >= actual_length || template_byte != actual_text.byte_at(actual_offset) {
+                return false;
+            }
+            template_offset += 1;
+            actual_offset += 1;
+        }
+    }
+    return actual_offset == actual_length;
+}
+
+pub fn param_value(template: str, actual: str, key: str) -> std::string::String {
+    let template_text: std::string::String = std::string::from_text(template);
+    let actual_text: std::string::String = std::string::from_text(actual);
+    let template_length: i64 = template_text.byte_length();
+    let actual_length: i64 = actual_text.byte_length();
+    let mut template_offset: i64 = 0;
+    let mut actual_offset: i64 = 0;
+    while template_offset < template_length && actual_offset < actual_length {
+        if template_text.byte_at(template_offset) == 58 {
+            template_offset += 1;
+            let parameter_name_start: i64 = template_offset;
+            while template_offset < template_length && template_text.byte_at(template_offset) != 47 {
+                template_offset += 1;
+            }
+            let parameter_value_start: i64 = actual_offset;
+            while actual_offset < actual_length && actual_text.byte_at(actual_offset) != 47 {
+                actual_offset += 1;
+            }
+            if std::string::native_span_equals(template_text.handle,parameter_name_start,template_offset-parameter_name_start,key) {
+                return actual_text.slice(parameter_value_start as u64,(actual_offset-parameter_value_start) as u64);
+            }
+        } else {
+            template_offset += 1;
+            actual_offset += 1;
+        }
+    }
+    return std::string::new_string();
+}

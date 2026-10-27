@@ -1,0 +1,233 @@
+// Contract for vec.nova: Signed integral element safe to represent in the i64 runtime ABI.
+pub concept VectorElement<T> = signed<T>;
+
+// Nova STD vec — compiled with the builtin runtime.
+extern fn native_int64_vector_create() -> u64;
+extern fn native_int64_vector_append(handle: u64, value: i64) -> ();
+extern fn native_int64_vector_length(handle: u64) -> u64;
+extern fn native_int64_vector_reserve(handle: u64, capacity: u64) -> ();
+extern fn native_int64_vector_get(handle: u64, index: u64) -> i64;
+extern fn native_int64_vector_set(handle: u64, index: u64, value: i64) -> ();
+extern fn native_int64_vector_pop(handle: u64) -> i64;
+extern fn native_int64_vector_destroy(handle: u64) -> ();
+extern fn native_byte_vector_create() -> u64;
+extern fn native_byte_vector_append(handle: u64, value: u8) -> ();
+extern fn native_byte_vector_length(handle: u64) -> u64;
+extern fn native_byte_vector_get(handle: u64, index: u64) -> u8;
+extern fn native_byte_vector_destroy(handle: u64) -> ();
+extern fn native_byte_vector_reserve(handle: u64, capacity: u64) -> ();
+extern fn native_byte_vector_capacity(handle: u64) -> u64;
+extern fn native_byte_vector_set(handle: u64, index: u64, value: u8) -> ();
+extern fn native_byte_vector_pop(handle: u64) -> u8;
+extern fn native_byte_vector_clear(handle: u64) -> ();
+extern fn native_int64_vector_clear(handle: u64) -> ();
+
+// Signed indexing helpers for parsers (checked, no integer casts).
+extern fn native_int64_vector_count(handle: u64) -> i64;
+extern fn native_int64_vector_at(handle: u64, index: i64) -> i64;
+extern fn native_int64_vector_put(handle: u64, index: i64, value: i64) -> ();
+
+
+// Managed homogeneous vectors. This is a typed facade around stage-0 ABI
+// primitives; extending it to general Vec<T> needs element layout/ownership.
+pub struct Int64Vector { handle: u64 }
+pub struct ByteVector { handle: u64 }
+
+// Non-owning cursors: the collection must outlive the cursor.
+// The compiler's `for item in collection` uses this protocol.
+pub struct Int64Cursor { handle: u64, position: i64 }
+pub struct ByteCursor { handle: u64, position: u64 }
+
+pub fn new_int64_vector() -> Int64Vector { return new Int64Vector { handle: native_int64_vector_create() }; }
+pub fn new_byte_vector() -> ByteVector { return new ByteVector { handle: native_byte_vector_create() }; }
+impl Int64Vector {
+    fn len(self: &Int64Vector) -> u64 { return native_int64_vector_length(self.handle); }
+    fn count(self: &Int64Vector) -> i64 { return native_int64_vector_count(self.handle); }
+    fn append(self: &Int64Vector, value: i64) -> () { native_int64_vector_append(self.handle, value); return; }
+    fn reserve(self: &Int64Vector, capacity: u64) -> () { native_int64_vector_reserve(self.handle, capacity); return; }
+    fn get(self: &Int64Vector, index: i64) -> i64 { return native_int64_vector_at(self.handle,index); }
+    fn set(self: &Int64Vector, index: i64, value: i64) -> () { native_int64_vector_put(self.handle,index,value); return; }
+    fn pop(self: &Int64Vector) -> i64 { return native_int64_vector_pop(self.handle); }
+    fn is_empty(self: &Int64Vector) -> bool { return self.len() == 0; }
+    fn clear(self: &Int64Vector) -> () { native_int64_vector_clear(self.handle); return; }
+    fn push(self: &Int64Vector, value: i64) -> () { native_int64_vector_append(self.handle,value); return; }
+    fn at(self: &Int64Vector, index: i64) -> i64 { return native_int64_vector_at(self.handle,index); }
+    fn drop(self: Int64Vector) -> () { native_int64_vector_destroy(self.handle); return; }
+    fn begin(self: &Int64Vector) -> Int64Cursor {
+        return new Int64Cursor { handle: self.handle, position: 0 };
+    }
+    fn end(self: &Int64Vector) -> Int64Cursor {
+        return new Int64Cursor { handle: self.handle, position: native_int64_vector_count(self.handle) };
+    }
+}
+impl ByteVector {
+    fn len(self: &ByteVector) -> u64 { return native_byte_vector_length(self.handle); }
+    fn append(self: &ByteVector, value: u8) -> () { native_byte_vector_append(self.handle, value); return; }
+    fn get(self: &ByteVector, index: u64) -> u8 { return native_byte_vector_get(self.handle,index); }
+    fn at(self: &ByteVector, index: u64) -> u8 { return native_byte_vector_get(self.handle,index); }
+    fn set(self: &ByteVector, index: u64, value: u8) -> () { native_byte_vector_set(self.handle,index,value); return; }
+    fn push(self: &ByteVector, value: u8) -> () { native_byte_vector_append(self.handle,value); return; }
+    fn pop(self: &ByteVector) -> u8 { return native_byte_vector_pop(self.handle); }
+    fn clear(self: &ByteVector) -> () { native_byte_vector_clear(self.handle); return; }
+    fn reserve(self: &ByteVector, required_capacity: u64) -> () { native_byte_vector_reserve(self.handle,required_capacity); return; }
+    fn capacity(self: &ByteVector) -> u64 { return native_byte_vector_capacity(self.handle); }
+    fn is_empty(self: &ByteVector) -> bool { return self.len() == 0; }
+    fn drop(self: ByteVector) -> () { native_byte_vector_destroy(self.handle); return; }
+    fn begin(self: &ByteVector) -> ByteCursor {
+        return new ByteCursor { handle: self.handle, position: 0 };
+    }
+    fn end(self: &ByteVector) -> ByteCursor {
+        return new ByteCursor { handle: self.handle, position: native_byte_vector_length(self.handle) };
+    }
+}
+impl Int64Cursor {
+    fn equals(self: Int64Cursor, other: Int64Cursor) -> bool {
+        return self.handle == other.handle && self.position == other.position;
+    }
+    fn value(self: Int64Cursor) -> i64 { return native_int64_vector_at(self.handle, self.position); }
+    fn next(self: Int64Cursor) -> Int64Cursor {
+        return new Int64Cursor { handle: self.handle, position: self.position + 1 };
+    }
+}
+impl ByteCursor {
+    fn equals(self: ByteCursor, other: ByteCursor) -> bool {
+        return self.handle == other.handle && self.position == other.position;
+    }
+    fn value(self: ByteCursor) -> u8 { return native_byte_vector_get(self.handle, self.position); }
+    fn next(self: ByteCursor) -> ByteCursor {
+        return new ByteCursor { handle: self.handle, position: self.position + 1 };
+    }
+}
+
+// Nova 0.20 stage-0 typed vectors.
+// Vec<T> stores signed integral T values in the existing i64-vector ABI.
+// Use new_vec::<T>() so the VectorElement<T> concept is checked before specialization.
+// This is not a general Vec<T> for String/struct owners: those require a
+// layout-aware allocation/element-drop ABI in the compiler and runtime.
+pub struct Vec<T> { handle: u64, marker: [T; 0] }
+pub struct VecCursor<T> { handle: u64, position: i64, marker: [T; 0] }
+
+pub fn new_vec<T: std::vec::VectorElement>() -> Vec<T> {
+    return new Vec<T> { handle: native_int64_vector_create(), marker: [] };
+}
+
+impl<T> Vec<T> {
+    fn len(self: &Vec<T>) -> u64 { return native_int64_vector_length(self.handle); }
+    fn count(self: &Vec<T>) -> i64 { return native_int64_vector_count(self.handle); }
+    fn is_empty(self: &Vec<T>) -> bool { return self.len() == 0; }
+    fn reserve(self: &Vec<T>, capacity: u64) -> () {
+        native_int64_vector_reserve(self.handle, capacity); return;
+    }
+    fn push(self: &Vec<T>, value: T) -> () {
+        native_int64_vector_append(self.handle, value as i64); return;
+    }
+    fn append(self: &Vec<T>, value: T) -> () { self.push(value); return; }
+    fn get(self: &Vec<T>, index: i64) -> T {
+        return native_int64_vector_at(self.handle, index) as T;
+    }
+    fn at(self: &Vec<T>, index: i64) -> T { return self.get(index); }
+    fn set(self: &Vec<T>, index: i64, value: T) -> () {
+        native_int64_vector_put(self.handle, index, value as i64); return;
+    }
+    fn pop(self: &Vec<T>) -> T { return native_int64_vector_pop(self.handle) as T; }
+    fn clear(self: &Vec<T>) -> () { native_int64_vector_clear(self.handle); return; }
+    fn drop(self: Vec<T>) -> () { native_int64_vector_destroy(self.handle); return; }
+    fn begin(self: &Vec<T>) -> VecCursor<T> {
+        return new VecCursor<T> { handle: self.handle, position: 0, marker: [] };
+    }
+    fn end(self: &Vec<T>) -> VecCursor<T> {
+        return new VecCursor<T> { handle: self.handle, position: self.count(), marker: [] };
+    }
+}
+impl<T> VecCursor<T> {
+    fn equals(self: VecCursor<T>, other: VecCursor<T>) -> bool {
+        return self.handle == other.handle && self.position == other.position;
+    }
+    fn value(self: VecCursor<T>) -> T {
+        return native_int64_vector_at(self.handle, self.position) as T;
+    }
+    fn next(self: VecCursor<T>) -> VecCursor<T> {
+        return new VecCursor<T> { handle: self.handle, position: self.position + 1, marker: [] };
+    }
+}
+
+// Owns a dynamic sequence of UTF-8 strings. Every element is an independent
+// native String allocation. Reading returns a clone, popping transfers ownership.
+// Do not store borrowed `str` values in a raw integer vector.
+pub struct StringVector { handle: u64 }
+pub struct StringCursor { handle: u64, position: i64 }
+
+pub fn new_string_vector() -> StringVector {
+    return new StringVector { handle: native_int64_vector_create() };
+}
+impl StringVector {
+    fn len(self: &StringVector) -> u64 { return native_int64_vector_length(self.handle); }
+    fn count(self: &StringVector) -> i64 { return native_int64_vector_count(self.handle); }
+    fn is_empty(self: &StringVector) -> bool { return self.len() == 0; }
+    fn reserve(self: &StringVector, capacity: u64) -> () {
+        native_int64_vector_reserve(self.handle, capacity); return;
+    }
+    fn push(self: &StringVector, text: str) -> () {
+        let owned: u64 = std::string::native_string_create_from_text(text);
+        native_int64_vector_append(self.handle, owned as i64);
+        return;
+    }
+    fn append(self: &StringVector, text: str) -> () { self.push(text); return; }
+    fn get(self: &StringVector, index: i64) -> std::string::String {
+        let handle: u64 = native_int64_vector_at(self.handle, index) as u64;
+        return new std::string::String { handle: std::string::native_string_clone(handle) };
+    }
+    fn at(self: &StringVector, index: i64) -> std::string::String { return self.get(index); }
+    fn pop(self: &StringVector) -> std::string::String {
+        return new std::string::String { handle: native_int64_vector_pop(self.handle) as u64 };
+    }
+    fn clear(self: &StringVector) -> () {
+        let mut index: i64 = 0;
+        while index < self.count() {
+            std::string::native_string_destroy(native_int64_vector_at(self.handle, index) as u64);
+            index += 1;
+        }
+        native_int64_vector_clear(self.handle);
+        return;
+    }
+    fn drop(self: StringVector) -> () {
+        let mut index: i64 = 0;
+        while index < native_int64_vector_count(self.handle) {
+            std::string::native_string_destroy(native_int64_vector_at(self.handle, index) as u64);
+            index += 1;
+        }
+        native_int64_vector_destroy(self.handle);
+        return;
+    }
+    fn begin(self: &StringVector) -> StringCursor {
+        return new StringCursor { handle: self.handle, position: 0 };
+    }
+    fn end(self: &StringVector) -> StringCursor {
+        return new StringCursor { handle: self.handle, position: self.count() };
+    }
+}
+impl StringCursor {
+    fn equals(self: StringCursor, other: StringCursor) -> bool {
+        return self.handle == other.handle && self.position == other.position;
+    }
+    fn value(self: StringCursor) -> std::string::String {
+        let raw: u64 = native_int64_vector_at(self.handle, self.position) as u64;
+        return new std::string::String { handle: std::string::native_string_clone(raw) };
+    }
+    fn next(self: StringCursor) -> StringCursor {
+        return new StringCursor { handle: self.handle, position: self.position + 1 };
+    }
+}
+
+// Checked lookups for the typed one-word vector. These do not trap on
+// absence; `get` and `pop` above remain compatibility (trap) operations.
+impl<T> Vec<T> {
+    fn try_get(self: &Vec<T>, index: i64) -> std::option::Option<T> {
+        if index < 0 || index >= self.count() { return None; }
+        return Some(self.get(index));
+    }
+    fn try_pop(self: &mut Vec<T>) -> std::option::Option<T> {
+        if self.is_empty() { return None; }
+        return Some(self.pop());
+    }
+}

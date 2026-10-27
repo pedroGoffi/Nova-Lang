@@ -1,0 +1,16 @@
+#[derive(Serialize)]
+pub struct Sample { value: i64 }
+namespace nested {
+    pub fn f(x: i64) -> i64 { return x << 2; }
+}
+impl<T> Sample {
+    fn get(self: Sample) -> i64 { return self.value; }
+}
+pub mod utils;
+use utils::helper;
+import nested::f;
+gen fn sequence(n: i64) -> i64 { yield n; return 0; }
+coro fn runner() -> i64 { return 0; }
+async fn worker() -> i64 { return 0; }
+fn consume(...xs: i64) -> () { return; }
+extern fn printf(format: str, ...) -> i32;

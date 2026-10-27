@@ -1,0 +1,37 @@
+// Contract for memory.nova: Byte buffer with current length and capacity.
+pub concept BufferLike<T> = has_method<T,len> && has_method<T,capacity>;
+
+// Nova STD memory — compiled with the builtin runtime.
+extern fn native_buffer_new(size: u64) -> u64;
+extern fn native_buffer_drop(handle: u64) -> ();
+extern fn native_buffer_len(handle: u64) -> u64;
+extern fn native_buffer_capacity(handle: u64) -> u64;
+extern fn native_buffer_resize(handle: u64, size: u64) -> ();
+extern fn native_buffer_read(handle: u64, index: u64) -> u8;
+extern fn native_buffer_write(handle: u64, index: u64, value: u8) -> ();
+extern fn native_buffer_fill(handle: u64, value: u8) -> ();
+extern fn native_buffer_copy(destination_handle: u64, destination_offset: u64, source_handle: u64, source_offset: u64, byte_count: u64) -> ();
+extern fn native_live_resources() -> u64;
+
+
+// Managed byte storage. Read/copy operations borrow; only drop consumes an owner.
+// The underlying handle exists for stage-0 ABI compatibility and must not be
+// retained or manually dropped while a ByteBuffer owner exists.
+pub struct ByteBuffer { handle: u64 }
+
+pub fn new_buffer(byte_count: u64) -> ByteBuffer {
+    return new ByteBuffer { handle: native_buffer_new(byte_count) };
+}
+impl ByteBuffer {
+    fn len(self: &ByteBuffer) -> u64 { return native_buffer_len(self.handle); }
+    fn capacity(self: &ByteBuffer) -> u64 { return native_buffer_capacity(self.handle); }
+    fn resize(self: &ByteBuffer, byte_count: u64) -> () { native_buffer_resize(self.handle, byte_count); return; }
+    fn read(self: &ByteBuffer, index: u64) -> u8 { return native_buffer_read(self.handle, index); }
+    fn write(self: &ByteBuffer, index: u64, value: u8) -> () { native_buffer_write(self.handle, index, value); return; }
+    fn fill(self: &ByteBuffer, value: u8) -> () { native_buffer_fill(self.handle, value); return; }
+    fn copy_from(self: &ByteBuffer, destination_offset: u64, source: &ByteBuffer, source_offset: u64, byte_count: u64) -> () {
+        native_buffer_copy(self.handle, destination_offset, source.handle, source_offset, byte_count);
+        return;
+    }
+    fn drop(self: ByteBuffer) -> () { native_buffer_drop(self.handle); return; }
+}

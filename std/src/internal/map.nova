@@ -1,0 +1,15 @@
+// Contract for internal/map.nova: Opaque runtime map handle type.
+pub concept NativeMapHandle<T> = same_as<T,u64>;
+
+// Private C ABI: signed 64-bit key/value words, generational handles.
+// Public typing and ownership contracts are implemented by std::map.
+extern fn native_int64_map_create() -> u64;
+extern fn native_int64_map_length(handle: u64) -> u64;
+extern fn native_int64_map_insert(handle: u64, key: i64, value: i64) -> bool;
+extern fn native_int64_map_contains(handle: u64, key: i64) -> bool;
+extern fn native_int64_map_get_or(handle: u64, key: i64, fallback: i64) -> i64;
+extern fn native_int64_map_remove(handle: u64, key: i64) -> bool;
+extern fn native_int64_map_clear(handle: u64) -> ();
+extern fn native_int64_map_destroy(handle: u64) -> ();
+extern fn native_int64_map_key_at(handle: u64, index: u64) -> i64;
+extern fn native_int64_map_value_at(handle: u64, index: u64) -> i64;

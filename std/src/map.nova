@@ -1,0 +1,187 @@
+// Contract for map.nova: Signed integral hash key safe to represent in the i64 runtime ABI.
+pub concept MapKey<T> = signed<T>;
+
+// Stored map values also use the same exact, signed 64-bit ABI.
+pub concept MapValue<T> = signed<T>;
+
+// Checked UTF-8 string -> signed 64-bit integer map.
+// Owns keys; key_at returns an owned string which must be dropped.
+// Handles are generational and MUST be explicitly dropped.
+extern fn native_string_int64_map_create() -> u64;
+extern fn native_string_int64_map_length(handle: u64) -> u64;
+// True on a new insertion; false if an existing key was updated.
+extern fn native_string_int64_map_insert(handle: u64, key: str, value: i64) -> bool;
+extern fn native_string_int64_map_contains(handle: u64, key: str) -> bool;
+extern fn native_string_int64_map_get_or(handle: u64, key: str, fallback: i64) -> i64;
+extern fn native_string_int64_map_remove(handle: u64, key: str) -> bool;
+extern fn native_string_int64_map_owned_key_at(handle: u64, index: u64) -> u64;
+extern fn native_string_int64_map_destroy(handle: u64) -> ();
+
+
+// Owns copied UTF-8 keys. key_at() hands ownership to the caller.
+pub struct StringInt64Map { handle: u64 }
+
+pub fn new_string_int64_map() -> StringInt64Map {
+    return new StringInt64Map { handle: native_string_int64_map_create() };
+}
+impl StringInt64Map {
+    fn len(self: &StringInt64Map) -> u64 { return native_string_int64_map_length(self.handle); }
+    fn insert(self: &StringInt64Map, key: str, value: i64) -> bool { return native_string_int64_map_insert(self.handle,key,value); }
+    fn contains(self: &StringInt64Map, key: str) -> bool { return native_string_int64_map_contains(self.handle,key); }
+    fn get_or(self: &StringInt64Map, key: str, fallback: i64) -> i64 { return native_string_int64_map_get_or(self.handle,key,fallback); }
+    fn remove(self: &StringInt64Map, key: str) -> bool { return native_string_int64_map_remove(self.handle,key); }
+    fn owned_key_at(self: &StringInt64Map, index: u64) -> std::string::String {
+        return new std::string::String { handle: native_string_int64_map_owned_key_at(self.handle,index) };
+    }
+    fn drop(self: StringInt64Map) -> () { native_string_int64_map_destroy(self.handle); return; }
+}
+
+// -------------------------------------------------------------------------
+// Typed map API (bootstrap ABI)
+// Map<K,V> uses only signed integral K and V: no ptr packing and no hidden lifetime
+// assumptions. For UTF-8 keys use StringMap<V>. Other owning values await
+// type descriptors + generated element-drop glue in the Nova compiler.
+// -------------------------------------------------------------------------
+
+pub struct Map<K,V> {
+    handle: u64,
+    key_marker: [K; 0],
+    value_marker: [V; 0]
+}
+
+pub fn new_map<K: std::map::MapKey, V: std::map::MapValue>() -> Map<K,V> {
+    return new Map<K,V> {
+        handle: std::internal::map::native_int64_map_create(),
+        key_marker: [],
+        value_marker: []
+    };
+}
+
+impl<K,V> Map<K,V> {
+    fn len(self: &Map<K,V>) -> u64 {
+        return std::internal::map::native_int64_map_length(self.handle);
+    }
+    fn is_empty(self: &Map<K,V>) -> bool { return self.len() == 0; }
+    fn insert(self: &mut Map<K,V>, key: K, value: V) -> bool {
+        return std::internal::map::native_int64_map_insert(self.handle, key as i64, value as i64);
+    }
+    fn contains(self: &Map<K,V>, key: K) -> bool {
+        return std::internal::map::native_int64_map_contains(self.handle, key as i64);
+    }
+    fn get_or(self: &Map<K,V>, key: K, fallback: V) -> V {
+        return std::internal::map::native_int64_map_get_or(self.handle, key as i64, fallback as i64) as V;
+    }
+    fn get(self: &Map<K,V>, key: K) -> std::option::Option<V> {
+        if self.contains(key) {
+            return Some(std::internal::map::native_int64_map_get_or(self.handle, key as i64, 0) as V);
+        }
+        return None;
+    }
+    fn remove(self: &mut Map<K,V>, key: K) -> bool {
+        return std::internal::map::native_int64_map_remove(self.handle, key as i64);
+    }
+    fn clear(self: &mut Map<K,V>) -> () {
+        std::internal::map::native_int64_map_clear(self.handle);
+        return;
+    }
+    fn drop(self: Map<K,V>) -> () {
+        std::internal::map::native_int64_map_destroy(self.handle);
+        return;
+    }
+}
+
+// Owns copied UTF-8 keys. Values are integral and never interpreted as
+// owning pointers. Keys returned by `key_at` are new owned String objects.
+pub struct StringMap<V> { handle: u64, marker: [V; 0] }
+
+pub fn new_string_map<V: std::map::MapValue>() -> StringMap<V> {
+    return new StringMap<V> { handle: native_string_int64_map_create(), marker: [] };
+}
+impl<V> StringMap<V> {
+    fn len(self: &StringMap<V>) -> u64 { return native_string_int64_map_length(self.handle); }
+    fn is_empty(self: &StringMap<V>) -> bool { return self.len() == 0; }
+    fn insert(self: &mut StringMap<V>, key: str, value: V) -> bool {
+        return native_string_int64_map_insert(self.handle,key,value as i64);
+    }
+    fn contains(self: &StringMap<V>, key: str) -> bool {
+        return native_string_int64_map_contains(self.handle,key);
+    }
+    fn get_or(self: &StringMap<V>, key: str, fallback: V) -> V {
+        return native_string_int64_map_get_or(self.handle,key,fallback as i64) as V;
+    }
+    fn get(self: &StringMap<V>, key: str) -> std::option::Option<V> {
+        if self.contains(key) {
+            return Some(native_string_int64_map_get_or(self.handle,key,0) as V);
+        }
+        return None;
+    }
+    fn remove(self: &mut StringMap<V>, key: str) -> bool {
+        return native_string_int64_map_remove(self.handle,key);
+    }
+    fn key_at(self: &StringMap<V>, index: u64) -> std::string::String {
+        return new std::string::String { handle: native_string_int64_map_owned_key_at(self.handle,index) };
+    }
+    fn drop(self: StringMap<V>) -> () {
+        native_string_int64_map_destroy(self.handle);
+        return;
+    }
+}
+
+// Borrowed cursor. Changing the map while it is being iterated invalidates
+// its position (a logical contract; there is no borrow-lifetime checker yet).
+pub struct Entry<K,V> { key: K, value: V }
+pub struct MapCursor<K,V> { handle: u64, index: u64, key_marker: [K; 0], value_marker: [V; 0] }
+impl<K,V> Map<K,V> {
+    fn begin(self: &Map<K,V>) -> MapCursor<K,V> {
+        return new MapCursor<K,V> {
+            handle: self.handle, index: 0, key_marker: [], value_marker: []
+        };
+    }
+    fn end(self: &Map<K,V>) -> MapCursor<K,V> {
+        return new MapCursor<K,V> {
+            handle: self.handle, index: self.len(), key_marker: [], value_marker: []
+        };
+    }
+}
+impl<K,V> MapCursor<K,V> {
+    fn equals(self: MapCursor<K,V>, other: MapCursor<K,V>) -> bool {
+        return self.handle == other.handle && self.index == other.index;
+    }
+    fn value(self: MapCursor<K,V>) -> Entry<K,V> {
+        return new Entry<K,V> {
+            key: std::internal::map::native_int64_map_key_at(self.handle,self.index) as K,
+            value: std::internal::map::native_int64_map_value_at(self.handle,self.index) as V
+        };
+    }
+    fn next(self: MapCursor<K,V>) -> MapCursor<K,V> {
+        return new MapCursor<K,V> {
+            handle: self.handle,index:self.index+1,key_marker:[],value_marker:[]
+        };
+    }
+}
+
+pub struct StringEntry<V> { key: std::string::String, value: V }
+pub struct StringMapCursor<V> { handle: u64,index: u64,marker:[V;0] }
+impl<V> StringMap<V> {
+    fn begin(self: &StringMap<V>) -> StringMapCursor<V> {
+        return new StringMapCursor<V> { handle: self.handle,index:0,marker:[] };
+    }
+    fn end(self: &StringMap<V>) -> StringMapCursor<V> {
+        return new StringMapCursor<V> { handle:self.handle,index:self.len(),marker:[] };
+    }
+}
+impl<V> StringMapCursor<V> {
+    fn equals(self:StringMapCursor<V>, other:StringMapCursor<V>) -> bool {
+        return self.handle==other.handle && self.index==other.index;
+    }
+    fn value(self:StringMapCursor<V>) -> StringEntry<V> {
+        let name=new std::string::String {
+            handle: native_string_int64_map_owned_key_at(self.handle,self.index)
+        };
+        let stored_value: V = native_string_int64_map_get_or(self.handle,name.as_str(),0) as V;
+        return new StringEntry<V> {key:name,value:stored_value};
+    }
+    fn next(self:StringMapCursor<V>) -> StringMapCursor<V> {
+        return new StringMapCursor<V> {handle:self.handle,index:self.index+1,marker:[]};
+    }
+}

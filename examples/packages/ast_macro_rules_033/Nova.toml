@@ -1,0 +1,6 @@
+[package]
+name = "ast_macro_rules_033"
+version = "0.33.0"
+entry = "src/main.nova"
+[dependencies]
+std = { builtin = "std" }

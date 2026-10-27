@@ -1,0 +1,6 @@
+// Contract for libc/errno.nova: C errno integer type.
+pub concept CErrno<T> = same_as<T,i32>;
+
+// Linux glibc implementation detail; platform-specific.
+// `errno_location` binds glibc's private `__errno_location` C symbol.
+[[unsafe]] pub extern fn errno_location() -> *mut i32;

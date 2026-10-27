@@ -1,0 +1,4 @@
+# Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
+generators_demo 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/generators_demo hash=bee4d84e7d5b15e5
+std 0.8.0 builtin hash=f4d25dab9c254cff
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/generators_demo/src/main.nova hash=bee4d84e7d5b15e5

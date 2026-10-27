@@ -1,0 +1,112 @@
+// Nova 0.20 - a cached Stringable<T> wrapper, without consuming Option<T>
+// when the string is inspected. The value is still owned by the wrapper.
+// NOTE: this is not global string deduplication; see StringInterner below.
+
+pub concept Stringable<T> = requires(T value) {
+    { value.to_string() } -> str;
+};
+
+pub struct InternString<T> {
+    value: std::option::Option<T>,
+    cached: std::string::String,
+    present: bool
+}
+
+// Bound belongs on the generic function: the Nova 0.20 parser does not yet
+// allow `struct InternString<T: Stringable>` or `impl<T: Stringable>`.
+pub fn new<T: Stringable>(value: T) -> InternString<T> {
+    let text: str = value.to_string();
+    let cache = std::string::from_text(text);
+    return new InternString<T> {
+        value: Some(value),
+        cached: cache,
+        present: true
+    };
+}
+
+pub fn empty<T>() -> InternString<T> {
+    return new InternString<T> {
+        value: None,
+        cached: std::string::new_string(),
+        present: false
+    };
+}
+
+// `std::string::String` is a concrete Stringable implementation via
+// its borrowed `to_string() -> str` convenience method.
+pub fn from_text(text: str) -> InternString<std::string::String> {
+    return new InternString<std::string::String> {
+        value: Some(std::string::from_text(text)),
+        cached: std::string::from_text(text),
+        present: true
+    };
+}
+
+impl<T> InternString<T> {
+    fn is_some(self: &InternString<T>) -> bool { return self.present; }
+    fn is_none(self: &InternString<T>) -> bool { return !self.present; }
+    fn len(self: &InternString<T>) -> u64 { return self.cached.len(); }
+    fn as_str(self: &InternString<T>) -> str {
+        std::panic::check(self.present, "InternString value is none!");
+        return self.cached.as_str();
+    }
+    fn to_string(self: &InternString<T>) -> std::string::String {
+        std::panic::check(self.present, "InternString value is none!");
+        return self.cached.clone();
+    }
+}
+
+// True string interning: equal byte sequences share one stable integer ID.
+// The map copies its keys, and StringVector owns a separate indexed string
+// for resolving an ID back to an independent String.
+// Generated recursive field Drop releases StringVector and StringInt64Map.
+pub struct StringInterner {
+    keys: std::map::StringInt64Map,
+    values: std::vec::StringVector
+}
+pub fn new_interner() -> StringInterner {
+    return new StringInterner {
+        keys: std::map::new_string_int64_map(),
+        values: std::vec::new_string_vector()
+    };
+}
+impl StringInterner {
+    fn len(self: &StringInterner) -> u64 { return self.values.len(); }
+    fn is_empty(self: &StringInterner) -> bool { return self.values.is_empty(); }
+    fn intern(self: &StringInterner, text: str) -> i64 {
+        let existing: i64 = self.keys.get_or(text, -1);
+        if existing >= 0 { return existing; }
+        let id: i64 = self.values.count();
+        self.values.push(text);
+        self.keys.insert(text, id);
+        return id;
+    }
+    fn contains(self: &StringInterner, text: str) -> bool {
+        return self.keys.contains(text);
+    }
+    fn id_or(self: &StringInterner, text: str, fallback: i64) -> i64 {
+        return self.keys.get_or(text, fallback);
+    }
+    fn resolve(self: &StringInterner, id: i64) -> std::string::String {
+        std::panic::check(id >= 0 && id < self.values.count(), "invalid interned string ID");
+        return self.values.get(id);
+    }
+}
+
+// A distinct public type for stable IDs (not an owning native handle).
+// IDs are meaningful only within the StringInterner that issued them.
+pub struct InternedId { value: i64 }
+impl InternedId {
+    fn as_i64(self: &InternedId) -> i64 { return self.value; }
+    fn equals(self: &InternedId, other: &InternedId) -> bool {
+        return self.value == other.value;
+    }
+}
+impl StringInterner {
+    fn intern_id(self: &StringInterner, text: str) -> InternedId {
+        return new InternedId { value: self.intern(text) };
+    }
+    fn resolve_id(self: &StringInterner, id: InternedId) -> std::string::String {
+        return self.resolve(id.value);
+    }
+}

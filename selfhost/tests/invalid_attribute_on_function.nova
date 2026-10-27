@@ -1,0 +1,2 @@
+// Only structs and enums currently accept derive-style attributes.
+#[derive(Debug)] pub fn invalid() -> i32 { return 0; }

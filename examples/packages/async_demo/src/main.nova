@@ -1,0 +1,15 @@
+async fn calculate(value: i64) -> i64 {
+    let timer: u64 = std::task::native_sleep_ms(7);
+    let elapsed: i64 = await timer;
+    std::coro::native_drop(timer);
+    return value + elapsed;
+}
+
+fn main() -> i32 {
+    let future: u64 = calculate(40);
+    let value: i64 = std::task::native_block_on(future);
+    std::coro::native_drop(future);
+    if value != 47 { return 12; }
+    std::io::native_println("async await OK");
+    return 0;
+}

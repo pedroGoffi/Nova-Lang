@@ -1,0 +1,99 @@
+// Process one connection without taking descriptor ownership.
+// Buffer owns request bytes until middleware/handler finishes.
+use super::app::App;
+use super::config;
+use super::request::Request;
+use super::response::Response;
+use super::response;
+use super::headers::header_end;
+use super::headers::content_length;
+
+pub fn process(app: &App, connection: &std::net::TcpConnection, request_id: i64) -> i32 {
+    let accepted_descriptor: i32 = connection.descriptor_number();
+    let mut input: std::string::String = std::string::new_string();
+    let mut headers_end: i64 = -1;
+    let mut expected_body_bytes: i64 = 0;
+    let mut reading_failed: bool = false;
+    let start_timestamp: u64 = std::time::native_monotonic_millis();
+    loop {
+        let bytes_received: i64 = connection.receive(&mut input,8192);
+        if bytes_received == -2 {
+            if std::time::native_monotonic_millis()-start_timestamp > config::default_request_timeout_millis() as u64 { reading_failed=true; break; }
+            let delay: std::task::Task<i64> = std::task::delay(1);
+            delay.await_result();
+            // Generic Task<T> must release its coroutine handle before retrying.
+            delay.drop();
+            continue;
+        }
+        if bytes_received <= 0 { reading_failed=true; break; }
+        if input.byte_length() > 32768 { reading_failed=true; break; }
+        if headers_end < 0 {
+            headers_end = header_end(&input);
+            if headers_end >= 0 {
+                if headers_end > 8192 { reading_failed=true; break; }
+                expected_body_bytes = content_length(&input,headers_end);
+                if expected_body_bytes < 0 { reading_failed=true; break; }
+            }
+        }
+        if headers_end >= 0 && input.byte_length() >= headers_end+expected_body_bytes { break; }
+    }
+    if !reading_failed && headers_end >= 0 && input.byte_length() != headers_end+expected_body_bytes {
+        reading_failed = true;
+    }
+    if reading_failed || headers_end < 0 {
+        if input.byte_length() > 32768 || headers_end > 8192 || expected_body_bytes > 32768 {
+            response::send_raw(accepted_descriptor,413,"text/plain; charset=utf-8","Payload Too Large");
+        } else {
+            response::send_raw(accepted_descriptor,400,"text/plain; charset=utf-8","Bad Request");
+        }
+    } else {
+        let mut method_end: i64 = 0;
+        while method_end < headers_end && input.byte_at(method_end) != 32 { method_end += 1; }
+        let mut uri_end: i64 = method_end+1;
+        while uri_end < headers_end && input.byte_at(uri_end) != 32 { uri_end += 1; }
+        if method_end < 1 || method_end > 8 || uri_end <= method_end+1 || uri_end >= headers_end ||
+            input.byte_at(method_end+1) != 47 {
+            response::send_raw(accepted_descriptor,400,"text/plain; charset=utf-8","Bad Request");
+        } else {
+            let method_text: std::string::String = input.slice(0,method_end as u64);
+            let uri_text: std::string::String = input.slice((method_end+1) as u64,(uri_end-method_end-1) as u64);
+            let body_text: std::string::String = input.slice(headers_end as u64,expected_body_bytes as u64);
+            let mut request_line_end: i64 = uri_end;
+            while request_line_end+1 < headers_end &&
+                !(input.byte_at(request_line_end)==13 && input.byte_at(request_line_end+1)==10) {
+                request_line_end += 1;
+            }
+            let headers_text: std::string::String = input.slice((request_line_end+2) as u64,(headers_end-request_line_end-4) as u64);
+            let mut question_mark_offset: i64 = 0;
+            let uri_length: i64 = uri_text.byte_length();
+            while question_mark_offset < uri_length && uri_text.byte_at(question_mark_offset) != 63 {
+                question_mark_offset += 1;
+            }
+            let path_text: std::string::String = uri_text.slice(0,question_mark_offset as u64);
+            let mut query_separator_bytes: i64 = 0;
+            if question_mark_offset < uri_length { query_separator_bytes = 1; }
+            let query_text: std::string::String = uri_text.slice((question_mark_offset+query_separator_bytes) as u64,
+                (uri_length-question_mark_offset-query_separator_bytes) as u64);
+            let request: Request = new Request {
+                method: method_text.as_str(),
+                path: path_text.as_str(),
+                query: query_text.as_str(),
+                body: body_text.as_str(),
+                headers: headers_text.as_str(),
+                route_pattern: "",
+                id: request_id
+            };
+            let response: Response = new Response {
+                descriptor: accepted_descriptor,
+                status_code: 200,
+                content_type: "text/plain; charset=utf-8"
+            };
+            if !app.permits(request,response) {
+                response.status(403).text("Forbidden");
+            } else if !app.dispatch(request,response) {
+                response.status(404).text("Not Found");
+            }
+        }
+    }
+    return 0;
+}
