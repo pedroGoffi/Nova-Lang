@@ -1,0 +1,20 @@
+// Real Nova-authored trait with a default method: no Rust derive-specific generator.
+concept HasId<T> = has_field<T,id>;
+#[meta_derive_impl(HasId)]
+trait Identifiable {
+    fn identifier(self: &Self) -> i64 {
+        return self.id;
+    }
+}
+
+// Transitive recipes may combine native derives and Nova-authored behaviors.
+#[meta_derive(Identifiable, Clone)]
+trait Record {}
+
+#[derive(Record)]
+struct User { id: i64 }
+
+fn main() -> i32 {
+    let user = new User { id: 42 };
+    return (user.identifier() - 42) as i32;
+}

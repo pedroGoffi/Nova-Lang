@@ -1,0 +1,13 @@
+// Shared validation helpers. Parsing and percent-decoding live in Nexo.
+pub fn alphanumeric(value: str) -> bool {
+    let input=std::string::from_text(value);
+    if input.byte_length()==0 || input.byte_length()>80 { return false; }
+    let mut index: i64=0;
+    while index < input.byte_length() {
+        let code: i32=input.byte_at(index);
+        if !((code>=48 && code<=57) || (code>=65 && code<=90) ||
+            (code>=97 && code<=122)) {return false;}
+        index+=1;
+    }
+    return true;
+}

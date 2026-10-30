@@ -1,0 +1,51 @@
+import std;
+import nexo;
+
+fn main() -> i32 {
+    let source = "a=1; nova_demo_session=abcdef; other=hello";
+    let one = nexo::cookies::read(source,"nova_demo_session");
+    if !one.equals("abcdef") { return 1; }
+    let absent = nexo::cookies::read(source,"missing");
+    if !absent.is_empty() { return 2; }
+    let prefix = nexo::cookies::read("session_fake=ok; session=real","session");
+    if !prefix.equals("real") { return 3; }
+    if nexo::cookies::valid_name("bad\r\nX") { return 4; }
+    if nexo::cookies::valid_value("bad\r\nX") { return 5; }
+    let jar = nexo::cookies::jar();
+    let local = nexo::cookies::session_options(false,3600);
+    if !jar.set("demo","abc123",&local) { return 6; }
+    if !jar.clear("demo",&local) { return 7; }
+    let lines = std::string::from_text(jar.header_lines());
+    if !lines.contains("Set-Cookie: demo=abc123; Path=/; Max-Age=3600; HttpOnly; SameSite=Lax\r\n") { return 8; }
+    if !lines.contains("Set-Cookie: demo=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax\r\n") { return 9; }
+    let remote = nexo::cookies::session_options(true,60);
+    if !jar.set("__Host-demo","t",&remote) { return 10; }
+    if jar.set("__Host-demo","t",&local) { return 11; }
+    if jar.set("break","bad\r\nHeader: injection",&local) { return 12; }
+    let strict = nexo::cookies::options().with_same_site("Strict").with_max_age(120);
+    if !jar.set("preference","yes",&strict) { return 13; }
+    let unsupported = nexo::cookies::options().with_same_site("None");
+    if jar.set("insecure_none","x",&unsupported) { return 14; }
+    let possible_injection = nexo::cookies::read("login_fake=wrong; login=right", "login");
+    if !possible_injection.equals("right") { return 15; }
+    // Option distinguishes an absent key from a present empty value.
+    match nexo::cookies::find("empty=; other=ok","empty") {
+        None => { return 16; }
+        Some(value) => { if !value.is_empty() { return 17; } }
+    }
+    match nexo::cookies::find("empty=; other=ok","absent") {
+        Some(value) => { return 18; }
+        None => { }
+    }
+    // Result exposes the validation reason instead of a generic false.
+    match jar.try_set("bad\r\nname","x",&local) {
+        Ok(written) => { return 19; }
+        Err(error) => { if error.code()!=400 { return 20; } }
+    }
+    match jar.try_set("good","x",&local) {
+        Ok(written) => { }
+        Err(error) => { return 21; }
+    }
+    println!("Nexo cookies: 21 verificacoes concluidas.");
+    return 0;
+}

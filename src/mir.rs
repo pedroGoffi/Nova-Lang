@@ -47,6 +47,16 @@ pub enum Instruction {
     Eval(Rvalue),
 }
 #[derive(Debug, Clone)]
+pub struct Place {
+    pub root: LocalId,
+    pub projections: Vec<PlaceProjection>,
+}
+#[derive(Debug, Clone)]
+pub enum PlaceProjection {
+    Field(usize),
+    Index(Operand),
+}
+#[derive(Debug, Clone)]
 pub enum Rvalue {
     Use(Operand),
     Unary(UnaryOp, Operand),
@@ -58,7 +68,7 @@ pub enum Rvalue {
     Field(Operand, usize),
     Array(Vec<Operand>),
     Index(Operand, Operand),
-    AddressOf(LocalId),
+    AddressOf(Place),
     Deref(Operand),
     Cast(Operand, TypeId),
 }
@@ -153,6 +163,26 @@ impl Builder {
             ExprKind::Bool(b) => Operand::Bool(*b),
             ExprKind::Str(s) => Operand::Str(s.clone()),
             ExprKind::Unit => Operand::Unit,
+            ExprKind::If { condition, then_body, else_body, result } => {
+                let cond = self.expression(condition);
+                let yes = self.new_block();
+                let no = self.new_block();
+                let join = self.new_block();
+                self.end(Terminator::Branch { condition: cond, then_bb:yes, else_bb:no });
+                self.current = yes;
+                self.statements(then_body);
+                if !self.is_terminated() { self.end(Terminator::Goto(join)); }
+                self.current = no;
+                self.statements(else_body);
+                if !self.is_terminated() { self.end(Terminator::Goto(join)); }
+                self.current = join;
+                result.map_or(Operand::Unit, Operand::Local)
+            }
+            ExprKind::Block { body, result } => {
+                self.statements(body);
+                result.map_or(Operand::Unit, Operand::Local)
+            }
+
             ExprKind::Zero => Operand::Zero(e.ty),
             ExprKind::Local(id) => Operand::Local(*id),
             ExprKind::MoveLocal(owner) => {
@@ -247,6 +277,20 @@ impl Builder {
                 self.assign(dst, Rvalue::Field(base, *index));
                 Operand::Local(dst)
             }
+            ExprKind::TakeMatchField(parent, index) => {
+                let ExprKind::Local(owner) = &parent.kind else {
+                    unreachable!("match payload must reference a named local");
+                };
+                let base = Operand::Local(*owner);
+                let dst = self.temp(e.ty);
+                self.assign(dst, Rvalue::Field(base, *index));
+                // This is a MOVE, not a duplicate. Disable the enum's Drop
+                // after snapshotting its sole live owner field.
+                if let Some(flag) = self.drop_flags.get(owner).copied() {
+                    self.assign(flag, Rvalue::Use(Operand::Bool(false)));
+                }
+                Operand::Local(dst)
+            }
             ExprKind::Array(items) => {
                 let values = items.iter().map(|a| self.expression(a)).collect();
                 let dst = self.temp(e.ty);
@@ -260,9 +304,33 @@ impl Builder {
                 self.assign(dst, Rvalue::Index(array, index));
                 Operand::Local(dst)
             }
-            ExprKind::AddressOf { local, .. } => {
+            ExprKind::DropArray { root, element, len, drop_fn } => {
+                for index in (0..*len).rev() {
+                    // The root remains the sole owner; each element is passed
+                    // to its destructor once, without an aggregate Drop call.
+                    let element_tmp = self.temp(*element);
+                    self.assign(element_tmp, Rvalue::Index(
+                        Operand::Local(*root), Operand::Int(index as i128, self.types.i32())
+                    ));
+                    self.function.blocks[self.current].instructions.push(
+                        Instruction::Eval(Rvalue::Call(*drop_fn, vec![Operand::Local(element_tmp)]))
+                    );
+                }
+                Operand::Unit
+            }
+            ExprKind::AddressOf { place, .. } => {
+                let mut projections = Vec::with_capacity(place.projections.len());
+                for projection in &place.projections {
+                    match projection {
+                        hir::PlaceProjection::Field(index) => projections.push(PlaceProjection::Field(*index)),
+                        hir::PlaceProjection::Index(index) => {
+                            let operand = self.expression(index);
+                            projections.push(PlaceProjection::Index(operand));
+                        }
+                    }
+                }
                 let dst = self.temp(e.ty);
-                self.assign(dst, Rvalue::AddressOf(*local));
+                self.assign(dst, Rvalue::AddressOf(Place { root: place.root, projections }));
                 Operand::Local(dst)
             }
             ExprKind::Deref(ptr) => {
@@ -605,6 +673,32 @@ fn check_operand(
     let _ = operand_ty(op, f, types)?;
     Ok(())
 }
+/// Verify that every address projection traverses a genuine struct/array.
+fn place_type(place: &Place, f: &Function, types: &Types) -> Result<TypeId, String> {
+    let mut current = *f.locals.get(place.root)
+        .ok_or_else(|| format!("invalid place root {}", place.root))?;
+    for projection in &place.projections {
+        current = match projection {
+            PlaceProjection::Field(field) => {
+                let TypeKind::Struct(id) = types.kind(current) else {
+                    return Err("field address on non-struct".into());
+                };
+                types.structs[id].fields.get(*field)
+                    .ok_or_else(|| "invalid field address projection".to_string())?.ty
+            }
+            PlaceProjection::Index(index) => {
+                if operand_ty(index, f, types)? != types.i32() {
+                    return Err("array address index must be i32".into());
+                }
+                let TypeKind::Array { element, .. } = types.kind(current) else {
+                    return Err("indexed address on non-array".into());
+                };
+                element
+            }
+        };
+    }
+    Ok(current)
+}
 fn read_operands(rv: &Rvalue) -> Vec<&Operand> {
     match rv {
         Rvalue::Use(a)
@@ -618,7 +712,9 @@ fn read_operands(rv: &Rvalue) -> Vec<&Operand> {
             values.iter().collect()
         }
         Rvalue::CallIndirect(ptr, args) => std::iter::once(ptr).chain(args.iter()).collect(),
-        Rvalue::AddressOf(_) | Rvalue::FnRef(..) => vec![],
+        Rvalue::AddressOf(place) => place.projections.iter().filter_map(|projection|
+            match projection { PlaceProjection::Index(op) => Some(op), _ => None }).collect(),
+        Rvalue::FnRef(..) => vec![],
     }
 }
 fn successors(bb: &BasicBlock) -> Vec<BlockId> {
@@ -649,13 +745,14 @@ fn verify_rvalue_contract(rv: &Rvalue, f: &Function, program: &Program) -> Resul
                 ));
             }
             let numeric = types.numeric(lt);
+            let character = lt == types.character();
             let integer = types.integer(lt).is_some();
             let boolean = lt == types.boolean();
             let valid = match op {
                 BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
                     numeric
                 }
-                BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => numeric,
+                BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => numeric || character,
                 BinaryOp::BitAnd
                 | BinaryOp::BitOr
                 | BinaryOp::BitXor
@@ -663,7 +760,7 @@ fn verify_rvalue_contract(rv: &Rvalue, f: &Function, program: &Program) -> Resul
                 | BinaryOp::Shr => integer,
                 BinaryOp::And | BinaryOp::Or => boolean,
                 BinaryOp::Eq | BinaryOp::Ne => {
-                    numeric || boolean || matches!(types.kind(lt), TypeKind::Pointer { .. })
+                    numeric || boolean || character || matches!(types.kind(lt), TypeKind::Pointer { .. })
                 }
             };
             if !valid {
@@ -864,12 +961,11 @@ pub fn verify(program: &Program) -> Result<(), String> {
                                 return Err(format!("invalid numeric cast in '{}'", f.name));
                             }
                         }
-                        Rvalue::AddressOf(local) => {
-                            if *local >= f.locals.len() {
-                                return Err(format!("'{}' bad address local", f.name));
-                            }
-                            if !matches!(program.types.kind(f.locals[*dst]),TypeKind::Pointer{element,..}|TypeKind::Reference{element,..} if element==f.locals[*local])
-                            {
+                        Rvalue::AddressOf(place) => {
+                            let element_ty = place_type(place, f, &program.types)?;
+                            if !matches!(program.types.kind(f.locals[*dst]),
+                                TypeKind::Pointer{element,..}|TypeKind::Reference{element,..}
+                                if element == element_ty) {
                                 return Err("invalid address-of destination type".into());
                             }
                         }
@@ -971,8 +1067,8 @@ pub fn verify(program: &Program) -> Result<(), String> {
                         if let Rvalue::Index(_, idx) = value {
                             check_operand(idx, f, &program.types, &initialized)?;
                         }
-                        if let Rvalue::AddressOf(local) = value {
-                            if !initialized.contains(local) {
+                        if let Rvalue::AddressOf(place) = value {
+                            if !initialized.contains(&place.root) {
                                 return Err("address of uninitialized local".into());
                             }
                         }

@@ -87,6 +87,18 @@ pub struct Expr {
     pub ty: TypeId,
     pub kind: ExprKind,
 }
+/// An addressable location, not a value: projections never move the owner.
+/// An index is evaluated once when the borrow is established.
+#[derive(Debug, Clone)]
+pub struct Place {
+    pub root: LocalId,
+    pub projections: Vec<PlaceProjection>,
+}
+#[derive(Debug, Clone)]
+pub enum PlaceProjection {
+    Field(usize),
+    Index(Expr),
+}
 #[derive(Debug, Clone)]
 pub enum ExprKind {
     Int(i128),
@@ -95,6 +107,10 @@ pub enum ExprKind {
     Str(String),
     Unit,
     Zero,
+    /// Branches assign the same synthetic local without ever moving fields.
+    If { condition: Box<Expr>, then_body: Vec<Stmt>, else_body: Vec<Stmt>, result: Option<LocalId> },
+    /// A scoped expression; its final value is moved to an outer result local.
+    Block { body: Vec<Stmt>, result: Option<LocalId> },
     Local(LocalId),
     Unary(UnaryOp, Box<Expr>),
     Binary(Box<Expr>, BinaryOp, Box<Expr>),
@@ -103,10 +119,17 @@ pub enum ExprKind {
     CallIndirect(Box<Expr>, Vec<Expr>),
     StructInit(StructId, Vec<Expr>),
     Field(Box<Expr>, usize),
+    /// Compiler-generated enum match: consume its sole live owning payload.
+    /// Unlike ordinary field projections, this transfers the whole owner and
+    /// invalidates the enum temporary's Drop flag.
+    TakeMatchField(Box<Expr>, usize),
     Array(Vec<Expr>),
     Index(Box<Expr>, Box<Expr>),
+    /// Compiler-generated cleanup for a fixed array of owned structs.
+    /// Consumes each element exactly once when its root is still live.
+    DropArray { root: LocalId, element: TypeId, len: usize, drop_fn: FunctionId },
     AddressOf {
-        local: LocalId,
+        place: Place,
         mutable: bool,
     },
     Deref(Box<Expr>),
@@ -187,6 +210,77 @@ impl<'a> Resolver<'a> {
         self.loop_depth -= 1;
         result
     }
+    /// Resolve an lvalue without evaluating its owning aggregate by value.
+    /// At this stage, projections are rooted in a named local. Reborrowing
+    /// through *references* is intentionally a separate lifetime feature.
+    fn place(&mut self, value: &ast::Expr) -> Result<(Place, TypeId), String> {
+        use ast::Expr as A;
+        match value {
+            A::Var(name) => {
+                let root = self.find_local(name)
+                    .ok_or_else(|| format!("unknown local '{name}'"))?;
+                Ok((Place { root, projections: Vec::new() }, self.locals[root].ty))
+            }
+            A::Field(parent, name) => {
+                let (mut place, parent_ty) = self.place(parent)?;
+                let TypeKind::Struct(sid) = self.types.kind(parent_ty) else {
+                    return Err(format!("cannot borrow field '{name}' of non-struct"));
+                };
+                let (index, field) = self.types.structs[sid].fields.iter().enumerate()
+                    .find(|(_, field)| field.name == *name)
+                    .ok_or_else(|| format!("unknown field '{name}'"))?;
+                let ty = field.ty;
+                place.projections.push(PlaceProjection::Field(index));
+                Ok((place, ty))
+            }
+            A::Index(parent, index) => {
+                let (mut place, parent_ty) = self.place(parent)?;
+                let TypeKind::Array { element, len } = self.types.kind(parent_ty) else {
+                    return Err("indexed borrow requires a fixed-size array".into());
+                };
+                let i32_ty = self.types.i32();
+                let index = self.expect(index, i32_ty)?;
+                // Avoid emitting an unreachable GEP for an obvious bad literal.
+                if let ExprKind::Int(n) = &index.kind {
+                    if *n < 0 || *n >= len as i128 {
+                        return Err(format!("array borrow index {n} out of bounds (length {len})"));
+                    }
+                }
+                place.projections.push(PlaceProjection::Index(index));
+                Ok((place, element))
+            }
+            _ => Err("borrow requires an addressable local, field or indexed array element".into()),
+        }
+    }
+    /// Lower a value block in a fresh lexical scope. The last expression is
+    /// deliberately lowered *after* preceding lets so it sees their bindings.
+    fn value_branch(
+        &mut self, body: &[ast::Stmt], expected: Option<TypeId>, required: bool,
+    ) -> Result<(Vec<Stmt>, Expr), String> {
+        self.scopes.push(HashMap::new());
+        let output = (|| {
+            let (prefix, last) = match body.split_last() {
+                Some((ast::Stmt::Tail(value), prefix)) => (prefix, Some(value)),
+                _ => (body, None),
+            };
+            let statements = self.block(prefix)?;
+            let tail = match last {
+                Some(expr) => self.expr(expr, expected)?,
+                None if !required => Expr { ty:self.types.unit(), kind:ExprKind::Unit },
+                None => return Err("if expression branch must yield a value".into()),
+            };
+            Ok((statements, tail))
+        })();
+        self.scopes.pop();
+        output
+    }
+    fn fresh_expression_result(&mut self, ty: TypeId) -> Result<LocalId, String> {
+        if matches!(self.types.kind(ty), TypeKind::Reference { .. }) {
+            return Err("returning a borrow from a value block requires lifetime analysis".into());
+        }
+        let name = format!("__nova_expression_result_{}", self.locals.len());
+        self.declare(&name, ty, true)
+    }
     fn expect(&mut self, e: &ast::Expr, expected: TypeId) -> Result<Expr, String> {
         self.expr(e, Some(expected))
     }
@@ -199,6 +293,37 @@ impl<'a> Resolver<'a> {
             A::Lambda { .. } => return Err("compiler bug: lambda was not lifted".into()),
             A::MethodCall(..) | A::GenericCall(..) | A::GenericStructInit(..) => {
                 return Err("compiler bug: surface expression reached typed HIR".into())
+            }
+            A::If { condition, then_body, else_body } => {
+                let bool_ty = self.types.boolean();
+                let condition = self.expect(condition, bool_ty)?;
+                let (mut then_stmts, then_value) = self.value_branch(then_body, expected, true)?;
+                let (mut else_stmts, else_value) = self.value_branch(else_body, Some(then_value.ty), true)?;
+                if then_value.ty != else_value.ty {
+                    return Err(format!("if branches disagree: expected {}, got {}",
+                        self.types.display(then_value.ty), self.types.display(else_value.ty)));
+                }
+                let ty = then_value.ty;
+                let result = if ty == self.types.unit() { None } else {
+                    let local = self.fresh_expression_result(ty)?;
+                    then_stmts.push(Stmt::Set { local, value: then_value });
+                    else_stmts.push(Stmt::Set { local, value: else_value });
+                    Some(local)
+                };
+                (ty, ExprKind::If {
+                    condition: Box::new(condition), then_body:then_stmts,
+                    else_body:else_stmts, result,
+                })
+            }
+            A::Block(body) => {
+                let (mut statements, tail) = self.value_branch(body, expected, false)?;
+                let ty = tail.ty;
+                let result = if ty == self.types.unit() { None } else {
+                    let local = self.fresh_expression_result(ty)?;
+                    statements.push(Stmt::Set { local, value:tail });
+                    Some(local)
+                };
+                (ty, ExprKind::Block { body:statements, result })
             }
             A::MacroCall(..) => return Err("compiler bug: macro call reached typed HIR".into()),
             A::Cast(inner, target) => {
@@ -383,7 +508,7 @@ impl<'a> Resolver<'a> {
                 if bitwise && self.types.integer(left.ty).is_none() {
                     return Err(format!("operator '{op:?}' requires integer operands"));
                 }
-                if ordering && !self.types.numeric(left.ty) {
+                if ordering && !self.types.numeric(left.ty) && left.ty != self.types.character() {
                     return Err("comparison requires numeric operands".into());
                 }
                 if logical && left.ty != self.types.boolean() {
@@ -503,6 +628,10 @@ impl<'a> Resolver<'a> {
                 (id, ExprKind::StructInit(struct_id, resolved))
             }
             A::Field(value, name) => {
+                // Surface's match desugaring creates a private named enum
+                // temporary. Only its bindings may transfer a payload owner.
+                let match_payload = matches!(value.as_ref(), A::Var(local)
+                    if local.starts_with("__nova_match_") && name != "__nova_tag");
                 let value = self.expr(value, None)?;
                 let sid = match self.types.kind(value.ty) {
                     TypeKind::Struct(s) => s,
@@ -518,10 +647,27 @@ impl<'a> Resolver<'a> {
                             self.types.structs[sid].name
                         )
                     })?;
-                (
-                    self.types.structs[sid].fields[index].ty,
-                    ExprKind::Field(Box::new(value), index),
-                )
+                let payload_ty = self.types.structs[sid].fields[index].ty;
+                if match_payload && field_has_drop(self.types, payload_ty, self.signatures) {
+                    // The enum layout stores inactive variants as zeroed
+                    // fields. This move is safe only if the active variant
+                    // contains ONE owning payload; other fields must be Copy.
+                    let variant_tag = name.strip_prefix("__nova_variant_")
+                        .and_then(|rest| rest.split_once('_'))
+                        .and_then(|(tag, _)| tag.parse::<usize>().ok())
+                        .ok_or("invalid compiler-generated enum payload name")?;
+                    let owning_in_variant = self.types.structs[sid].fields.iter()
+                        .filter(|f| f.name.strip_prefix("__nova_variant_")
+                            .and_then(|rest| rest.split_once('_'))
+                            .and_then(|(tag, _)| tag.parse::<usize>().ok()) == Some(variant_tag))
+                        .filter(|f| field_has_drop(self.types, f.ty, self.signatures)).count();
+                    if owning_in_variant != 1 {
+                        return Err(format!("matching variant tag {variant_tag} with multiple owning fields is not yet supported"));
+                    }
+                    (payload_ty, ExprKind::TakeMatchField(Box::new(value), index))
+                } else {
+                    (payload_ty, ExprKind::Field(Box::new(value), index))
+                }
             }
             A::Array(items) => {
                 if items.is_empty() {
@@ -562,48 +708,30 @@ impl<'a> Resolver<'a> {
                 (element, ExprKind::Index(Box::new(value), Box::new(index)))
             }
             A::AddressOf { mutable, value } => {
-                let name = match value.as_ref() {
-                    A::Var(name) => name,
-                    _ => return Err("address-of currently supports named locals only".into()),
-                };
-                let local = self
-                    .find_local(name)
-                    .ok_or_else(|| format!("unknown local '{name}'"))?;
-                if *mutable && !self.locals[local].mutable {
-                    return Err(format!("mutable pointer requires 'let mut {name}'"));
+                let (place, element_ty) = self.place(value)?;
+                if *mutable && !self.locals[place.root].mutable {
+                    return Err(format!("mutable borrow requires 'let mut {}'",
+                        self.locals[place.root].name));
                 }
                 let ty = if let Some(expected) = expected {
                     match self.types.kind(expected) {
-                        TypeKind::Pointer {
-                            element,
-                            mutable: want,
-                        } if element == self.locals[local].ty && want == *mutable => {
+                        TypeKind::Pointer { element, mutable: want }
+                            if element == element_ty && want == *mutable => {
                             if self.unsafe_depth == 0 {
-                                return Err(
-                                    "raw address-of requires unsafe; use a typed borrow &T instead"
-                                        .into(),
-                                );
+                                return Err("raw address-of requires unsafe; use a typed borrow &T instead".into());
                             }
                             expected
                         }
                         _ => self.types.intern(TypeKind::Reference {
-                            element: self.locals[local].ty,
-                            mutable: *mutable,
+                            element: element_ty, mutable: *mutable,
                         }),
                     }
                 } else {
                     self.types.intern(TypeKind::Reference {
-                        element: self.locals[local].ty,
-                        mutable: *mutable,
+                        element: element_ty, mutable: *mutable,
                     })
                 };
-                (
-                    ty,
-                    ExprKind::AddressOf {
-                        local,
-                        mutable: *mutable,
-                    },
-                )
+                (ty, ExprKind::AddressOf { place, mutable: *mutable })
             }
             A::Deref(inner) => {
                 let inner = self.expr(inner, None)?;
@@ -632,7 +760,29 @@ impl<'a> Resolver<'a> {
         Ok(Expr { ty, kind })
     }
     fn automatic_cleanup(&self, local: LocalId) -> Result<Option<Stmt>, String> {
-        let TypeKind::Struct(struct_id) = self.types.kind(self.locals[local].ty) else {
+        let owner_ty = self.locals[local].ty;
+        // A fixed array owns every element. Emit one root-guarded cleanup,
+        // otherwise marking the root as moved could skip some elements.
+        if let TypeKind::Array { element, len } = self.types.kind(owner_ty) {
+            if let TypeKind::Struct(sid) = self.types.kind(element) {
+                let info = &self.types.structs[sid];
+                let method = format!("{}__drop", info.name);
+                if let Some(sig) = self.signatures.get(&method) {
+                    if sig.params != vec![element] || sig.result != self.types.unit() {
+                        return Err(format!("'{}::drop' must consume {} and return ()",info.name,info.name));
+                    }
+                    return Ok(Some(Stmt::Defer {
+                        expr: Expr {
+                            ty: self.types.unit(),
+                            kind: ExprKind::DropArray { root: local, element, len, drop_fn: sig.id },
+                        },
+                        owner: Some(local),
+                    }));
+                }
+            }
+            return Ok(None);
+        }
+        let TypeKind::Struct(struct_id) = self.types.kind(owner_ty) else {
             return Ok(None);
         };
         let info = &self.types.structs[struct_id];
@@ -695,36 +845,8 @@ impl<'a> Resolver<'a> {
                             expr: cleanup,
                             owner: None,
                         });
-                    } else if let TypeKind::Struct(sid) = self.types.kind(self.locals[local].ty) {
-                        let info = &self.types.structs[sid];
-                        if info.is_class
-                            || self
-                                .signatures
-                                .contains_key(&format!("{}__drop", info.name))
-                        {
-                            let method = format!("{}__drop", info.name);
-                            if let Some(sig) = self.signatures.get(&method) {
-                                if sig.params == vec![self.locals[local].ty]
-                                    && sig.result == self.types.unit()
-                                {
-                                    out.push(Stmt::Defer {
-                                        expr: Expr {
-                                            ty: self.types.unit(),
-                                            kind: ExprKind::Call(
-                                                sig.id,
-                                                vec![Expr {
-                                                    ty: self.locals[local].ty,
-                                                    kind: ExprKind::Local(local),
-                                                }],
-                                            ),
-                                        },
-                                        owner: Some(local),
-                                    });
-                                } else {
-                                    return Err(format!("class '{}' drop(self) must accept its own type and return ()",info.name));
-                                }
-                            }
-                        }
+                    } else if let Some(cleanup) = self.automatic_cleanup(local)? {
+                        out.push(cleanup);
                     }
                     continue;
                 }
@@ -959,6 +1081,9 @@ impl<'a> Resolver<'a> {
                     Stmt::Continue
                 }
                 ast::Stmt::Unsafe(body) => Stmt::Unsafe(self.scoped(body, true)?),
+                // Only a function's root tail becomes Return (in surface).
+                // In an ordinary statement block, the value is discarded.
+                ast::Stmt::Tail(e) => Stmt::Expr(self.expr(e, None)?),
                 ast::Stmt::Expr(e) => {
                     let value = self.expr(e, None)?;
                     let own_type = value.ty;
@@ -1428,16 +1553,58 @@ pub fn lower(program: &ast::Program) -> Result<Program, String> {
         let info = &types.structs[struct_id];
         let owner_ty = signature.params[0];
         let mut body = Vec::new();
-        for (field_index, field) in info.fields.iter().enumerate().rev() {
-            let receiver = Expr {
-                ty: owner_ty,
-                kind: ExprKind::Local(0),
-            };
-            let member = Expr {
-                ty: field.ty,
-                kind: ExprKind::Field(Box::new(receiver), field_index),
-            };
-            body.extend(drop_field_actions(&types, field.ty, member, &signatures));
+        let tagged_enum = info.fields.first().map(|field| field.name == "__nova_tag").unwrap_or(false);
+        if tagged_enum {
+            // Generic enums are represented by a tag plus flattened variant
+            // fields. Inactive variants are zero-initialized and MUST NOT be
+            // destroyed. Build one guarded cleanup per discriminant.
+            let mut variant_tags: Vec<usize> = Vec::new();
+            for field in info.fields.iter().skip(1) {
+                if let Some(tag) = field.name.strip_prefix("__nova_variant_")
+                    .and_then(|rest| rest.split_once('_'))
+                    .and_then(|(tag, _)| tag.parse::<usize>().ok()) {
+                    if !variant_tags.contains(&tag) { variant_tags.push(tag); }
+                }
+            }
+            // Empty variants produce no payload fields and need no cleanup.
+            for tag in variant_tags {
+                let mut actions = Vec::new();
+                for (index, field) in info.fields.iter().enumerate().rev() {
+                    let belongs = field.name.strip_prefix("__nova_variant_")
+                        .and_then(|rest| rest.split_once('_'))
+                        .and_then(|(field_tag, _)| field_tag.parse::<usize>().ok()) == Some(tag);
+                    if !belongs { continue; }
+                    let member = Expr {
+                        ty: field.ty,
+                        kind: ExprKind::Field(Box::new(Expr { ty: owner_ty, kind: ExprKind::Local(0) }), index),
+                    };
+                    actions.extend(drop_field_actions(&types, field.ty, member, &signatures));
+                }
+                if !actions.is_empty() {
+                    let condition = Expr {
+                        ty: types.boolean(),
+                        kind: ExprKind::Binary(
+                            Box::new(Expr { ty: types.i32(), kind: ExprKind::Field(
+                                Box::new(Expr { ty: owner_ty, kind: ExprKind::Local(0) }), 0) }),
+                            ast::BinaryOp::Eq,
+                            Box::new(Expr { ty: types.i32(), kind: ExprKind::Int(tag as i128) }),
+                        ),
+                    };
+                    body.push(Stmt::If { condition, then_body: actions, else_body: None });
+                }
+            }
+        } else {
+            for (field_index, field) in info.fields.iter().enumerate().rev() {
+                let receiver = Expr {
+                    ty: owner_ty,
+                    kind: ExprKind::Local(0),
+                };
+                let member = Expr {
+                    ty: field.ty,
+                    kind: ExprKind::Field(Box::new(receiver), field_index),
+                };
+                body.extend(drop_field_actions(&types, field.ty, member, &signatures));
+            }
         }
         body.push(Stmt::Return(None));
         functions[signature.id] = Some(Function {

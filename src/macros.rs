@@ -82,6 +82,12 @@ fn rename_expr(expr: &mut Expr, env: &HashMap<String, String>) {
                 rename_expr(arg, env);
             }
         }
+        Expr::If { condition, then_body, else_body } => {
+            rename_expr(condition,env);
+            rename_stmts(then_body,env);
+            rename_stmts(else_body,env);
+        }
+        Expr::Block(body) => rename_stmts(body,env),
         Expr::Field(receiver, _) => rename_expr(receiver, env),
         Expr::Lambda { params, body, .. } => {
             let mut env = env.clone();
@@ -125,7 +131,7 @@ fn rename_stmts(body: &mut [Stmt], inherited: &HashMap<String, String>) {
                 rename_name(root, &env);
                 rename_expr(value, &env);
             }
-            Stmt::Defer(expr) | Stmt::Expr(expr) => rename_expr(expr, &env),
+            Stmt::Defer(expr) | Stmt::Expr(expr) | Stmt::Tail(expr) => rename_expr(expr, &env),
             Stmt::Return(Some(expr)) => rename_expr(expr, &env),
             Stmt::If {
                 condition,
@@ -564,6 +570,12 @@ impl Expander {
                 Box::new(self.expression(callee, namespace, bindings, stack)?),
                 self.expressions(arguments, namespace, bindings, stack)?,
             ),
+            If { condition, then_body, else_body } => If {
+                condition: Box::new(self.expression(condition, namespace, bindings, stack)?),
+                then_body: self.statements(then_body, namespace, bindings, stack)?,
+                else_body: self.statements(else_body, namespace, bindings, stack)?,
+            },
+            Block(body) => Block(self.statements(body, namespace, bindings, stack)?),
             Lambda {
                 params,
                 result,
@@ -723,6 +735,15 @@ impl Expander {
                     self.repeated_names(arg, found);
                 }
             }
+            Expr::If { condition, then_body, else_body } => {
+                self.repeated_names(condition,found);
+                for item in then_body.iter().chain(else_body.iter()) {
+                    self.repeated_names_stmt(item, found);
+                }
+            }
+            Expr::Block(body) => {
+                for item in body { self.repeated_names_stmt(item,found); }
+            }
             Expr::Field(receiver, _) => self.repeated_names(receiver, found),
             Expr::StructInit(_, fields) | Expr::GenericStructInit(_, _, fields) => {
                 for (_, expr) in fields {
@@ -745,7 +766,7 @@ impl Expander {
             | Stmt::CompoundSet { value, .. }
             | Stmt::FieldSet { value, .. }
             | Stmt::Defer(value)
-            | Stmt::Expr(value) => self.repeated_names(value, found),
+            | Stmt::Expr(value) | Stmt::Tail(value) => self.repeated_names(value, found),
             Stmt::Return(Some(value)) => self.repeated_names(value, found),
             Stmt::If {
                 condition,
@@ -1038,6 +1059,7 @@ impl Expander {
                     .collect::<Result<_, String>>()?,
             },
             Stmt::Expr(value) => Stmt::Expr(expand(value, stack)?),
+            Stmt::Tail(value) => Stmt::Tail(expand(value, stack)?),
             _ => statement.clone(),
         };
         Ok(vec![transformed])

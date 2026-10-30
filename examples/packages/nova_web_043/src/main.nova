@@ -1,0 +1,60 @@
+// NovaWeb 0.43 - server-side rendering demo.
+// Run from the example project root: nova run .
+import std;
+import nova_web;
+
+use nova_web::nexo::request::Request;
+use nova_web::nexo::response::Response;
+
+fn home(req: Request, res: Response) -> i32 {
+    // Request data is escaped in placeholders and builder text nodes.
+    let visitor = req.query_value("name");
+    let context = nova_web::nova_view::context();
+    context.set("name",visitor.as_str());
+
+    let inner = nova_web::nova_view::template::render(
+        "<p>Olá, <strong>{{ name }}</strong>! HTML escapado automaticamente.</p>",
+        &context
+    );
+
+    let card = nova_web::nova_view::components::card("Bem-vindo à NovaWeb",inner.as_str());
+    let form_begin = nova_web::nova_view::forms::form_open("/","get");
+    let label = nova_web::nova_view::forms::label("name","Seu nome");
+    let field = nova_web::nova_view::forms::input("name",visitor.as_str(),"text");
+    let button = nova_web::nova_view::forms::submit("Saudar");
+
+    let content = nova_web::nova_view::create();
+    content.open("main");
+    content.attr("class","container");
+    content.raw(card.as_str());
+    content.raw(form_begin.as_str());
+    content.raw(label.as_str());
+    content.raw(field.as_str());
+    content.raw(button.as_str());
+    content.raw(nova_web::nova_view::forms::form_close());
+    content.end();
+
+    let markup = content.render();
+    let document = nova_web::nova_view::layout::page_with_stylesheet("NovaWeb | Home",markup.as_str(),"/app.css");
+    return nova_web::send(res,document.as_str());
+}
+
+fn stylesheet(req: Request, res: Response) -> i32 {
+    let response = res.type("text/css; charset=utf-8");
+    return response.send("body{font-family:system-ui,sans-serif;background:#f2f5fa;color:#14243a;margin:0} .container{max-width:720px;margin:64px auto;padding:24px}.card{background:white;border:1px solid #d6e1ee;border-radius:18px;padding:28px;box-shadow:0 12px 38px #1232} input,button{font:inherit;border-radius:9px;padding:10px;margin:8px 0}input{border:1px solid #ccd7e5}button{background:#1754cf;color:white;border:0;cursor:pointer}form{display:grid;max-width:360px;gap:4px}");
+}
+
+fn health(req: Request, res: Response) -> i32 {
+    return res.text("OK");
+}
+
+fn main() -> i32 {
+    let app = nova_web::create(7889) defer app.close();
+    if app.get("/",home) != 0 { return 1; }
+    if app.get("/health",health) != 0 { return 1; }
+    if app.get("/app.css",stylesheet) != 0 { return 1; }
+    println!("NovaWeb em http://127.0.0.1:7889");
+    let served: i64 = app.listen(0);
+    if served < 0 { return 1; }
+    return 0;
+}

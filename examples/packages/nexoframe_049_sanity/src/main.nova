@@ -1,0 +1,33 @@
+import std;
+import nexoframe;
+
+fn main() -> i32 {
+    let object = nexoframe::json::object();
+    object.string("name","Nova \"Web\" \\ teste");
+    object.integer("count",42);
+    object.boolean("enabled",true);
+    object.null("missing");
+    let result = object.render();
+    if !result.contains("\\\"Web\\\"") { return 1; }
+    if !result.contains("\\\\ teste") { return 2; }
+    let list = nexoframe::json::array();
+    list.string("x"); list.integer(7); list.object(&object);
+    let array = list.render();
+    if !array.contains("\"count\":42") { return 3; }
+    if !nexoframe::security::local_path("/dashboard") { return 4; }
+    if nexoframe::security::local_path("//evil.com") { return 5; }
+    if nexoframe::security::route_base("/../bad") { return 6; }
+    let parsed = nexoframe::input::parse_integer("210");
+    if !parsed.valid || parsed.value != 210 { return 7; }
+    let overflow = nexoframe::input::parse_integer("9223372036854775808");
+    if overflow.valid { return 8; }
+    let form = nexoframe::validation::errors();
+    if form.require("username","") { return 9; }
+    if form.count() != 1 { return 10; }
+    let error = form.first("username");
+    if !error.equals("Campo obrigatório") { return 11; }
+    let markup = form.summary();
+    if !markup.contains("username") { return 12; }
+    print!("NexoFrame 0.49 OK");
+    return 0;
+}

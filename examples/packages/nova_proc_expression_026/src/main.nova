@@ -1,0 +1,9 @@
+#[comptime]
+#[proc_macro(add_one)]
+fn add_one(expr: std::meta::MetaExpr) -> std::meta::MetaExpr {
+    std::meta::binary("+", expr, std::meta::int_expr(1))
+}
+
+fn main() -> i32 {
+    add_one!(41) - 42
+}

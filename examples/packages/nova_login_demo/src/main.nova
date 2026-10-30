@@ -1,0 +1,33 @@
+// Composition root: all fallible initialization has typed results.
+import std;
+import nexoframe;
+
+mod routes;
+pub mod auth_controller;
+pub mod auth_service;
+pub mod auth_middleware;
+pub mod login_view;
+pub mod form;
+pub mod assets;
+
+fn main() -> i32 {
+    let username=std::env::read("NOVA_DEMO_USER");
+    let password_hash=std::env::read("NOVA_DEMO_PASSWORD_HASH");
+    if username.is_empty() || password_hash.is_empty() {
+        std::io::println("Configure NOVA_DEMO_USER e NOVA_DEMO_PASSWORD_HASH.");
+        return 1;
+    }
+    let store=nexoframe::session::memory_store();
+    let mut app=nexoframe::create(7899) defer app.close();
+    match store.attach_checked(&mut app) {
+        Err(error) => { std::io::println("Falha ao inicializar sessoes."); return 2; }
+        Ok(value) => { }
+    }
+    match routes::register_checked(&app) {
+        Err(error) => { std::io::println("Falha ao registrar rotas HTTP."); return 3; }
+        Ok(value) => { }
+    }
+    std::io::println("NexoFrame Nova: http://127.0.0.1:7899/login");
+    if app.listen(0)<0 { return 4; }
+    return 0;
+}

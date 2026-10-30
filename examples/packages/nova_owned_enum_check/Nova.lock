@@ -1,0 +1,4 @@
+# Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
+nova_owned_enum_check 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/nova_owned_enum_check hash=573599b7d4b456c2
+std 0.20.0 builtin hash=9f93fbeaf19f4725
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/nova_owned_enum_check/src/main.nova hash=573599b7d4b456c2

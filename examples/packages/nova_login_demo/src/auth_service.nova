@@ -1,0 +1,43 @@
+// Domain layer: no HTTP status writing or cookie serialization here.
+use super::form;
+
+pub fn authenticate_checked(username: str, password: str) -> std::result::Result<i64,std::error::OwnedError> {
+    let expected_user=std::env::read("NOVA_DEMO_USER");
+    let expected_hash=std::env::read("NOVA_DEMO_PASSWORD_HASH");
+    if expected_user.is_empty() || expected_hash.is_empty() {
+        return Err(std::error::owned(503,"Authentication configuration unavailable"));
+    }
+    if !form::alphanumeric(username) || std::string::native_text_length(password)>1024 ||
+       std::string::native_text_length(password)==0 {
+        return Err(std::error::owned(422,"Invalid credential format"));
+    }
+    // Run password verification independently of whether the username matches.
+    let verified: bool=std::crypto::password_verify(password,expected_hash.as_str());
+    if !verified || !expected_user.equals(username) {
+        return Err(std::error::owned(401,"Invalid credentials"));
+    }
+    return Ok(1);
+}
+
+// Source-compatible facade for older consumers.
+pub fn authenticate(username: str, password: str) -> bool {
+    match authenticate_checked(username,password) {
+        Ok(user_id) => { return true; }
+        Err(error) => { return false; }
+    }
+}
+
+pub fn secure_cookie() -> bool {
+    let setting=std::env::read("NOVA_DEMO_COOKIE_SECURE");
+    return setting.equals("1");
+}
+pub fn cookie_name() -> str {
+    if secure_cookie() { return "__Host-nova_session"; }
+    return "nova_session";
+}
+
+// Loopback demo only. Cross-site login/logout/renewal requests are rejected.
+pub fn trusted_origin(origin: str) -> bool {
+    let current=std::string::from_text(origin);
+    return current.equals("http://127.0.0.1:7899") || current.equals("http://localhost:7899");
+}

@@ -1,0 +1,38 @@
+struct User {
+    id: i64,
+    active: bool
+}
+
+comptime fn sum_to(n: i64) -> i64 {
+    let mut sum: i64 = 0;
+    for i in 0..n {
+        sum += i;
+    }
+    sum
+}
+
+#[comptime_assert]
+fn meta_layout_is_correct() -> bool {
+    let field_count: i64 = std::meta::field_count::<User>();
+    field_count == 2 && std::meta::has_field::<User>("id")
+}
+
+#[comptime_assert]
+fn meta_names_are_correct() -> bool {
+    std::meta::type_name::<User>() == "User" &&
+    std::meta::field_type::<User>("id") == "i64"
+}
+
+fn main() -> i32 {
+    let total: i64 = sum_to(5);
+    if total == 10 { 0 } else { 1 }
+}
+
+enum State { Pending, Active, Closed }
+
+#[comptime_assert]
+fn enum_metadata_is_correct() -> bool {
+    std::meta::type_kind::<State>() == "enum" &&
+    std::meta::variant_count::<State>() == 3 &&
+    std::meta::has_variant::<State>("Active")
+}

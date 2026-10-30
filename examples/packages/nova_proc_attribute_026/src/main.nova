@@ -1,0 +1,16 @@
+#[comptime]
+#[proc_attribute(GenerateSchema)]
+fn generate_schema(target: std::meta::MetaType, args: std::meta::MetaArgs) -> std::meta::MetaDecl {
+    std::meta::require(std::meta::argument_count(args) == 1, "GenerateSchema needs one suffix");
+    let mut schema = std::meta::struct_decl(std::meta::target_name(target) + std::meta::argument(args, 0));
+    schema = std::meta::struct_field(schema, "field_count", std::meta::type_named("i64"));
+    schema
+}
+
+#[GenerateSchema(Schema)]
+struct Customer { id: i64, active: bool }
+
+fn main() -> i32 {
+    let schema = new CustomerSchema { field_count: 2 };
+    schema.field_count as i32 - 2
+}

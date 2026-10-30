@@ -27,7 +27,7 @@ async fn run_server() -> i64 {
     if app.use(fn(request: nexo::request::Request, response: nexo::response::Response) -> bool {
         return request.id > 0;
     }) != 0 { return -4; }
-    let served: i64=app.listen(5);
+    let served: i64=app.listen(0);
     return served;
 }
 

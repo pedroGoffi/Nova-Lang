@@ -1,0 +1,52 @@
+// NexoFrame 0.52: unit-like execution of real public AST macros.
+import std;
+import nexoframe;
+
+fn main() -> i32 {
+    let obj = nexoframe::json_object!();
+    nexoframe::json_str!(obj,"title","<strong>Safe \"Nova\"</strong>");
+    nexoframe::json_bool!(obj,"ok",true);
+    let details = nexoframe::json_object!();
+    nexoframe::json_int!(details,"number",52);
+    nexoframe::json_object_field!(obj,"details",&details);
+    let items = nexoframe::json_array!();
+    nexoframe::json_array_str!(items,"Alpha");
+    nexoframe::json_array_int!(items,4);
+    nexoframe::json_array_bool!(items,true);
+    nexoframe::json_array_null!(items);
+    nexoframe::json_array_field!(obj,"items",&items);
+    let payload = obj.render();
+    let result = std::string::from_text(payload.as_str());
+    if !result.contains("\"number\":52") { return 1; }
+    if !result.contains("\\\"Nova\\\"") { return 2; }
+    if !result.contains("\"items\":[\"Alpha\",4,true,null]") { return 3; }
+
+    let errors = nexoframe::errors!();
+    nexoframe::required!(errors,"name","Pedro");
+    nexoframe::email_required!(errors,"email","pedro@example.com");
+    nexoframe::between!(errors,"name","Pedro",2,20);
+    nexoframe::digits!(errors,"id","100");
+    nexoframe::same!(errors,"confirm","ok","ok");
+    if !errors.valid() { return 4; }
+
+    let html = nexoframe::html!();
+    nexoframe::html_open!(html,"section");
+    nexoframe::html_class!(html,"nf-card");
+    nexoframe::h1!(html,"Hello <script>");
+    nexoframe::p!(html,"Escaped by default");
+    nexoframe::html_end!(html);
+    let rendered = html.render();
+    let safe = std::string::from_text(rendered.as_str());
+    if !safe.contains("&lt;script&gt;") { return 5; }
+
+    let card = nexoframe::card!("Dashboard","Built with macros");
+    let markup = std::string::from_text(card.as_str());
+    if !markup.contains("nf-card") { return 6; }
+    let fields = nexoframe::form_field!("name","Nome","Pedro","text",true);
+    let input = std::string::from_text(fields.as_str());
+    if !input.contains("nv-field") { return 7; }
+    let group = nexoframe::group!("/api");
+    if !group.valid() { return 8; }
+    println!("NexoFrame 0.52 DX OK");
+    return 0;
+}

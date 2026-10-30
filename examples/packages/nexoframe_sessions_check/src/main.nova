@@ -1,0 +1,80 @@
+import std;
+import nexoframe;
+
+use nexoframe::nova_web::nexo::request::Request;
+
+fn main() -> i32 {
+    let store=nexoframe::session::memory_store();
+    if !store.ready() { return 1; }
+    let req=new Request {
+        method:"GET",path:"/",query:"",body:"",headers:"",route_pattern:"",id:1,
+        context_a:store.expire_handle(),
+        context_b:store.user_handle(),
+        context_c:store.secret_handle()
+    };
+    let first=nexoframe::session::issue(req,1,3600);
+    let second=nexoframe::session::issue(req,2,3600);
+    if !nexoframe::session::valid_token(first.as_str()) { return 2; }
+    if !nexoframe::session::valid_token(second.as_str()) { return 3; }
+    if first.equals(second.as_str()) { return 4; }
+    if nexoframe::session::user_id(req,first.as_str())!=1 { return 5; }
+    if nexoframe::session::user_id(req,second.as_str())!=2 { return 6; }
+    if nexoframe::session::user_id(req,"invalid")!=0 { return 7; }
+    let csrf=nexoframe::session::csrf(req,first.as_str());
+    if !nexoframe::session::verify_csrf(req,first.as_str(),csrf.as_str()) { return 8; }
+    if nexoframe::session::verify_csrf(req,second.as_str(),csrf.as_str()) { return 9; }
+    if !nexoframe::session::revoke(req,first.as_str()) { return 10; }
+    if nexoframe::session::user_id(req,first.as_str())!=0 { return 11; }
+    if nexoframe::session::user_id(req,second.as_str())!=2 { return 12; }
+    if nexoframe::session::revoke(req,first.as_str()) { return 13; }
+    let renewed=nexoframe::session::rotate(req,second.as_str(),3600);
+    if !nexoframe::session::valid_token(renewed.as_str()) { return 15; }
+    if nexoframe::session::user_id(req,second.as_str())!=0 { return 16; }
+    if nexoframe::session::user_id(req,renewed.as_str())!=2 { return 17; }
+    let invalid=nexoframe::session::issue(req,1,0);
+    if invalid.byte_length()!=0 { return 14; }
+    match nexoframe::session::find_user(req,renewed.as_str()) {
+        Some(user_id) => { if user_id!=2 { return 18; } }
+        None => { return 19; }
+    }
+    match nexoframe::session::find_user(req,"invalid") {
+        Some(user_id) => { return 20; }
+        None => { }
+    }
+    match nexoframe::session::issue_checked(req,1,0) {
+        Ok(token) => { return 21; }
+        Err(error) => { if error.code()!=422 { return 22; } }
+    }
+    match nexoframe::session::rotate_checked(req,"invalid",3600) {
+        Ok(token) => { return 23; }
+        Err(error) => { if error.code()!=401 { return 24; } }
+    }
+    match nexoframe::session::issue_checked(req,3,3600) {
+        Err(error) => { return 25; }
+        Ok(token) => {
+            match nexoframe::session::find_user(req,token.as_str()) {
+                None => { return 26; }
+                Some(user_id) => { if user_id!=3 { return 27; } }
+            }
+            if !nexoframe::session::revoke(req,token.as_str()) { return 28; }
+        }
+    }
+    match std::crypto::try_random_token() {
+        Err(error) => { return 29; }
+        Ok(token) => { if !nexoframe::session::valid_token(token.as_str()) { return 30; } }
+    }
+    match std::crypto::try_sha256_hex("Nova") {
+        Err(error) => { return 31; }
+        Ok(hash) => { if !nexoframe::session::valid_token(hash.as_str()) { return 32; } }
+    }
+    match nexoframe::session::csrf_checked(req,renewed.as_str()) {
+        Err(error) => { return 33; }
+        Ok(proof) => { if !nexoframe::session::valid_token(proof.as_str()) { return 34; } }
+    }
+    match nexoframe::session::csrf_checked(req,"bad-token") {
+        Ok(proof) => { return 35; }
+        Err(error) => { if error.code()!=401 { return 36; } }
+    }
+    println!("NexoFrame sessions: 36 verificacoes concluidas.");
+    return 0;
+}

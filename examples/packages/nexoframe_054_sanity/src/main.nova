@@ -1,0 +1,84 @@
+// HTML5 macro + ownership / escape smoke test.
+import std;
+import nexoframe;
+
+fn main() -> i32 {
+    let doc = nexoframe::html!();
+    nexoframe::document!(doc,"pt-BR","Nova & NexoFrame");
+    nexoframe::main!(doc);
+    nexoframe::class_name!(doc,"app-shell");
+    nexoframe::attr_data!(doc,"project","Nova");
+    nexoframe::attr_aria!(doc,"label","Área de conteúdo");
+    nexoframe::h1!(doc,"Olá <Nova> & amigos");
+    nexoframe::div!(doc);
+    nexoframe::class_name!(doc,"hero");
+    nexoframe::img_lazy!(doc,"/assets/logo.svg","Logo <Nova>");
+    nexoframe::p!(doc,"Biblioteca HTML5 segura");
+    nexoframe::a!(doc,"/manual","Leia a documentação");
+    nexoframe::a_external!(doc,"https://example.org","Externo");
+    nexoframe::close_tag!(doc);
+    nexoframe::section!(doc);
+    nexoframe::h2!(doc,"Exemplo de formulário");
+    nexoframe::form_begin!(doc,"/search","GET");
+    nexoframe::label_for!(doc,"search","Pesquisar");
+    nexoframe::input_tag!(doc,"search","search","<danger>",true);
+    nexoframe::button!(doc,"Pesquisar",true);
+    nexoframe::close_tag!(doc);
+    nexoframe::close_tag!(doc);
+    nexoframe::ul!(doc);
+    nexoframe::li!(doc,"Primeiro");
+    nexoframe::li!(doc,"Segundo");
+    nexoframe::close_tag!(doc);
+    nexoframe::table!(doc);
+    nexoframe::tbody!(doc);
+    nexoframe::tr!(doc);
+    nexoframe::td!(doc,"Linha <1>");
+    nexoframe::close_tag!(doc);
+    nexoframe::close_tag!(doc);
+    nexoframe::close_tag!(doc);
+    // Invalid URLs must not emit any element, and unsafe attributes fail.
+    if nexoframe::img!(doc,"javascript:alert(1)","unsafe") { return 1; }
+    if nexoframe::a!(doc,"javascript:alert(1)","bad") { return 2; }
+    if nexoframe::attr!(doc,"onclick","evil()") { return 3; }
+    nexoframe::close_tag!(doc);
+    let output = nexoframe::render_html!(doc);
+    let actual = std::string::from_text(output.as_str());
+    if !actual.contains("<!doctype html>") { return 4; }
+    if !actual.contains("<h1>Olá &lt;Nova&gt; &amp; amigos</h1>") { return 5; }
+    if !actual.contains("alt=\"Logo &lt;Nova&gt;\"") { return 6; }
+    if !actual.contains("value=\"&lt;danger&gt;\"") { return 7; }
+    if !actual.contains("rel=\"noopener noreferrer\"") { return 8; }
+    if !actual.contains("data-project=\"Nova\"") { return 9; }
+    if !actual.contains("aria-label=\"Área de conteúdo\"") { return 10; }
+    if actual.contains("javascript:alert") { return 11; }
+
+    let attrs = nexoframe::html!();
+    nexoframe::div!(attrs);
+    if attrs.attr("srcdoc","<script>evil()</script>") { return 12; }
+    if attrs.attr("onclick","evil()") { return 19; }
+    if attrs.attr("xlink:href","javascript:evil()") { return 22; }
+    if attrs.attr("srcset","javascript:alert(1) 1x") { return 13; }
+    if attrs.attr("style","background:url(javascript:evil())") { return 14; }
+    nexoframe::class_name!(attrs,"safe");
+    nexoframe::close_tag!(attrs);
+    let attrs_html = attrs.render();
+    let attrs_test = std::string::from_text(attrs_html.as_str());
+    if !attrs_test.contains("class=\"safe\"") { return 15; }
+    if attrs_test.contains("evil") { return 16; }
+
+    let pass = nexoframe::html!();
+    nexoframe::input_tag!(pass,"password","secret","should-not-render",true);
+    let pass_html = pass.render();
+    let check_pass = std::string::from_text(pass_html.as_str());
+    if check_pass.contains("should-not-render") { return 17; }
+    if !check_pass.contains("required") { return 18; }
+    let with_css = nexoframe::html!();
+    if !nexoframe::document_css!(with_css,"pt-BR","Exemplo","/assets/app.css") { return 20; }
+    let css_page = with_css.render();
+    let css_check = std::string::from_text(css_page.as_str());
+    if !css_check.contains("<link rel=\"stylesheet\" href=\"/assets/app.css\">") { return 21; }
+    if attrs.open("script") { return 23; }
+    if attrs.open("style") { return 24; }
+    println!("NexoFrame 0.54 HTML OK");
+    return 0;
+}

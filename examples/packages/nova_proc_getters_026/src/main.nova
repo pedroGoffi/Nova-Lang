@@ -1,0 +1,85 @@
+
+#[comptime]
+#[proc_derive(Setters)]
+fn derive_setters(target: std::meta::MetaType) -> std::meta::MetaDecl {
+    let mut result = std::meta::impl_for(target);
+
+    for field in std::meta::fields(target) {
+        let name = std::meta::field_name(field);
+        let ty = std::meta::field_type_ref(field);
+
+        let mut setter = std::meta::function(
+            "set_" + name,
+            std::meta::unit_type(),
+            std::meta::assign(
+                std::meta::access(
+                    std::meta::variable("self"),
+                    name
+                ),
+                std::meta::variable("value")
+            )
+        );
+
+        setter = std::meta::parameter(
+            setter,
+            "self",
+            std::meta::mutable_reference(
+                std::meta::type_ref(target)
+            )
+        );
+
+        setter = std::meta::parameter(
+            setter,
+            "value",
+            ty
+        );
+
+        result = std::meta::method(result, setter);
+    }
+
+    result
+}
+
+// The compiler does not know Getters. It executes this author-defined
+// transformation over the typed AST and rechecks emitted methods normally.
+#[comptime]
+#[proc_derive(Getters)]
+fn derive_getters(target: std::meta::MetaType) -> std::meta::MetaDecl {
+    std::meta::require(std::meta::proc_has_field(target, "id"), "Getters requires at least one field");
+    let mut result = std::meta::impl_for(target);
+    for field in std::meta::fields(target) {
+        let mut getter = std::meta::function(
+            "get_" + std::meta::field_name(field),
+            std::meta::field_type_ref(field),
+            std::meta::access(
+                std::meta::variable("self"),
+                std::meta::field_name(field)
+            )
+        );
+        getter = std::meta::parameter(
+            getter,
+            "self",
+            std::meta::reference(std::meta::type_ref(target))
+        );
+        result = std::meta::method(result, getter);
+    }
+    result
+}
+
+#[derive(Getters, Setters)]
+struct Person {
+    id: i64,
+    score: i32,
+    name: str
+}
+
+fn main() -> i32 {
+    let mut user = new Person { id: 41, score: 1, name: "foo bar" };
+    println!("Eae {}", user.name);
+    println!("Eae {}", user.get_name());
+    user.set_name("67");
+    println!("Eae {}", user.name);
+    println!("Eae {}", user.get_name());
+
+    user.get_id() as i32 + user.get_score() - 42
+}

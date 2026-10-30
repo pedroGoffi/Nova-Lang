@@ -1,0 +1,63 @@
+// DOM AST macros: ownership, composition, HTML escaping, dynamic children.
+import std;
+import nexoframe;
+
+fn main() -> i32 {
+    let list_items = nexoframe::dom::fragment!();
+    let mut i: i64 = 0;
+    while i < 3 {
+        let item = nexoframe::dom::li!(nexoframe::dom::number!(i));
+        list_items.append(item);
+        i += 1;
+    }
+
+    let page = nexoframe::dom::document!("NexoFrame & <Nova>",
+        nexoframe::dom::main!(
+            nexoframe::dom::header!(nexoframe::dom::h1!("Painel Nova")),
+            nexoframe::dom::grid!(
+                nexoframe::dom::card!(
+                    nexoframe::dom::h2!("Atividades"),
+                    nexoframe::dom::p!("Olá <usuário> & bem-vindo"),
+                    nexoframe::dom::ul!(list_items)
+                ),
+                nexoframe::dom::div_class!("card custom",
+                    nexoframe::dom::img!("/assets/logo.svg","Logo <Nova>"),
+                    nexoframe::dom::p!("Imagem com alt seguro"),
+                    nexoframe::dom::a!("/users","Ver usuários")
+                )
+            ),
+            nexoframe::dom::form!(
+                nexoframe::dom::input_tag!("email","email","alice@example.org",true),
+                nexoframe::dom::button!("Salvar")
+            ),
+            nexoframe::dom::when!(false,nexoframe::dom::p!("invisível"))
+        )
+    );
+
+    let html = page.render();
+    if !html.contains("<!doctype html>") { return 1; }
+    if !html.contains("<main>") { return 2; }
+    if !html.contains("class=\"nf-grid\"") { return 3; }
+    if !html.contains("<h1>Painel Nova</h1>") { return 4; }
+    if !html.contains("Olá &lt;usuário&gt; &amp; bem-vindo") { return 5; }
+    if !html.contains("alt=\"Logo &lt;Nova&gt;\"") { return 6; }
+    if !html.contains("<li>0</li><li>1</li><li>2</li>") { return 7; }
+    if html.contains("invisível") { return 8; }
+    if !html.contains("<title>NexoFrame &amp; &lt;Nova&gt;</title>") { return 9; }
+    if !html.contains("required") { return 10; }
+
+    let unsafe_page = nexoframe::dom::section!(
+        nexoframe::dom::p!("<script>alert(1)</script>"),
+        nexoframe::dom::a!("javascript:alert(1)","bad"),
+        nexoframe::dom::img!("javascript:alert(1)","bad"),
+        nexoframe::dom::input_tag!("password","secret","never-visible",true)
+    );
+    let safe = unsafe_page.render();
+    if safe.contains("<script>") { return 11; }
+    if !safe.contains("&lt;script&gt;") { return 12; }
+    if safe.contains("javascript:alert") { return 13; }
+    if safe.contains("never-visible") { return 14; }
+
+    println!("NexoFrame 0.63 DOM OK");
+    return 0;
+}

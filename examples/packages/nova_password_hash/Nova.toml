@@ -1,0 +1,6 @@
+[package]
+name = "nova_password_hash"
+version = "0.1.0"
+entry = "src/main.nova"
+[dependencies]
+std = { builtin = "std" }

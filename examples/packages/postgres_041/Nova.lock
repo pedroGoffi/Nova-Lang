@@ -1,0 +1,11 @@
+# Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
+postgres_example 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/postgres_041 hash=1270149991fdd6fd
+nova_postgres 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_postgres hash=5560c646a2cb7fbe
+std 0.20.0 builtin hash=4c716c1330b3f691
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/postgres_041/src/main.nova hash=1270149991fdd6fd
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_postgres/src/lib.nova hash=5560c646a2cb7fbe
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_postgres/src/connection.nova hash=a45d4889e3550ae6
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_postgres/src/params.nova hash=fe949d15ba61e605
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_postgres/src/result.nova hash=389c6f78c636e9a6
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_postgres/src/transaction.nova hash=4b35b20e2f09ec57
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_postgres/src/query.nova hash=6d1f7f050300777b

@@ -75,6 +75,12 @@ fn check_thread_callbacks(program: &ast::Program) -> Result<(), String> {
                     verify_expr(value, ns, funcs)?;
                 }
             }
+            Expr::If { condition, then_body, else_body } => {
+                verify_expr(condition,ns,funcs)?;
+                verify_stmts(then_body,ns,funcs)?;
+                verify_stmts(else_body,ns,funcs)?;
+            }
+            Expr::Block(body) => verify_stmts(body,ns,funcs)?,
             Expr::MethodCall(receiver, _, args) => {
                 verify_expr(receiver, ns, funcs)?;
                 for value in args {
@@ -132,7 +138,7 @@ fn check_thread_callbacks(program: &ast::Program) -> Result<(), String> {
                 | Stmt::FieldSet { value, .. }
                 | Stmt::CompoundSet { value, .. }
                 | Stmt::Return(Some(value))
-                | Stmt::Expr(value)
+                | Stmt::Expr(value) | Stmt::Tail(value)
                 | Stmt::Defer(value) => verify_expr(value, ns, funcs)?,
                 Stmt::If {
                     condition,
@@ -305,6 +311,16 @@ fn check_expr(expr: &Expr, held: &[String], function: &str) -> Result<(), String
         Expr::MethodCall(_,name,_) if !held.is_empty() && name == "join" => {
             return Err(format!("error[NOVA-C004]: blocking join inside sync region in '{function}'\n  = locks held: {}\n  help: finish the sync block before joining a thread",held.join(", ")))
         }
+        Expr::If { condition, then_body, else_body } => {
+            check_expr(condition,held,function)?;
+            let mut graph=Graph::new(); let mut serial=0;
+            rewrite_block(then_body,held,&mut graph,function,&mut serial)?;
+            rewrite_block(else_body,held,&mut graph,function,&mut serial)?;
+        }
+        Expr::Block(body) => {
+            let mut graph=Graph::new(); let mut serial=0;
+            rewrite_block(body,held,&mut graph,function,&mut serial)?;
+        }
         Expr::Call(_,args) | Expr::GenericCall(_,_,args) | Expr::MacroCall(_,args) | Expr::Array(args) => {
             for arg in args { check_expr(arg,held,function)?; }
         },
@@ -353,6 +369,13 @@ fn forbid_move(expr: &Expr, held: &[String], function: &str) -> Result<(), Strin
 /// explicitly while a sync region is active.
 fn guard_expr(expr: &Expr, guard: &str, function: &str) -> Result<(), String> {
     match expr {
+        Expr::If { condition, then_body, else_body } => {
+            guard_expr(condition,guard,function)?;
+            for stmt in then_body.iter().chain(else_body) { guard_statement(stmt,guard,function)?; }
+        }
+        Expr::Block(body) => {
+            for stmt in body { guard_statement(stmt,guard,function)?; }
+        }
         Expr::MethodCall(receiver, method, args)
             if matches!(receiver.as_ref(),Expr::Var(name) if name==guard)
                 && matches!(
@@ -514,7 +537,7 @@ fn guard_statement(statement: &Stmt, guard: &str, function: &str) -> Result<(), 
                 }
             }
         }
-        Stmt::Expr(expr) | Stmt::Defer(expr) => guard_expr(expr, guard, function)?,
+        Stmt::Expr(expr) | Stmt::Tail(expr) | Stmt::Defer(expr) => guard_expr(expr, guard, function)?,
         Stmt::Return(Some(expr)) => guard_expr(expr, guard, function)?,
         _ => {}
     }
@@ -706,7 +729,7 @@ fn rewrite_statement(
             forbid_move(value, held, function)?;
             Ok(stmt.clone())
         }
-        Stmt::Expr(value) | Stmt::Defer(value) => {
+        Stmt::Expr(value) | Stmt::Tail(value) | Stmt::Defer(value) => {
             check_expr(value, held, function)?;
             Ok(stmt.clone())
         }

@@ -16,6 +16,12 @@ fn u64_ty() -> TypeRef {
 
 fn expression(value: &mut Expr, mode: &FunctionMode) -> Result<(), String> {
     match value {
+        Expr::If { condition, then_body, else_body } => {
+            expression(condition,mode)?;
+            statements(then_body,mode)?;
+            statements(else_body,mode)?;
+        }
+        Expr::Block(body) => statements(body,mode)?,
         Expr::Yield(inner) => {
             if !matches!(mode, FunctionMode::Generator | FunctionMode::Coroutine) {
                 return Err("'yield' is only legal inside 'gen fn' or 'coro fn'".into());
@@ -85,7 +91,7 @@ fn statements(body: &mut [Stmt], mode: &FunctionMode) -> Result<(), String> {
             | Stmt::FieldSet { value: init, .. }
             | Stmt::DerefSet { value: init, .. }
             | Stmt::CompoundSet { value: init, .. }
-            | Stmt::Expr(init)
+            | Stmt::Expr(init) | Stmt::Tail(init)
             | Stmt::Return(Some(init)) => expression(init, mode)?,
             Stmt::If {
                 condition,
@@ -299,6 +305,12 @@ fn runtime_intrinsic(
 }
 fn calls_in_expr(e: &Expr, out: &mut std::collections::BTreeSet<String>) {
     match e {
+        Expr::If { condition, then_body, else_body } => {
+            calls_in_expr(condition,out);
+            calls_in_statements(then_body,out);
+            calls_in_statements(else_body,out);
+        }
+        Expr::Block(body) => calls_in_statements(body,out),
         Expr::Call(name, args) | Expr::MacroCall(name, args) | Expr::GenericCall(name, _, args) => {
             if runtime_intrinsic(name).is_some() {
                 out.insert(name.clone());
@@ -361,7 +373,7 @@ fn calls_in_statements(statements: &[Stmt], out: &mut std::collections::BTreeSet
                     calls_in_expr(e, out);
                 }
             }
-            Stmt::Expr(e)
+            Stmt::Expr(e) | Stmt::Tail(e)
             | Stmt::Defer(e)
             | Stmt::Set { value: e, .. }
             | Stmt::DerefSet { value: e, .. }

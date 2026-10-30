@@ -1,0 +1,159 @@
+// NexoFrame SSR showcase. Forms use GET because POST-body decoding and CSRF
+// are not implemented in the current Nexo HTTP request interface.
+import std;
+import nexoframe;
+use nexoframe::nova_web::nexo::request::Request;
+use nexoframe::nova_web::nexo::response::Response;
+
+fn navigation(html: &nexoframe::nova_web::nova_view::html::Html, active: str) -> () {
+    html.open("header"); html.attr("class","nf-top");
+    html.open("a"); html.attr("href","/"); html.attr("class","nf-logo");
+    html.text("Nexo");
+    html.open("span"); html.text("Frame"); html.end(); html.end();
+    html.open("nav"); html.attr("class","nf-nav"); html.attr("aria-label","Navegação principal");
+    let current = std::string::from_text(active);
+    let home = nexoframe::ui::nav_link("Início","/",current.equals("home"));
+    let form = nexoframe::ui::nav_link("Formulários","/form",current.equals("form"));
+    let api = nexoframe::ui::nav_link("API JSON","/api/status",false);
+    html.raw(home.as_str()); html.raw(form.as_str()); html.raw(api.as_str());
+    html.end(); html.end();
+    return;
+}
+
+fn shell(res: Response, title: str, content: str, active: str) -> i32 {
+    let html = nexoframe::nova_web::nova_view::create();
+    html.open("div"); html.attr("class","nf-wrap");
+    navigation(&html,active);
+    html.raw(content);
+    html.open("footer"); html.attr("class","nf-footer");
+    html.text("NexoFrame 0.1 alpha · Framework nativo na linguagem Nova");
+    html.end();
+    html.end();
+    let markup = html.render();
+    return nexoframe::views::page(res,title,markup.as_str());
+}
+
+fn homepage(req: Request, res: Response) -> i32 {
+    let html = nexoframe::nova_web::nova_view::create();
+    html.open("main");
+    let hero = nexoframe::ui::hero("Nova · Web · Server-side Rendering",
+        "Uma base sólida para aplicações web em Nova",
+        "Rotas, JSON, formulários, validação e componentes tipados, com uma identidade própria.");
+    html.raw(hero.as_str());
+    html.open("section"); html.attr("class","nf-grid");
+    let one = nexoframe::ui::feature("HTTP e rotas","Nexo HTTP, handlers tipados e rotas de recursos.","↗");
+    let two = nexoframe::ui::feature("Views e layouts","SSR com escaping padrão de conteúdo dinâmico.","◈");
+    let three = nexoframe::ui::feature("JSON seguro","Serialização de textos, números, booleanos e objetos.","{}");
+    html.raw(one.as_str()); html.raw(two.as_str()); html.raw(three.as_str());
+    html.end();
+    html.open("section"); html.attr("class","nf-card");
+    html.element("h2","Comece com componentes e APIs independentes");
+    html.element("p","A biblioteca permanece separada do compilador Nova e aproveita as ferramentas existentes.");
+    html.open("a"); html.attr("class","nf-button"); html.attr("href","/form");
+    html.text("Testar validação"); html.end();
+    html.end();
+    html.end();
+    let content = html.render();
+    return shell(res,"NexoFrame · Início",content.as_str(),"home");
+}
+
+fn form_page(req: Request, res: Response) -> i32 {
+    let name = req.query_value("name");
+    let email = req.query_value("email");
+    let submitted = nexoframe::input::query_bool(req,"submitted");
+    let errors = nexoframe::validation::errors();
+    if submitted {
+        errors.require("name",name.as_str());
+        errors.length("name",name.as_str(),2,80);
+        errors.email("email",email.as_str());
+    }
+    let html = nexoframe::nova_web::nova_view::create();
+    html.open("main");
+    let heading = nexoframe::ui::hero("Demonstração","Validação no servidor",
+        "Campos, erros acessíveis e respostas SSR escapadas automaticamente.");
+    html.raw(heading.as_str());
+    if submitted && errors.valid() {
+        let notice = nexoframe::ui::alert("success","Formulário válido","Os campos passaram pelas verificações. Nenhum dado foi persistido.");
+        html.raw(notice.as_str());
+    }
+    let error_html = errors.summary();
+    html.raw(error_html.as_str());
+    html.open("div"); html.attr("class","nf-card");
+    html.open("form"); html.attr("class","nf-form"); html.attr("action","/form"); html.attr("method","get");
+    html.void("input"); html.attr("type","hidden"); html.attr("name","submitted"); html.attr("value","true");
+    let name_error = errors.first("name");
+    let email_error = errors.first("email");
+    let name_field = nexoframe::nova_web::nova_view::forms::field_feedback(
+        "name","Nome",name.as_str(),"text",true,"Mínimo 2 caracteres",name_error.as_str());
+    let email_field = nexoframe::nova_web::nova_view::forms::field_feedback(
+        "email","E-mail",email.as_str(),"email",true,"Exemplo: nome@dominio.com",email_error.as_str());
+    html.raw(name_field.as_str()); html.raw(email_field.as_str());
+    html.open("button"); html.attr("type","submit"); html.attr("class","nf-button");
+    html.text("Validar campos"); html.end();
+    html.end(); html.end();
+    html.end();
+    let content = html.render();
+    return shell(res,"NexoFrame · Validação",content.as_str(),"form");
+}
+
+fn status_api(req: Request, res: Response) -> i32 {
+    let app = nexoframe::json::object();
+    app.boolean("ok",true);
+    app.string("framework","NexoFrame");
+    app.string("language","Nova");
+    app.integer("version",49);
+    let capabilities = nexoframe::json::object();
+    capabilities.boolean("ssr",true);
+    capabilities.boolean("json",true);
+    capabilities.boolean("sessions",false);
+    app.nested("capabilities",&capabilities);
+    return nexoframe::views::api(res,&app);
+}
+
+fn item_index(req: Request, res: Response) -> i32 {
+    let items = nexoframe::json::array();
+    let a = nexoframe::json::object();
+    a.integer("id",1); a.string("title","Primeira tarefa");
+    items.object(&a);
+    let b = nexoframe::json::object();
+    b.integer("id",2); b.string("title","Segunda tarefa");
+    items.object(&b);
+    let document = items.render();
+    return res.json(document.as_str());
+}
+
+fn item_show(req: Request, res: Response) -> i32 {
+    let id = req.param("id");
+    let item = nexoframe::json::object();
+    item.boolean("ok",true);
+    item.string("id",id.as_str());
+    item.string("title","Item de demonstração");
+    return nexoframe::views::api(res,&item);
+}
+
+fn item_write(req: Request, res: Response) -> i32 {
+    return nexoframe::views::api_error(res,501,"Persistência ainda não implementada");
+}
+
+fn css(req: Request, res: Response) -> i32 {
+    let style = nexoframe::ui::stylesheet();
+    let response = res.type("text/css; charset=utf-8");
+    return response.send(style.as_str());
+}
+
+fn health(req: Request, res: Response) -> i32 { return res.text("OK"); }
+
+fn main() -> i32 {
+    let config = nexoframe::app::config("NexoFrame",7891);
+    let app = config.server() defer app.close();
+    if app.get("/",homepage) != 0 { return 1; }
+    if app.get("/form",form_page) != 0 { return 1; }
+    if app.get("/api/status",status_api) != 0 { return 1; }
+    if app.get("/assets/app.css",css) != 0 { return 1; }
+    if !nexoframe::routes::resource(&app,"/api/items",item_index,item_show,item_write,item_write,item_write) { return 1; }
+    if app.get("/health",health) != 0 { return 1; }
+    println!("NexoFrame: http://127.0.0.1:7891");
+    let served: i64 = app.listen(0);
+    if served < 0 { return 1; }
+    return 0;
+}

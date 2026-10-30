@@ -1,0 +1,16 @@
+// Fixed-size arrays of structs with place-based shared and exclusive borrows.
+struct Item { id: i32, stock: i32 }
+
+fn main() -> i32 {
+    let mut items: [Item; 3] = [
+        new Item { id: 11, stock: 5 },
+        new Item { id: 22, stock: 9 },
+        new Item { id: 22, stock: 9 }
+    ];
+    let selected: i32 = 1;
+    let stock: &mut i32 = &mut items[selected].stock;
+    *stock = 42;
+    // Shared borrowing after an exclusive borrow should be performed in a
+    // separate lexical scope (the current checker conservatively tracks loans).
+    return *stock - 42;
+}

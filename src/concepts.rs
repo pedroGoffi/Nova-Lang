@@ -102,6 +102,8 @@ struct Entry {
 pub struct Registry {
     entries: HashMap<String, Entry>,
     trait_parents: HashMap<String, Vec<String>>,
+    /// Which trait method implements a token; declared by #[operator] in .nova.
+    operator_methods: HashMap<String, Vec<(String, String)>>,
     implementations: Vec<(String, TypeRef, String)>,
     assertions: Vec<(ConceptExpr, String)>,
     structs: HashMap<String, (ast::Struct, String)>,
@@ -112,6 +114,7 @@ impl Registry {
         let mut registry = Self::default();
         registry.gather(&program.items, "")?;
         registry.validate()?;
+        registry.validate_capabilities()?;
         registry.validate_function_bounds(&program.items, "")?;
         Ok(registry)
     }
@@ -138,8 +141,36 @@ impl Registry {
                     }
                 }
                 Item::Trait(decl) => {
-                    self.trait_parents
-                        .insert(qualified(ns, &decl.name), decl.parents.clone());
+                    let trait_name = qualified(ns, &decl.name);
+                    if self.trait_parents.insert(trait_name.clone(), decl.parents.clone()).is_some() {
+                        return Err(format!("duplicate trait '{trait_name}'"));
+                    }
+                    for attr in &decl.attributes {
+                        if matches!(attr.name.as_str(), "meta_attribute" | "meta_effect" | "meta_protocol" | "meta_derive" | "meta_derive_impl") {
+                            continue; // declarations verified by Nova Meta before concept solving
+                        }
+                        if attr.name != "operator" {
+                            return Err(format!("unknown trait attribute '#[{}]' on '{trait_name}'",attr.name));
+                        }
+                        if attr.args.is_empty() {
+                            return Err(format!("#[operator] on '{trait_name}' needs an operator name"));
+                        }
+                        for key in &attr.args {
+                            if !ast::valid_operator_key(key) {
+                                return Err(format!("unsupported operator '{key}' in '{trait_name}'"));
+                            }
+                            // The Nova definition controls the method name. The
+                            // method matching each operator key is declarative.
+                            let method_name = ast::operator_trait_method(decl,key).ok_or_else(||
+                                format!("#[operator({key})] on '{trait_name}' needs an associated method"))?;
+                            let method = decl.methods.iter().find(|m|m.name == method_name).unwrap();
+                            if method.params.len() != 2 {
+                                return Err(format!("operator '{key}' on '{trait_name}' needs two parameters"));
+                            }
+                            self.operator_methods.entry(key.clone()).or_default()
+                                .push((trait_name.clone(),method.name.clone()));
+                        }
+                    }
                 }
                 Item::Struct(decl) => {
                     let key = qualified(ns, &decl.name);
@@ -160,6 +191,92 @@ impl Registry {
                         .push((decl.target.clone(), decl.methods.clone(), ns.into()));
                 }
                 _ => {}
+            }
+        }
+        Ok(())
+    }
+    /// Resolve only applicable .nova contracts; multiple traits may use `|`
+    /// but one concrete type must have an unambiguous implementation.
+    pub fn operator_contract<'a>(&'a self,key:&str,receiver:&TypeRef,ns:&str)
+        -> Result<Option<(&'a str,&'a str)>,String>
+    {
+        let candidates = self.operator_methods.get(key).into_iter().flat_map(|items|items.iter())
+            .filter(|(trait_name,_)|self.implements_trait(receiver,trait_name,ns))
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {return Ok(None);}
+        if candidates.len() == 1 {
+            let (name,method) = candidates[0];
+            return Ok(Some((name.as_str(),method.as_str())));
+        }
+        Err(format!("error[NOVA-OP004]: ambiguous operator '{key}' for {receiver:?}; implemented traits: {}",
+            candidates.iter().map(|(t,_)|t.as_str()).collect::<Vec<_>>().join(", ")))
+    }
+    pub fn implements_trait(&self, ty: &TypeRef, trait_name: &str, namespace: &str) -> bool {
+        self.implementations.iter().any(|(provided, target, impl_namespace)| {
+            normalized(ty) == normalized(target) &&
+            self.parent_contains(provided, trait_name, impl_namespace, &mut HashSet::new())
+        }) || self.implementations.iter().any(|(provided, target, impl_namespace)| {
+            // Check fully-qualified and lexical type names as the source
+            // frequently writes `impl Trait for LocalType` inside namespaces.
+            let declared = match target {
+                TypeRef::Named(n) => TypeRef::Named(qualified(impl_namespace,n)),
+                TypeRef::Applied(n,args) => TypeRef::Applied(qualified(impl_namespace,n),args.clone()),
+                _ => target.clone(),
+            };
+            normalized(&declared) == normalized(ty) &&
+            self.parent_contains(provided, trait_name, namespace, &mut HashSet::new())
+        })
+    }
+    fn validate_capabilities(&self) -> Result<(), String> {
+        for (type_name, (decl, namespace)) in &self.structs {
+            let attrs = decl.attributes.iter().filter(|a| a.name == "capabilities")
+                .collect::<Vec<_>>();
+            if attrs.len() > 1 {
+                return Err(format!("duplicate #[capabilities] on '{type_name}'"));
+            }
+            for attr in attrs {
+                if attr.args.is_empty() {
+                    return Err(format!("#[capabilities] on '{type_name}' cannot be empty"));
+                }
+                let mut unique = HashSet::new();
+                for trait_name in &attr.args {
+                    if !unique.insert(trait_name) {
+                        return Err(format!("duplicate capability '{trait_name}' on '{type_name}'"));
+                    }
+                    if lookup(&self.trait_parents, namespace, trait_name).is_none() {
+                        return Err(format!("unknown capability trait '{trait_name}' on '{type_name}'"));
+                    }
+                    let target = if decl.generics.is_empty() {
+                        TypeRef::Named(decl.name.clone())
+                    } else {
+                        TypeRef::Applied(decl.name.clone(),decl.generics.iter().map(|x|TypeRef::Named(x.clone())).collect())
+                    };
+                    if !self.implements_trait(&target, trait_name, namespace) {
+                        return Err(format!("error[NOVA-OP001]: '{type_name}' declares #[capabilities({trait_name})] but has no `impl {trait_name} for {type_name}`"));
+                    }
+                }
+            }
+            // #[requires(Concept)] is an executable compile-time contract
+            // written on the Nova type. A unary concept is applied to Self.
+            for attr in decl.attributes.iter().filter(|a|a.name == "requires") {
+                if attr.args.is_empty() {
+                    return Err(format!("#[requires] on '{type_name}' needs a concept"));
+                }
+                let ty = if decl.generics.is_empty() {
+                    TypeRef::Named(decl.name.clone())
+                } else {
+                    TypeRef::Applied(decl.name.clone(),decl.generics.iter().map(|x|TypeRef::Named(x.clone())).collect())
+                };
+                for concept in &attr.args {
+                    let (_, entry) = lookup(&self.entries,namespace,concept)
+                        .ok_or_else(||format!("unknown #[requires] concept '{concept}' on '{type_name}'"))?;
+                    if entry.decl.generics.len() != 1 {
+                        return Err(format!("#[requires({concept})] on '{type_name}' needs a unary concept"));
+                    }
+                    if !self.eval(&ConceptExpr::Apply{name:concept.clone(),args:vec![ty.clone()]},namespace,&HashMap::new(),0)? {
+                        return Err(format!("error[NOVA-OP005]: '{type_name}' does not satisfy #[requires({concept})]"));
+                    }
+                }
             }
         }
         Ok(())
@@ -386,14 +503,33 @@ impl Registry {
             if !matches_type {
                 continue;
             }
-            if let Some(method) = methods
-                .iter()
-                .find(|method| method.name == name && method.params.len() == 1)
-            {
+            if let Some(method) = methods.iter().find(|method| {
+                let is_sugar = method.name.strip_prefix("__nova_op__")
+                    .and_then(|key|self.operator_methods.get(key))
+                    .map(|bindings|bindings.iter().any(|(_,mapped)|mapped == name))
+                    .unwrap_or(false);
+                (method.name == name || is_sugar) && method.params.len() == 1
+            }) {
                 return Some(method.result.clone());
             }
         }
         // Avoid resolving unrelated impl methods through lexical type names.
+        let _ = ns;
+        None
+    }
+    fn binary_method_result(&self, ty: &TypeRef, method: &str, ns: &str) -> Option<TypeRef> {
+        for (target,methods,method_ns) in &self.methods {
+            let matches_type = normalized(target)==normalized(ty)
+                || matches!((target,ty),(TypeRef::Named(a),TypeRef::Named(b)) if qualified(method_ns,a)==*b);
+            if !matches_type {continue;}
+            if let Some(found) = methods.iter().find(|m| {
+                let alias = m.name.strip_prefix("__nova_op__")
+                    .and_then(|key|self.operator_methods.get(key))
+                    .map(|bound|bound.iter().any(|(_,name)|name==method))
+                    .unwrap_or(false);
+                (m.name==method || alias) && m.params.len()==2
+            }) {return Some(found.result.clone());}
+        }
         let _ = ns;
         None
     }
@@ -422,6 +558,7 @@ impl Registry {
                 let name =
                     bare_name(&args[1]).ok_or("has_method<T,method> needs a method identifier")?;
                 self.find_method(first, name, ns).is_some()
+                    || self.binary_method_result(first, name, ns).is_some()
             }
             "implements" => {
                 let trait_name = bare_name(&args[1])
@@ -433,17 +570,7 @@ impl Registry {
                         "implements<T,{trait_name}> references unknown trait"
                     ));
                 }
-                self.implementations
-                    .iter()
-                    .any(|(provided, for_type, source_ns)| {
-                        normalized(for_type) == normalized(first)
-                            && self.parent_contains(
-                                provided,
-                                trait_name,
-                                source_ns,
-                                &mut HashSet::new(),
-                            )
-                    })
+                self.implements_trait(first,trait_name,ns)
             }
             _ => return Err(format!("unknown intrinsic concept '{name}'")),
         })
@@ -508,19 +635,19 @@ impl Registry {
                                 .get(right)
                                 .ok_or_else(|| format!("unknown requires operand '{right}'"))?;
                             let expected = sub_type(result, subst);
-                            // The bootstrap arithmetic operators are defined for
-                            // matching numeric operands; user-defined operator
-                            // dispatch is checked separately during specialization.
-                            normalized(a) == normalized(b)
+                            let builtin = normalized(a) == normalized(b)
                                 && normalized(a) == normalized(&expected)
-                                && self.check_intrinsic("numeric", std::slice::from_ref(a), ns)?
-                                && matches!(
-                                    operation,
-                                    ast::BinaryOp::Add
-                                        | ast::BinaryOp::Sub
-                                        | ast::BinaryOp::Mul
-                                        | ast::BinaryOp::Div
-                                )
+                                && self.check_intrinsic("numeric",std::slice::from_ref(a),ns)?
+                                && matches!(operation,ast::BinaryOp::Add | ast::BinaryOp::Sub
+                                    | ast::BinaryOp::Mul | ast::BinaryOp::Div);
+                            let contract = ast::operator_key(*operation)
+                                .map(|key|self.operator_contract(key,a,ns)).transpose()?.flatten();
+                            let custom = contract.map(|(_,method)| {
+                                self.binary_method_result(a,method,ns).map(|actual|
+                                    normalized(&actual)==normalized(&expected)).unwrap_or(false)
+                                    && normalized(a)==normalized(b)
+                            }).unwrap_or(false);
+                            builtin || custom
                         }
                     };
                     if !valid {
@@ -561,6 +688,16 @@ impl Registry {
                 )
             }
         }
+    }
+    /// Check a named unary concept without instantiating it. Nova Meta uses
+    /// this to validate derive declarations even when nobody derives them.
+    pub fn require_unary_concept(&self, name: &str, ns: &str) -> Result<(), String> {
+        let (qualified, entry) = lookup(&self.entries, ns, name)
+            .ok_or_else(||format!("unknown derive concept '{name}'"))?;
+        if entry.decl.generics.len() != 1 {
+            return Err(format!("derive concept '{qualified}' must accept exactly one type parameter"));
+        }
+        Ok(())
     }
     /// Validate constraints only after generic substitutions are concrete.
     /// Rejection happens before HIR/MIR emission and LLVM code generation.

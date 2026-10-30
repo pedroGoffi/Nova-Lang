@@ -1,0 +1,15 @@
+fn dangerous(target: std::meta::MetaType) -> std::meta::MetaDecl {
+    return std::meta::impl_for(target);
+}
+
+#[comptime]
+#[proc_derive(UnsafeDerive)]
+fn unsafe_derive(target: std::meta::MetaType) -> std::meta::MetaDecl {
+    // Regular runtime functions cannot execute during macro expansion.
+    return dangerous(target);
+}
+
+#[derive(UnsafeDerive)]
+struct Data { id: i64 }
+
+fn main() -> i32 { 0 }

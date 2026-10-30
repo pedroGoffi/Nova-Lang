@@ -1,0 +1,59 @@
+// Views own all HTML. Never interpolate request data as raw markup.
+
+// NovaView is used where an HTML form needs action/method/attributes.
+pub fn form_page(message: str) -> std::string::String {
+    let html = nexoframe::nova_web::nova_view::create();
+    html.open("main"); html.attr("class","login-shell");
+    html.open("section"); html.attr("class","login-card");
+    html.open("p"); html.attr("class","eyebrow"); html.text("NEXOFRAME · NOVA"); html.end();
+    html.element("h1","Bem-vindo de volta");
+    html.open("p"); html.attr("class","subtitle");
+    html.text("Entre com suas credenciais de demonstração."); html.end();
+    let notice = std::string::from_text(message);
+    if !notice.is_empty() {
+        html.open("p"); html.attr("class","error"); html.attr("role","alert");
+        html.text(message); html.end();
+    }
+    html.open("form"); html.attr("action","/login"); html.attr("method","post");
+    html.attr("class","login-form");
+    html.open("label"); html.attr("for","username"); html.text("Usuário"); html.end();
+    html.void("input"); html.attr("id","username"); html.attr("name","username");
+    html.attr("type","text"); html.attr("autocomplete","username"); html.flag("required");
+    html.open("label"); html.attr("for","password"); html.text("Senha"); html.end();
+    html.void("input"); html.attr("id","password"); html.attr("name","password");
+    html.attr("type","password"); html.attr("autocomplete","current-password"); html.flag("required");
+    html.open("button"); html.attr("type","submit"); html.text("Entrar"); html.end();
+    html.end(); // form
+    html.open("p"); html.attr("class","note");
+    html.text("Sessões individuais, expiração e logout com revogação em memória."); html.end();
+    html.end(); // section
+    html.end(); // main
+    let rendered = html.render();
+    return std::string::from_text(rendered.as_str());
+}
+
+// This page is accessed only after the cookie was validated in the controller.
+// POST logout and renewal include CSRF tokens bound to the active session.
+pub fn dashboard_page(csrf: str) -> std::string::String {
+    let html = nexoframe::nova_web::nova_view::create();
+    html.open("main"); html.attr("class","login-shell");
+    html.open("section"); html.attr("class","login-card");
+    html.open("p"); html.attr("class","eyebrow"); html.text("NEXOFRAME · NOVA"); html.end();
+    html.element("h1","Bem-vindo ao dashboard");
+    html.open("p"); html.attr("class","subtitle");
+    html.text("O servidor validou a sessão individual e o prazo de expiração."); html.end();
+    html.open("form"); html.attr("action","/logout"); html.attr("method","post");
+    html.void("input"); html.attr("type","hidden"); html.attr("name","_csrf"); html.attr("value",csrf);
+    html.open("button"); html.attr("type","submit"); html.text("Sair"); html.end();
+    html.end();
+    html.open("form"); html.attr("action","/session/renew"); html.attr("method","post");
+    html.void("input"); html.attr("type","hidden"); html.attr("name","_csrf"); html.attr("value",csrf);
+    html.open("button"); html.attr("type","submit"); html.text("Renovar sessão"); html.end();
+    html.end();
+    html.open("p"); html.attr("class","note");
+    html.text("Sessão independente, renovável e revogável."); html.end();
+    html.end();
+    html.end();
+    let rendered = html.render();
+    return std::string::from_text(rendered.as_str());
+}

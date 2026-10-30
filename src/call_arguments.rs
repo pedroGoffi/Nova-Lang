@@ -291,6 +291,12 @@ impl Binder {
 
     fn expression(&self, expression: &mut Expr, namespace: &str) -> Result<(), String> {
         match expression {
+            Expr::If { condition, then_body, else_body } => {
+                self.expression(condition,namespace)?;
+                self.statements(then_body,namespace)?;
+                self.statements(else_body,namespace)?;
+            }
+            Expr::Block(body) => self.statements(body,namespace)?,
             Expr::Call(name, values) => {
                 if name == NAMED_MARKER {
                     return Err("named argument can only appear in a function call".into());
@@ -437,7 +443,7 @@ impl Binder {
                 | Stmt::FieldSet { value, .. }
                 | Stmt::DerefSet { value, .. }
                 | Stmt::CompoundSet { value, .. }
-                | Stmt::Expr(value)
+                | Stmt::Expr(value) | Stmt::Tail(value)
                 | Stmt::Return(Some(value)) => self.expression(value, namespace)?,
                 Stmt::If {
                     condition,

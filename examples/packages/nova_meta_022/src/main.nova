@@ -1,0 +1,14 @@
+// All declarations below are evaluated during compilation, before LLVM.
+#[meta_attribute(struct)] trait audited {}
+#[meta_effect] trait telemetry {}
+#[meta_protocol(custom_pipeline, apply)] trait Transform {
+    fn apply(self: Self) -> Self;
+}
+
+#[audited]
+struct Marker { id: i32 }
+
+#[effects(telemetry)] fn emit() -> i32 { return 42; }
+#[effects(telemetry)] fn relay() -> i32 { return emit(); }
+
+fn main() -> i32 { return relay() - 42; }

@@ -1,0 +1,3 @@
+#[meta_attribute(function, lint_unused)] trait checked {}
+#[checked] fn must_handle() -> i32 { return 42; }
+fn main() -> i32 { must_handle(); return 0; }

@@ -1,0 +1,153 @@
+// HTTP adapter only: use typed outcomes from Nexo, NexoFrame and service.
+use super::auth_service;
+use super::login_view;
+use nexoframe::nova_web::nexo::cookies;
+use nexoframe::nova_web::nexo::request::Request;
+use nexoframe::nova_web::nexo::response::Response;
+
+fn form_problem(res: Response) -> i32 {
+    let markup=login_view::form_page("Confira os campos e tente novamente.");
+    return nexoframe::views::page(res.status(422),"Entrar · Nova",markup.as_str());
+}
+
+fn credentials_problem(res: Response, error: &std::error::OwnedError) -> i32 {
+    if error.code()==503 {
+        return nexoframe::views::api_error(res,503,"Autenticacao indisponivel.");
+    }
+    let markup=login_view::form_page("Credenciais invalidas.");
+    return nexoframe::views::page(res.status(401),"Entrar · Nova",markup.as_str());
+}
+
+fn redirect_authenticated(req: Request, res: Response, token: str, location: str) -> i32 {
+    let jar=cookies::jar();
+    let opts=cookies::session_options(auth_service::secure_cookie(),3600);
+    match jar.try_set(auth_service::cookie_name(),token,&opts) {
+        Err(error) => {
+            // Never strand a newly-created session if Set-Cookie cannot be sent.
+            nexoframe::session::revoke(req,token);
+            return nexoframe::views::api_error(res,500,"Nao foi possivel configurar cookie.");
+        }
+        Ok(written) => { return res.redirect_with_cookies(location,&jar); }
+    }
+}
+
+fn authenticate_and_redirect(req: Request, res: Response, username: str, password: str) -> i32 {
+    match auth_service::authenticate_checked(username,password) {
+        Err(error) => { return credentials_problem(res,&error); }
+        Ok(user_id) => {
+            match nexoframe::auth::login_checked(req,user_id,3600) {
+                Err(error) => { return nexoframe::views::api_error(res,503,"Nao foi possivel criar sessao."); }
+                Ok(token) => {
+                    // Only revoke the previous session after the new one exists.
+                    // The browser receives the new cookie in the same response.
+                    nexoframe::auth::logout(req,auth_service::cookie_name());
+                    return redirect_authenticated(req,res,token.as_str(),"/dashboard");
+                }
+            }
+        }
+    }
+}
+
+pub fn show_login(req: Request, res: Response) -> i32 {
+    match nexoframe::auth::current_user(req,auth_service::cookie_name()) {
+        Some(user_id) => { return res.redirect("/dashboard"); }
+        None => {
+            let markup=login_view::form_page("");
+            return nexoframe::views::page(res,"Entrar · Nova",markup.as_str());
+        }
+    }
+}
+
+fn allowed_origin(req: Request) -> bool {
+    match req.optional_header("Origin") {
+        None => { return false; }
+        Some(origin) => { return auth_service::trusted_origin(origin.as_str()); }
+    }
+}
+
+fn is_form_request(req: Request) -> bool {
+    match req.optional_header("Content-Type") {
+        None => { return false; }
+        Some(mime) => { return mime.contains("application/x-www-form-urlencoded"); }
+    }
+}
+
+pub fn submit_login(req: Request, res: Response) -> i32 {
+    if !allowed_origin(req) {
+        return nexoframe::views::api_error(res,403,"Origem nao autorizada.");
+    }
+    if !is_form_request(req) {
+        return nexoframe::views::api_error(res,400,"Conteudo deve ser formulario HTML.");
+    }
+    match req.required_form("username") {
+        Err(error) => { return form_problem(res); }
+        Ok(username) => {
+            match req.required_form("password") {
+                Err(error) => { return form_problem(res); }
+                Ok(password) => {
+                    return authenticate_and_redirect(req,res,username.as_str(),password.as_str());
+                }
+            }
+        }
+    }
+}
+
+pub fn dashboard(req: Request, res: Response) -> i32 {
+    match nexoframe::auth::current_user(req,auth_service::cookie_name()) {
+        None => { return res.redirect("/login"); }
+        Some(user_id) => {
+            match nexoframe::auth::csrf_checked(req,auth_service::cookie_name()) {
+                Err(error) => { return nexoframe::views::api_error(res,503,"CSRF indisponivel."); }
+                Ok(csrf) => {
+                    let markup=login_view::dashboard_page(csrf.as_str());
+                    return nexoframe::views::page(res,"Dashboard · Nova",markup.as_str());
+                }
+            }
+        }
+    }
+}
+
+fn finish_logout(req: Request, res: Response, submitted: str) -> i32 {
+    if !nexoframe::auth::verify_csrf(req,auth_service::cookie_name(),submitted) {
+        return nexoframe::views::api_error(res,403,"CSRF invalido.");
+    }
+    if !nexoframe::auth::logout(req,auth_service::cookie_name()) {
+        return nexoframe::views::api_error(res,401,"Sessao expirada.");
+    }
+    let jar=cookies::jar();
+    let opts=cookies::session_options(auth_service::secure_cookie(),3600);
+    match jar.try_clear(auth_service::cookie_name(),&opts) {
+        Err(error) => { return nexoframe::views::api_error(res,500,"Falha ao limpar cookie."); }
+        Ok(written) => { return res.redirect_with_cookies("/login",&jar); }
+    }
+}
+
+pub fn logout(req: Request, res: Response) -> i32 {
+    if !allowed_origin(req) {
+        return nexoframe::views::api_error(res,403,"Origem nao autorizada.");
+    }
+    match req.required_form("_csrf") {
+        Err(error) => { return nexoframe::views::api_error(res,403,"CSRF ausente ou invalido."); }
+        Ok(token) => { return finish_logout(req,res,token.as_str()); }
+    }
+}
+
+fn renew_with_csrf(req: Request, res: Response, submitted: str) -> i32 {
+    if !nexoframe::auth::verify_csrf(req,auth_service::cookie_name(),submitted) {
+        return nexoframe::views::api_error(res,403,"CSRF invalido.");
+    }
+    match nexoframe::auth::renew_checked(req,auth_service::cookie_name(),3600) {
+        Err(error) => { return nexoframe::views::api_error(res,503,"Falha ao renovar sessao."); }
+        Ok(token) => { return redirect_authenticated(req,res,token.as_str(),"/dashboard"); }
+    }
+}
+
+pub fn renew(req: Request, res: Response) -> i32 {
+    if !allowed_origin(req) {
+        return nexoframe::views::api_error(res,403,"Origem nao autorizada.");
+    }
+    match req.required_form("_csrf") {
+        Err(error) => { return nexoframe::views::api_error(res,403,"CSRF ausente ou invalido."); }
+        Ok(token) => { return renew_with_csrf(req,res,token.as_str()); }
+    }
+}

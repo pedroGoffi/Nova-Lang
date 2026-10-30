@@ -1,0 +1,22 @@
+
+fn fib(n: i64) -> i64 {
+    return if n <= 1 {
+        n
+    } else {
+        fib(n - 1) + fib(n - 2)
+    };
+}
+
+fn fact(n: i64) -> i64 {
+    return if n <= 1 {
+        1
+    } else {
+        n * fact(n - 1)
+    };
+}
+
+fn main() -> i32 {
+    auto v = fact(5);
+    println!("Value - {}", v);
+    return 0;
+}

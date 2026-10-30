@@ -35,12 +35,19 @@ struct Scope {
 
 pub fn lower(input: &ast::Program) -> Result<ast::Program, String> {
     let mut engine = Engine::default();
-    let expanded = crate::macros::expand(input)?;
+    let expanded = crate::proc_macros::expand(input)?;
+    let expanded = crate::macros::expand(&expanded)?;
     let expanded = crate::concurrency::lower_and_check(&expanded)?;
     let expanded = crate::call_arguments::lower(&expanded)?;
+    // Derive aliases live in .nova metadata and expand to supported derives
+    // before type materialization. The transformation is deterministic and
+    // cannot bypass the existing derive/ownership validation.
+    let expanded = crate::meta::expand(&expanded)?;
+    crate::meta::validate(&expanded)?;
     crate::effects::validate(&expanded)?;
     let expanded = crate::consteval::fold(&expanded)?;
     engine.concepts = crate::concepts::Registry::collect(&expanded)?;
+    crate::meta::Registry::collect(&expanded)?.check_derive_contracts(&expanded,&engine.concepts)?;
     let expanded = crate::type_features::lower(&expanded)?;
     let expanded = crate::iterators::desugar(&expanded);
     let expanded = crate::lambdas::lift(expanded)?;
@@ -126,6 +133,15 @@ fn join(ns: &str, name: &str) -> String {
         name.into()
     } else {
         format!("{ns}::{name}")
+    }
+}
+/// Only real lvalues may be implicitly borrowed for a method receiver.
+/// A method on a computed temporary still needs explicit ownership semantics.
+fn addressable_receiver(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(_) => true,
+        Expr::Field(owner, _) | Expr::Index(owner, _) => addressable_receiver(owner),
+        _ => false,
     }
 }
 fn ident(name: &str) -> String {
@@ -327,6 +343,8 @@ fn numeric_info(t: &TypeRef) -> Option<(bool, u8, bool)> {
 fn castable(from: &TypeRef, to: &TypeRef) -> bool {
     from == to
         || (numeric_info(from).is_some() && numeric_info(to).is_some())
+        || (from == &TypeRef::Named("char".into()) && is_integer(to))
+        || (to == &TypeRef::Named("char".into()) && is_integer(from))
         || (matches!(from, TypeRef::Function { .. }) && to == &TypeRef::Named("u64".into()))
         || (from == &TypeRef::Named("u64".into()) && matches!(to, TypeRef::Function { .. }))
         || (matches!(from, TypeRef::Pointer { .. }) && matches!(to, TypeRef::Pointer { .. }))
@@ -421,6 +439,12 @@ fn promote_numeric(a: &TypeRef, b: &TypeRef) -> Option<TypeRef> {
 // preserving one concrete struct representation throughout LLVM lowering.
 fn inherit_expr(e: &mut Expr, map: &HashMap<String, TypeRef>) {
     match e {
+        Expr::If { condition, then_body, else_body } => {
+            inherit_expr(condition,map);
+            inherit_stmts(then_body,map);
+            inherit_stmts(else_body,map);
+        }
+        Expr::Block(body) => inherit_stmts(body,map),
         Expr::Unary(_, x) | Expr::Deref(x) | Expr::Yield(x) | Expr::Await(x) | Expr::Spread(x) => {
             inherit_expr(x, map)
         }
@@ -515,6 +539,7 @@ fn inherit_stmts(stmts: &mut [Stmt], map: &HashMap<String, TypeRef>) {
             }
             Stmt::Defer(e)
             | Stmt::Expr(e)
+            | Stmt::Tail(e)
             | Stmt::Set { value: e, .. }
             | Stmt::FieldSet { value: e, .. }
             | Stmt::CompoundSet { value: e, .. } => inherit_expr(e, map),
@@ -1163,11 +1188,14 @@ impl Engine {
                 ty: TypeRef::Named("i32".into()),
             });
             let mut metas = vec![];
-            for v in variants {
+            for (variant_tag, v) in variants.into_iter().enumerate() {
                 let mut payload = vec![];
                 for (i, typ) in v.payload.iter().enumerate() {
                     let ty = self.resolved_type(typ, &ns, &subst)?;
-                    let field = format!("{}_{}", v.name, i);
+                    // Preserve the discriminant in compiler-private field names.
+                    // Needed by HIR's active-variant Drop and ownership lowering;
+                    // empty variants need no payload fields or destructors.
+                    let field = format!("__nova_variant_{variant_tag}_{}_{}", v.name, i);
                     concrete_fields.push(ast::Field {
                         name: field.clone(),
                         ty: ty.clone(),
@@ -1365,6 +1393,8 @@ impl Engine {
         match ty {
             TypeRef::Named(n) if n == "bool" => Ok(Expr::Bool(false)),
             TypeRef::Named(n) if n == "str" => Ok(Expr::Str("\"\"".into())),
+            TypeRef::Named(n) if n == "char" => Ok(Expr::Cast(
+                Box::new(Expr::Int("0".into())), TypeRef::Named("char".into()))),
             TypeRef::Named(n) if n == "f32" || n == "f64" => Ok(Expr::Float("0.0".into())),
             TypeRef::Named(n)
                 if [
@@ -1497,8 +1527,17 @@ impl Engine {
         }
         // Preserve the real monomorphization/call-lowering chain for diagnostics.
         // These frames are compile-time context, not a runtime stack trace.
+        let mut function_body = template.decl.body.clone();
+        if let Some(Stmt::Tail(value)) = function_body.last().cloned() {
+            function_body.pop();
+            if result == TypeRef::Named("()".into()) {
+                function_body.push(Stmt::Expr(value));
+            } else {
+                function_body.push(Stmt::Return(Some(value)));
+            }
+        }
         let body = self
-            .statements(&template.decl.body, &mut scope)
+            .statements(&function_body, &mut scope)
             .map_err(|error| format!("{error}\n  = nova-trace: specializing function '{name}'"))?;
         self.items.push(Item::Function(ast::Function {
             mode: ast::FunctionMode::Normal,
@@ -1658,12 +1697,15 @@ impl Engine {
                         .get(name)
                         .ok_or_else(|| format!("unknown local '{name}'"))?
                         .clone();
-                    let (value, _) = self.expression(value, scope, Some(&expected))?;
-                    output.push(Stmt::CompoundSet {
-                        name: name.clone(),
-                        op: *op,
-                        value,
-                    });
+                    // Desugar through the same operator solver as ordinary
+                    // `a | b`: including #[operator]-backed user types.
+                    let combined = Expr::Binary(Box::new(Expr::Var(name.clone())),
+                        *op, Box::new(value.clone()));
+                    let (value, result_type) = self.expression(&combined, scope, Some(&expected))?;
+                    if result_type != expected {
+                        return Err(format!("compound operator on '{name}' returns {result_type:?}, expected {expected:?}"));
+                    }
+                    output.push(Stmt::Set { name:name.clone(), value });
                 }
                 Stmt::Return(value) => {
                     let value = value
@@ -1747,6 +1789,7 @@ impl Engine {
                 }
                 Stmt::Defer(e) => output.push(Stmt::Defer(self.expression(e, scope, None)?.0)),
                 Stmt::Expr(e) => output.push(Stmt::Expr(self.expression(e, scope, None)?.0)),
+                Stmt::Tail(e) => output.push(Stmt::Expr(self.expression(e, scope, None)?.0)),
                 Stmt::Match { value, arms } => {
                     let (value, ty) = self.expression(value, scope, None)?;
                     let TypeRef::Named(type_name) = ty else {
@@ -1923,7 +1966,7 @@ impl Engine {
             TypeRef::Named(name) => match name.as_str() {
                 "bool" | "i8" | "u8" => Ok((1, 1)),
                 "i16" | "u16" => Ok((2, 2)),
-                "i32" | "u32" | "f32" => Ok((4, 4)),
+                "i32" | "u32" | "f32" | "char" => Ok((4, 4)),
                 "i64" | "u64" | "isize" | "usize" | "f64" | "str" => Ok((8, 8)),
                 "()" => Err("unit values cannot be allocated as records".into()),
                 _ => {
@@ -1973,6 +2016,31 @@ impl Engine {
         }
         Ok((value, actual))
     }
+    /// Type a block used as a value. Scope locals never escape; only the tail
+    /// expression does. An explicit semicolon means unit, as in Rust.
+    fn value_block(
+        &mut self,
+        body: &[Stmt],
+        scope: &Scope,
+        expected: Option<&TypeRef>,
+        require_value: bool,
+    ) -> Result<(Vec<Stmt>, TypeRef), String> {
+        let mut inner = scope.clone();
+        let (prefix, tail) = match body.split_last() {
+            Some((Stmt::Tail(value), prefix)) => (prefix, Some(value)),
+            _ => (body, None),
+        };
+        let mut output = self.statements(prefix, &mut inner)?;
+        match tail {
+            Some(value) => {
+                let (value, ty) = self.expression(value, &inner, expected)?;
+                output.push(Stmt::Tail(value));
+                Ok((output, ty))
+            }
+            None if !require_value => Ok((output, TypeRef::Named("()".into()))),
+            None => Err("value-producing if branch requires a final expression without ';'".into()),
+        }
+    }
     fn expression_inner(
         &mut self,
         e: &Expr,
@@ -1983,6 +2051,26 @@ impl Engine {
         match e {
             Expr::Yield(..) | Expr::Await(..) => {
                 Err("compiler bug: suspension was not desugared".into())
+            }
+            Expr::If { condition, then_body, else_body } => {
+                let (condition, cond_ty) = self.expression(condition, scope,
+                    Some(&TypeRef::Named("bool".into())))?;
+                if cond_ty != TypeRef::Named("bool".into()) {
+                    return Err("if expression condition must be bool".into());
+                }
+                let (then_body, branch_ty) = self.value_block(
+                    then_body, scope, expected, true)?;
+                let (else_body, other_ty) = self.value_block(
+                    else_body, scope, Some(&branch_ty), true)?;
+                if branch_ty != other_ty {
+                    return Err(format!("if branches must yield identical types: {} vs {}",
+                        display_type(&branch_ty), display_type(&other_ty)));
+                }
+                Ok((Expr::If { condition: Box::new(condition), then_body, else_body },branch_ty))
+            }
+            Expr::Block(body) => {
+                let (body, ty) = self.value_block(body, scope, expected, false)?;
+                Ok((Expr::Block(body), ty))
             }
             Expr::MacroCall(name, _) => Err(format!("macro '{name}!' was not expanded")),
             Expr::Spread(..) => {
@@ -2081,6 +2169,32 @@ impl Engine {
                 Ok((Expr::Zero(ty.clone()), ty))
             }
             Expr::Cast(value, target) => {
+                // The AST preserves the single-quoted token for a precise
+                // diagnostic. Lower it to a Unicode scalar in the char type.
+                if *target == TypeRef::Named("char".into()) {
+                    if let Expr::Str(raw) = value.as_ref() {
+                        if raw.starts_with('\'') {
+                            let scalar=crate::ast::decode_char_literal(raw)? as u32;
+                            // Like numeric literals, char literals can be used
+                            // directly in an integral context (e.g. byte_at(i)
+                            // == '/'), without converting char variables.
+                            if let Some(TypeRef::Named(name)) = expected {
+                                let max = match name.as_str() {
+                                    "i8" => Some(i8::MAX as u32), "u8" => Some(u8::MAX as u32),
+                                    "i16" => Some(i16::MAX as u32), "u16" => Some(u16::MAX as u32),
+                                    "i32" | "u32" | "i64" | "u64" | "isize" | "usize" => Some(u32::MAX),
+                                    _ => None,
+                                };
+                                if let Some(max) = max {
+                                    if scalar > max {return Err(format!("error[NOVA-CHAR003]: character U+{scalar:04X} does not fit {name}"));}
+                                    return Ok((Expr::Int(scalar.to_string()), TypeRef::Named(name.clone())));
+                                }
+                            }
+                            return Ok((Expr::Cast(Box::new(Expr::Int(scalar.to_string())),
+                                TypeRef::Named("char".into())), TypeRef::Named("char".into())));
+                        }
+                    }
+                }
                 let target = self.resolved_type(target, &scope.namespace, &scope.subst)?;
                 let (value, from) = self.expression(value, scope, None)?;
                 if !castable(&from, &target) {
@@ -2113,40 +2227,45 @@ impl Engine {
                         | BinaryOp::Ge
                 );
                 let hint = if comparison { None } else { expected };
-                let (mut a, ta) = self.expression(a, scope, hint)?;
+                let left_literal = if comparison && matches!(a.as_ref(), Expr::Cast(inner, ty)
+                    if *ty == TypeRef::Named("char".into())
+                    && matches!(inner.as_ref(), Expr::Str(raw) if raw.starts_with('\''))) {
+                    Some(a.as_ref().clone())
+                } else { None };
+                let (mut a, mut ta) = self.expression(a, scope, hint)?;
                 // Evaluate a non-literal RHS on its own: literal RHS keeps LHS context
                 // so `i64_value + 2` does not force an unnecessary conversion.
-                let right_hint = if matches!(b.as_ref(), Expr::Int(_) | Expr::Float(_)) {
+                let right_hint = if matches!(b.as_ref(), Expr::Int(_) | Expr::Float(_))
+                    || matches!(b.as_ref(), Expr::Cast(inner, ty)
+                        if *ty == TypeRef::Named("char".into())
+                        && matches!(inner.as_ref(), Expr::Str(raw) if raw.starts_with('\''))) {
                     Some(&ta)
                 } else {
                     None
                 };
                 let (mut b, tb) = self.expression(b, scope, right_hint)?;
+                // Literal-only contextual coercion works in either order:
+                // byte_at(i) == '/' and '/' == byte_at(i) have identical types.
+                if let Some(original) = left_literal {
+                    if is_integer(&tb) {
+                        (a,ta) = self.expression(&original,scope,Some(&tb))?;
+                    }
+                }
                 // Struct operators dispatch through regular, typechecked trait
                 // methods. There is no special-purpose LLVM/runtime operator.
                 // Primitive operators always retain their native behavior.
                 if let TypeRef::Named(receiver_type) = &ta {
                     if self.concrete_fields.contains_key(receiver_type) {
-                        let method = match op {
-                            BinaryOp::Add => Some("add"),
-                            BinaryOp::Sub => Some("sub"),
-                            BinaryOp::Mul => Some("mul"),
-                            BinaryOp::Div => Some("div"),
-                            BinaryOp::Rem => Some("rem"),
-                            BinaryOp::Eq => Some("eq"),
-                            BinaryOp::Ne => Some("ne"),
-                            BinaryOp::Lt => Some("lt"),
-                            BinaryOp::Le => Some("le"),
-                            BinaryOp::Gt => Some("gt"),
-                            BinaryOp::Ge => Some("ge"),
-                            BinaryOp::BitAnd => Some("bit_and"),
-                            BinaryOp::BitOr => Some("bit_or"),
-                            BinaryOp::BitXor => Some("bit_xor"),
-                            BinaryOp::Shl => Some("shift_left"),
-                            BinaryOp::Shr => Some("shift_right"),
-                            BinaryOp::And | BinaryOp::Or => None,
-                        };
+                        let key = ast::operator_key(*op);
+                        let contract = key.map(|key| self.concepts.operator_contract(key,&ta,&scope.namespace))
+                            .transpose()?.flatten();
+                        let method = contract.map(|(_,m)|m).or(key);
                         if let Some(method) = method {
+                            if let Some((trait_name,_)) = contract {
+                                if !self.concepts.implements_trait(&ta,trait_name,&scope.namespace) {
+                                    return Err(format!("error[NOVA-OP002]: operator '{:?}' on '{receiver_type}' requires an explicit impl of '{trait_name}'",op));
+                                }
+                            }
                             let candidate = self.funcs.keys().any(|candidate| {
                                 candidate.ends_with(&format!("::{method}"))
                                     && (receiver_type.as_str()
@@ -3029,19 +3148,17 @@ impl Engine {
                     right_type && (pointer_receiver==wants_pointer || can_auto_borrow)
                 }).ok_or_else(||format!("method '{name}' is not defined for '{concrete_name}' with this receiver type"))?;
                 let template = self.funcs[&selected].clone();
-                // Method receivers can borrow a named local for the duration of
-                // the call, without transferring ownership to a by-value self.
-                // Field/temp borrows require place projections in typed MIR and
-                // are deliberately rejected instead of making an alias copy.
+                // Local/field/index receivers borrow their original place.
+                // Computed temporaries still cannot be implicitly borrowed.
                 let base = if !pointer_receiver {
                     if let Some(ast::Param {
                         ty: TypeRef::Reference { mutable, .. },
                         ..
                     }) = template.decl.params.first()
                     {
-                        if !matches!(&base, Expr::Var(_)) {
+                        if !addressable_receiver(&base) {
                             return Err(format!(
-                                "method '{name}' requires a named receiver for implicit borrow (receiver: '{concrete_name}', resolved method: '{selected}'); the receiver is a field or temporary expression"
+                                "method '{name}' requires an addressable receiver for implicit borrow (receiver: '{concrete_name}', resolved method: '{selected}')"
                             ));
                         }
                         Expr::AddressOf {
@@ -3435,6 +3552,13 @@ fn validate_attrs(attrs: &[ast::Attribute], is_enum: bool) -> Result<(), String>
                     }
                 }
             }
+            "capabilities" if !is_enum && !a.args.is_empty() => {
+                // Registry already validated the actual trait implementations.
+                // No capabilities flags are carried to LLVM.
+            }
+            "requires" if !is_enum && !a.args.is_empty() => {
+                // Structural concept obligations were verified by Registry.
+            }
             "repr" if a.args.len() == 1 && a.args[0] == "C" && !is_enum => {
                 if repr {
                     return Err("duplicate #[repr(C)]".into());
@@ -3442,11 +3566,8 @@ fn validate_attrs(attrs: &[ast::Attribute], is_enum: bool) -> Result<(), String>
                 repr = true;
             }
             _ => {
-                return Err(format!(
-                    "unknown or unsupported attribute '#[{}({})]'",
-                    a.name,
-                    a.args.join(", ")
-                ))
+                // Nova Meta has already verified this source-defined attribute
+                // and its target. Metadata with no lowering hook is erased here.
             }
         }
     }

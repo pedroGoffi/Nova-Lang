@@ -46,21 +46,21 @@ fn attrs(attrs: &[Attribute], context: &str, mode: Option<&FunctionMode>) -> Res
         if !seen.insert(a.name.as_str()) {
             return Err(format!("duplicate effect '{}' on {context}", a.name));
         }
-        if !a.args.is_empty() {
+        if !a.args.is_empty() && !matches!(a.name.as_str(), "effects" | "meta_intrinsic" | "meta_proc_intrinsic" | "proc_derive" | "proc_attribute" | "proc_macro") {
             return Err(format!(
                 "effect '{}' on {context} expects no arguments",
                 a.name
             ));
         }
     }
-    if (has(attrs, "pure") || has(attrs, "const"))
+    if (has(attrs, "pure") || has(attrs, "const") || has(attrs, "comptime"))
         && (has(attrs, "io") || has(attrs, "unsafe") || has(attrs, "async"))
     {
         return Err(format!(
             "{context}: [[pure]] cannot be combined with [[io]], [[unsafe]] or [[async]]"
         ));
     }
-    if has(attrs, "const") && !matches!(mode, Some(FunctionMode::Normal)) {
+    if (has(attrs, "const") || has(attrs, "comptime")) && !matches!(mode, Some(FunctionMode::Normal)) {
         return Err(format!("{context}: const functions must be synchronous"));
     }
     if has(attrs, "async") && !matches!(mode, Some(FunctionMode::Async)) {
@@ -112,8 +112,8 @@ impl Effects {
                             &format!("method '{}'", f.name),
                             Some(&f.mode),
                         )?;
-                        if has(&f.attributes, "pure") {
-                            return Err(format!("method '{}': [[pure]] methods need effect-aware receiver resolution (not yet implemented)",f.name));
+                        if has(&f.attributes, "pure") || has(&f.attributes, "effects") {
+                            return Err(format!("method '{}': effect-constrained methods require resolved receiver effects (not yet implemented)",f.name));
                         }
                     }
                 }
@@ -126,7 +126,7 @@ impl Effects {
         let attrs = lookup(&self.signatures, ns, name).ok_or_else(|| {
             format!("[[pure]] function '{owner}' calls unresolved or effect-unknown '{name}'")
         })?;
-        if !(has(attrs, "pure") || has(attrs, "const")) {
+        if !(has(attrs, "pure") || has(attrs, "const") || has(attrs, "comptime")) {
             return Err(format!("[[pure]] function '{owner}' calls impure '{name}'; annotate its verified implementation [[pure]]"));
         }
         if self
@@ -141,6 +141,12 @@ impl Effects {
     }
     fn expr(&self, expr: &Expr, ns: &str, owner: &str) -> Result<(), String> {
         match expr {
+            Expr::If { condition, then_body, else_body } => {
+                self.expr(condition,ns,owner)?;
+                self.stmts(then_body,ns,owner)?;
+                self.stmts(else_body,ns,owner)?;
+            }
+            Expr::Block(body) => self.stmts(body,ns,owner)?,
             Expr::Call(name,args)|Expr::GenericCall(name,_,args)=>{
                 self.call(name,ns,owner)?;
                 for e in args {self.expr(e,ns,owner)?;}
@@ -173,7 +179,7 @@ impl Effects {
                 | Stmt::CompoundSet { value, .. }
                 | Stmt::Return(Some(value))
                 | Stmt::Defer(value)
-                | Stmt::Expr(value) => self.expr(value, ns, owner)?,
+                | Stmt::Expr(value) | Stmt::Tail(value) => self.expr(value, ns, owner)?,
                 Stmt::If {
                     condition,
                     then_body,
@@ -218,12 +224,111 @@ impl Effects {
         Ok(())
     }
 }
+/// Visit the expressions that can contain a direct call, including nested
+/// control-flow and block-value expressions. Only *declared* effects are used;
+/// unknown indirect/method calls are deliberately rejected in strict effects
+/// functions until the type checker can supply resolved target signatures.
+fn effect_expr(expr:&Expr, ns:&str, owner:&str, caller:&HashSet<String>, signatures:&HashMap<String,Vec<Attribute>>)->Result<(),String>{
+    match expr {
+        Expr::Call(name,args)|Expr::GenericCall(name,_,args) => {
+            let called=lookup(signatures,ns,name).ok_or_else(||format!("error[NOVA-EFF001]: effect-constrained '{owner}' calls unresolved '{name}'"))?;
+            let declared=called.iter().find(|a|a.name=="effects");
+            if let Some(attributes)=declared {
+                for effect in &attributes.args {
+                    if !caller.contains(effect) {
+                        return Err(format!("error[NOVA-EFF002]: '{owner}' calls '{name}' requiring effect '{effect}'; add it to #[effects(...)]"));
+                    }
+                }
+            } else if !called.iter().any(|a|a.name=="pure" || a.name=="const") {
+                return Err(format!("error[NOVA-EFF003]: '{owner}' calls '{name}' with unknown effects; annotate callee #[effects(...)] or verify it #[pure]"));
+            }
+            for a in args {effect_expr(a,ns,owner,caller,signatures)?;}
+        }
+        Expr::MethodCall(_,method,_)=>return Err(format!("error[NOVA-EFF004]: '{owner}' calls method '{method}' without a resolved effect signature")),
+        Expr::CallIndirect(_,_)=>return Err(format!("error[NOVA-EFF004]: '{owner}' calls an untyped function pointer")),
+        Expr::Lambda{..}=>return Err(format!("error[NOVA-EFF004]: '{owner}' captures a closure with unverified effects")),
+        Expr::If{condition,then_body,else_body}=>{
+            effect_expr(condition,ns,owner,caller,signatures)?;
+            effect_stmts(then_body,ns,owner,caller,signatures)?;
+            effect_stmts(else_body,ns,owner,caller,signatures)?;
+        }
+        Expr::Block(body)=>effect_stmts(body,ns,owner,caller,signatures)?,
+        Expr::Binary(a,_,b)|Expr::Index(a,b)=>{
+            effect_expr(a,ns,owner,caller,signatures)?;
+            effect_expr(b,ns,owner,caller,signatures)?;
+        }
+        Expr::Unary(_,x)|Expr::Cast(x,_)|Expr::AddressOf{value:x,..}|
+        Expr::Field(x,_)|Expr::Spread(x)|Expr::Deref(x)|Expr::Await(x)|Expr::Yield(x)=>
+            effect_expr(x,ns,owner,caller,signatures)?,
+        Expr::Array(values)|Expr::MacroCall(_,values)=>for e in values {effect_expr(e,ns,owner,caller,signatures)?;},
+        Expr::StructInit(_,fields)|Expr::GenericStructInit(_,_,fields)=>
+            for (_,e) in fields {effect_expr(e,ns,owner,caller,signatures)?;},
+        _=>{}
+    }
+    Ok(())
+}
+fn effect_stmts(body:&[Stmt],ns:&str,owner:&str,caller:&HashSet<String>,signatures:&HashMap<String,Vec<Attribute>>)->Result<(),String>{
+    for s in body {
+        match s {
+            Stmt::Let{init,defer,..}=>{
+                effect_expr(init,ns,owner,caller,signatures)?;
+                if let Some(defer)=defer {effect_expr(defer,ns,owner,caller,signatures)?;}
+            }
+            Stmt::Set{value,..}|Stmt::DerefSet{value,..}|Stmt::FieldSet{value,..}|
+            Stmt::CompoundSet{value,..}|Stmt::Return(Some(value))|Stmt::Defer(value)|
+            Stmt::Expr(value)|Stmt::Tail(value)=>effect_expr(value,ns,owner,caller,signatures)?,
+            Stmt::If{condition,then_body,else_body}=>{
+                effect_expr(condition,ns,owner,caller,signatures)?;
+                effect_stmts(then_body,ns,owner,caller,signatures)?;
+                if let Some(body)=else_body {effect_stmts(body,ns,owner,caller,signatures)?;}
+            }
+            Stmt::While{condition,body}=>{
+                effect_expr(condition,ns,owner,caller,signatures)?;
+                effect_stmts(body,ns,owner,caller,signatures)?;
+            }
+            Stmt::For{start,end,body,..}=>{
+                effect_expr(start,ns,owner,caller,signatures)?;
+                effect_expr(end,ns,owner,caller,signatures)?;
+                effect_stmts(body,ns,owner,caller,signatures)?;
+            }
+            Stmt::ForEach{iterable,body,..}=>{
+                effect_expr(iterable,ns,owner,caller,signatures)?;
+                effect_stmts(body,ns,owner,caller,signatures)?;
+            }
+            Stmt::Loop(body)|Stmt::Unsafe(body)=>effect_stmts(body,ns,owner,caller,signatures)?,
+            Stmt::Match{value,arms}=>{
+                effect_expr(value,ns,owner,caller,signatures)?;
+                for arm in arms {effect_stmts(&arm.body,ns,owner,caller,signatures)?;}
+            }
+            Stmt::Return(None)|Stmt::Break|Stmt::Continue=>{}
+        }
+    }
+    Ok(())
+}
+
 pub fn validate(program: &ast::Program) -> Result<(), String> {
     let mut effects = Effects::default();
     effects.collect(&program.items, "")?;
     for (name, namespace, function) in &effects.definitions {
-        if has(&function.attributes, "pure") || has(&function.attributes, "const") {
+        if let Some(contract)=function.attributes.iter().find(|a|a.name=="effects") {
+            let declared=contract.args.iter().cloned().collect::<HashSet<_>>();
+            effect_stmts(&function.body,namespace,name,&declared,&effects.signatures)?;
+        }
+        if has(&function.attributes, "pure") || has(&function.attributes, "const") || has(&function.attributes,"comptime") || has(&function.attributes,"comptime_assert") {
             effects.stmts(&function.body, namespace, name)?;
+            if (has(&function.attributes,"comptime") || has(&function.attributes,"comptime_assert"))
+                && !has(&function.attributes,"meta_proc_intrinsic") {
+                let allowed=|ty:&ast::TypeRef|matches!(ty,ast::TypeRef::Named(t) if matches!(t.as_str(),"i64"|"i32"|"bool"|"str"));
+                if !function.params.iter().all(|p|allowed(&p.ty)) || !allowed(&function.result) {
+                    return Err(format!("error[NOVA-CTFE017]: '{name}' uses a parameter or return type unsupported by the compile-time evaluator"));
+                }
+                if !function.generics.is_empty() {
+                    return Err(format!("error[NOVA-CTFE017]: '{name}' cannot be generic until typed CTFE monomorphization is implemented"));
+                }
+                if has(&function.attributes,"comptime_assert") && (!function.params.is_empty() || !matches!(&function.result,ast::TypeRef::Named(t) if t=="bool")) {
+                    return Err(format!("error[NOVA-CTFE017]: #[comptime_assert] '{name}' must be fn() -> bool"));
+                }
+            }
             if has(&function.attributes, "const") {
                 for p in &function.params {
                     if !matches!(&p.ty,ast::TypeRef::Named(t) if t=="i64" || t=="i32") {
@@ -274,5 +379,24 @@ mod tests {
         assert!(check("[[async]] fn p()->i32{return 0;}")
             .unwrap_err()
             .contains("requires an async"));
+    }
+}
+
+#[cfg(test)]
+mod meta_effect_tests {
+    use super::*;
+    use crate::grammar;
+    fn check(src:&str)->Result<(),String>{
+        let ast=grammar::ProgramParser::new().parse(src).map_err(|e|format!("{e:?}"))?;
+        crate::meta::validate(&ast)?;
+        validate(&ast)
+    }
+    #[test]
+    fn source_declared_effects_check_calls() {
+        let prefix="#[meta_effect] trait network {} #[effects(network)] fn request()->i32{return 1;} ";
+        check(&format!("{prefix} #[effects(network)] fn main()->i32{{return request();}}" )).unwrap();
+        assert!(check(&format!("{prefix} #[effects(database)] fn main()->i32{{return request();}}" )).unwrap_err().contains("NOVA-META008"));
+        assert!(check(&format!("{prefix} #[meta_effect] trait database {{}} #[effects(database)] fn main()->i32{{return request();}}" )).unwrap_err().contains("NOVA-EFF002"));
+        assert!(check(&format!("{prefix} fn other()->i32{{return 1;}} #[effects(network)] fn main()->i32{{return other();}}" )).unwrap_err().contains("NOVA-EFF003"));
     }
 }

@@ -1,0 +1,39 @@
+import std;
+import nexoframe;
+
+fn main() -> i32 {
+    let text = nexoframe::json::object();
+    nexoframe::json_str!(text,"name","<script>\"test\"</script>");
+    nexoframe::json_int!(text,"id",42);
+    nexoframe::json_bool!(text,"active",true);
+    let child = nexoframe::json::array();
+    child.boolean(true);
+    child.null();
+    text.array("items",&child);
+    let body = text.render();
+    let check = std::string::from_text(body.as_str());
+    if !check.contains("\"id\":42") { return 1; }
+    if !check.contains("<script>") { return 2; }
+    if !check.contains("\"active\":true") { return 3; }
+    let bag = nexoframe::validation::errors();
+    nexoframe::email_required!(bag,"email","wrong");
+    if bag.valid() { return 4; }
+    let errors = bag.as_json();
+    let messages = std::string::from_text(errors.as_str());
+    if !messages.contains("\"errors\"") { return 5; }
+    let html = nexoframe::nova_web::nova_view::create();
+    nexoframe::tag!(html,"p","<script>alert('x')</script>");
+    html.open("ul");
+    nexoframe::elements!(html,"li","Alpha","Beta");
+    html.end();
+    let markup = html.render();
+    let safe = std::string::from_text(markup.as_str());
+    if !safe.contains("&lt;script&gt;") { return 6; }
+    if !safe.contains("<li>Alpha</li><li>Beta</li>") { return 9; }
+    let group = nexoframe::group!("/api");
+    if !group.valid() { return 7; }
+    let invalid = nexoframe::group!("//host");
+    if invalid.valid() { return 8; }
+    println!("NexoFrame 0.50 OK");
+    return 0;
+}

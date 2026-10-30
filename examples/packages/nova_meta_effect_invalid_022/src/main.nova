@@ -1,0 +1,4 @@
+#[meta_effect] trait telemetry {}
+#[effects(network)] fn fetch() -> i32 { return 42; }
+#[effects(telemetry)] fn relay() -> i32 { return fetch(); }
+fn main()->i32 { return relay(); }

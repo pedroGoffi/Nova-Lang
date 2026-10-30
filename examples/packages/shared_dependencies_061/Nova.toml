@@ -1,0 +1,10 @@
+[package]
+name = "shared_dependencies_061"
+version = "0.1.0"
+entry = "src/main.nova"
+
+[dependencies]
+std = { builtin = "std" }
+nova_view = { path = "../../../packages/nova_view" }
+nova_web = { path = "../../../packages/nova_web" }
+nexoframe = { path = "../../../packages/nexoframe" }

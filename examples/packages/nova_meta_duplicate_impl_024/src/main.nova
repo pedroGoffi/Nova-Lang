@@ -1,0 +1,8 @@
+#[meta_derive_impl] trait Identifiable {
+    fn identifier(self:Self)->i64 {return self.id;}
+}
+#[derive(Identifiable)] struct Record {id:i64}
+impl Identifiable for Record {
+    fn identifier(self:Record)->i64 {return self.id;}
+}
+fn main()->i32{return 0;}

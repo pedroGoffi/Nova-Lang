@@ -1,0 +1,8 @@
+[package]
+name = "nova_login_demo"
+version = "0.1.0"
+entry = "src/main.nova"
+
+[dependencies]
+std = { builtin = "std" }
+nexoframe = { path = "../../../packages/nexoframe" }

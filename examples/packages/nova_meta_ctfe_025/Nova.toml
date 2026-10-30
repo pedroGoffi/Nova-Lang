@@ -1,0 +1,7 @@
+[package]
+name = "nova_meta_ctfe_025"
+version = "0.25.0"
+entry = "src/main.nova"
+
+[dependencies]
+std = { builtin = "std" }

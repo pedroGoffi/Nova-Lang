@@ -1,0 +1,8 @@
+[package]
+name = "postgres_example"
+version = "0.1.0"
+entry = "src/main.nova"
+
+[dependencies]
+std = { builtin = "std" }
+pg = { path = "../../../packages/nova_postgres" }

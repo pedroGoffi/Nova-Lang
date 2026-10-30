@@ -41,6 +41,26 @@ fn parses_new_module_syntax() {
         .parse(&strip_comments(source))
         .unwrap();
 }
+// Regression for the std::char module shadowing the builtin `char` type.
+// This exercises the actual package loader and surface analyzer rather than
+// testing only the low-level module-path lookup.
+#[test]
+fn builtin_char_module_keeps_character_literals_primitive() {
+    let f = Fixture::new();
+    f.write(
+        "Nova.toml",
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nentry = \"src/main.nova\"\n\n[dependencies]\nstd = { builtin = \"std\" }\n",
+    );
+    f.write(
+        "src/main.nova",
+        "fn main() -> i32 { let value: char = 'A'; if std::char::is_ascii(value) { return 1; } return 0; }",
+    );
+    let (program, _sources) = package::load_detailed(f.root()).unwrap();
+    let lowered = surface::lower(&program).unwrap();
+    let typed = hir::lower(&lowered).unwrap();
+    let _mir = mir::lower(&typed).unwrap();
+}
+
 #[test]
 fn example_compiles_across_three_files() {
     let (program, _) = package::load_detailed(Path::new("examples/packages/modules_demo")).unwrap();
@@ -1150,4 +1170,146 @@ fn format_macros_038_can_be_used_as_expression_statement_and_return_value() {
     let blocks = mir::lower(&typed).unwrap();
     mir::verify(&blocks).unwrap();
     assert!(codegen::generate(&blocks).contains("__nova_std__string____format_append_text"));
+}
+
+#[test]
+fn postgres_041_driver_and_query_builder_lower_to_llvm() {
+    // Static full-pipeline test, no database server required. The native C
+    // adapter is tested separately in runtime/tests/postgres_native_smoke.c.
+    let (parsed, _) = package::load_detailed(Path::new("examples/packages/postgres_041"))
+        .expect("PostgreSQL example and path dependencies should load");
+    let lowered = surface::lower(&parsed).expect("PostgreSQL types and borrowing must lower");
+    let typed = hir::lower(&lowered).expect("PostgreSQL facade must typecheck");
+    let blocks = mir::lower(&typed).expect("PostgreSQL facade must reach MIR");
+    mir::verify(&blocks).expect("PostgreSQL facade must pass MIR verifier");
+    let llvm = codegen::generate(&blocks);
+    for symbol in [
+        "__nova_std__postgres____pg_connect",
+        "__nova_std__postgres____pg_query",
+        "__nova_std__postgres____pg_bind_text",
+        "__nova_std__postgres____pg_result_free",
+        "__nova_std__postgres____pg_params_free",
+        "__nova_std__postgres____pg_close",
+    ] {
+        assert!(
+            llvm.contains(symbol),
+            "missing PostgreSQL private ABI: {symbol}"
+        );
+    }
+}
+
+#[test]
+fn package_diamond_shares_std_and_owned_types_across_aliases() {
+    let f = Fixture::new();
+    f.write(
+        "Nova.toml",
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nentry = \"src/main.nova\"\n\n[dependencies]\nleft = { path = \"left\" }\nright = { path = \"right\" }\nstd = { builtin = \"std\" }\n",
+    );
+    f.write(
+        "left/Nova.toml",
+        "[package]\nname = \"left\"\nversion = \"0.1.0\"\nentry = \"src/lib.nova\"\n\n[dependencies]\ncommon = { path = \"../common\" }\nstd = { builtin = \"std\" }\n",
+    );
+    f.write(
+        "right/Nova.toml",
+        "[package]\nname = \"right\"\nversion = \"0.1.0\"\nentry = \"src/lib.nova\"\n\n[dependencies]\ncommon = { path = \"../common\" }\nstd = { builtin = \"std\" }\n",
+    );
+    f.write(
+        "common/Nova.toml",
+        "[package]\nname = \"common\"\nversion = \"0.1.0\"\nentry = \"src/lib.nova\"\n\n[dependencies]\nstd = { builtin = \"std\" }\n",
+    );
+    f.write(
+        "common/src/lib.nova",
+        "pub struct Record { text: std::string::String }\n\
+         pub fn make() -> Record { return new Record { text: std::string::from_text(\"hello\") }; }\n\
+         pub fn make_text() -> std::string::String { return std::string::from_text(\"hello\"); }",
+    );
+    f.write(
+        "left/src/lib.nova",
+        "pub fn make() -> common::Record { return common::make(); }",
+    );
+    f.write(
+        "right/src/lib.nova",
+        "pub fn identity(value: common::Record) -> common::Record { return value; }",
+    );
+    f.write(
+        "src/main.nova",
+        "fn main() -> i32 {\n\
+           let record: left::common::Record = left::make();\n\
+           let moved: right::common::Record = right::identity(record);\n\
+           let text: std::string::String = left::common::make_text();\n\
+           return 0;\n\
+         }",
+    );
+    let (linked, sources) = package::load_detailed(f.root()).unwrap();
+    let root_std = linked
+        .items
+        .iter()
+        .filter(|item| match item {
+            crate::ast::Item::Namespace { name, .. } => name == "std",
+            _ => false,
+        })
+        .count();
+    assert_eq!(root_std, 1, "embedded std must have exactly one definition");
+    let common_file_count = sources
+        .iter()
+        .filter(|source| source.path.ends_with("common/src/lib.nova"))
+        .count();
+    assert_eq!(common_file_count, 1, "diamond package must be loaded once");
+    let lowered = surface::lower(&linked).unwrap();
+    let typed = hir::lower(&lowered).unwrap();
+    let blocks = mir::lower(&typed).unwrap();
+    let llvm = codegen::generate(&blocks);
+    assert!(
+        llvm.contains("@main"),
+        "expected codegen for canonical owner"
+    );
+}
+
+#[test]
+fn transitive_std_internal_remains_sealed_after_alias_deduplication() {
+    let f = Fixture::new();
+    f.write(
+        "Nova.toml",
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nentry = \"src/main.nova\"\n\n[dependencies]\nleft = { path = \"left\" }\n",
+    );
+    f.write(
+        "left/Nova.toml",
+        "[package]\nname = \"left\"\nversion = \"0.1.0\"\nentry = \"src/lib.nova\"\n\n[dependencies]\nstd = { builtin = \"std\" }\n",
+    );
+    f.write("left/src/lib.nova", "pub fn ok() -> i32 { return 0; }");
+    f.write(
+        "src/main.nova",
+        "fn main() -> i32 { left::std::internal::map::native_create(); return 0; }",
+    );
+    let error = package::load_detailed(f.root()).unwrap_err();
+    assert!(error.contains("NOVA-M015"), "{error}");
+}
+
+// A concept's generic parameters are lexical type variables. They must not
+// resolve to same-named private traits found in another loaded module/package.
+#[test]
+fn generic_concept_parameters_shadow_unrelated_private_symbols() {
+    let f = Fixture::new();
+    f.write(
+        "src/main.nova",
+        "trait A { fn merge(self:Self,other:Self)->Self; } \
+         trait B { fn combine(self:Self,other:Self)->Self; } \
+         pub concept Equal<A,B> = same_as<A,B>; \
+         fn main()->i32 {return 0;}",
+    );
+    let (program, _) = package::load_detailed(f.root()).unwrap();
+    assert!(surface::lower(&program).is_ok());
+}
+
+// The generic exception must not bypass normal visibility rules for real
+// qualified type references inside a concept's predicate.
+#[test]
+fn generic_concepts_still_reject_private_sibling_types() {
+    let f = Fixture::new();
+    f.write("src/main.nova", "mod hidden; mod consumer; fn main()->i32{return 0;}");
+    f.write("src/hidden.nova", "pub struct Secret { value: i32 }");
+    f.write("src/consumer.nova", "pub concept Leaks<T> = same_as<T, hidden::Secret>;");
+    let err = package::load_detailed(f.root()).unwrap_err();
+    assert!(err.contains("NOVA-M008"), "{err}");
+    assert!(err.contains("hidden"), "{err}");
 }

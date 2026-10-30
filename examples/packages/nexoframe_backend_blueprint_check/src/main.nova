@@ -1,0 +1,60 @@
+import std;
+import nexoframe;
+use nexoframe::nova_web::nexo::app::App;
+use nexoframe::nova_web::nexo::request::Request;
+use nexoframe::nova_web::nexo::response::Response;
+
+fn ok(req: Request, res: Response) -> i32 { return res.text("OK"); }
+fn authenticated(req: Request, res: Response) -> bool { return true; }
+
+fn install_backend(app: &App) -> std::result::Result<i32,std::error::OwnedError> {
+    return nexoframe::backend!(app,
+        nexoframe::web!(
+            nexoframe::get!("/",ok),
+            nexoframe::get!("/login",ok),
+            nexoframe::post!("/login",ok),
+            nexoframe::options_route!("/",ok)
+        ),
+        nexoframe::prefix!("/api",
+            nexoframe::get!("/health",ok),
+            nexoframe::guard!(authenticated,
+                nexoframe::get!("/me",ok),
+                nexoframe::group!("/v1",
+                    nexoframe::crud!("/users",ok,ok,ok,ok,ok),
+                    nexoframe::patch!("/users/:id",ok)
+                )
+            )
+        )
+    );
+}
+
+fn main() -> i32 {
+    let mut app = nexoframe::create(7901) defer app.close();
+    match install_backend(&app) {
+        Err(error) => { std::io::println("Backend blueprint failed"); return 1; }
+        Ok(value) => { }
+    }
+    // Invalid prefix must be detected before writing routes into app.
+    match nexoframe::route_blueprint::install(&app,
+        nexoframe::route_blueprint::prefix("//bad",nexoframe::route_blueprint::endpoint(1,"/invalid",ok))) {
+        Ok(value) => { return 2; }
+        Err(error) => { }
+    }
+    match nexoframe::route_blueprint::install(&app,
+        nexoframe::route_blueprint::endpoint(1,"/same",ok),
+        nexoframe::route_blueprint::endpoint(1,"/same",ok)) {
+        Ok(value) => { return 3; }
+        Err(error) => { }
+    }
+    // Stacked guards are intentionally rejected until Nexo provides a
+    // native middleware chain, so a nested authentication guard is never lost.
+    match nexoframe::route_blueprint::install(&app,
+        nexoframe::route_blueprint::guard(authenticated,
+            nexoframe::route_blueprint::guard(authenticated,
+                nexoframe::route_blueprint::endpoint(1,"/nested",ok)))) {
+        Ok(value) => { return 4; }
+        Err(error) => { }
+    }
+    std::io::println("Nova backend blueprint: OK");
+    return 0;
+}

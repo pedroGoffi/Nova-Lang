@@ -1,0 +1,20 @@
+# Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
+nexo_form_check 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/nexo_form_check hash=e4159774cfe9161b
+nexo 0.3.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nexo hash=011030af8295703c
+std 0.20.0 builtin hash=9f93fbeaf19f4725
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/nexo_form_check/src/main.nova hash=e4159774cfe9161b
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nexo/src/lib.nova hash=011030af8295703c
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nexo/src/request.nova hash=2ce944064912263a
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nexo/src/response.nova hash=dff55fc29bdf3e26
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nexo/src/method.nova hash=699f6fe01ac36a4d
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nexo/src/path.nova hash=4ab9115dcd1bdf57
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nexo/src/query.nova hash=44dade71ccb8050a
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nexo/src/headers.nova hash=bcac42d66632b862
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nexo/src/cookies.nova hash=9b9e38f4effc7a5b
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nexo/src/form.nova hash=48a7c8f81ae56901
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nexo/src/routing.nova hash=4145d92c83e6e822
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nexo/src/middleware.nova hash=945033713911f8ce
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nexo/src/app.nova hash=db748c380eb0d06c
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nexo/src/server.nova hash=0ddb089dcc6f6d82
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nexo/src/connection.nova hash=ecb37dd76415161e
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nexo/src/config.nova hash=f40bce60f2b9a5f8

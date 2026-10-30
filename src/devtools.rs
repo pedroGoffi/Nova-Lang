@@ -348,12 +348,15 @@ pub fn lint(hir: &crate::hir::Program) -> usize {
     use std::collections::HashSet;
     fn expr(e: &Expr, used: &mut HashSet<usize>) {
         match &e.kind {
-            ExprKind::Local(id)
-            | ExprKind::MoveLocal(id)
-            | ExprKind::AddressOf { local: id, .. } => {
-                used.insert(*id);
+            ExprKind::Local(id) | ExprKind::MoveLocal(id)
+            | ExprKind::DropArray { root: id, .. } => { used.insert(*id); }
+            ExprKind::AddressOf { place, .. } => {
+                used.insert(place.root);
+                for p in &place.projections {
+                    if let crate::hir::PlaceProjection::Index(index) = p { expr(index, used); }
+                }
             }
-            ExprKind::Unary(_, x) | ExprKind::Field(x, _) | ExprKind::Deref(x) => expr(x, used),
+            ExprKind::Unary(_, x) | ExprKind::Field(x, _) | ExprKind::TakeMatchField(x, _) | ExprKind::Deref(x) => expr(x, used),
             ExprKind::Binary(a, _, b) | ExprKind::Index(a, b) => {
                 expr(a, used);
                 expr(b, used);

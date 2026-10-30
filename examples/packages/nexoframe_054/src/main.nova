@@ -1,0 +1,101 @@
+// NexoFrame 0.54: a multi-section SSR page assembled using HTML5 macros.
+import std;
+import nexoframe;
+use nexoframe::nova_web::nexo::request::Request;
+use nexoframe::nova_web::nexo::response::Response;
+
+fn home(req: Request, res: Response) -> i32 {
+    let page = nexoframe::html!();
+    nexoframe::header!(page);
+    nexoframe::class_name!(page,"nf-top");
+    nexoframe::a!(page,"/","NexoFrame · 0.54");
+    nexoframe::nav!(page);
+    nexoframe::attr_aria!(page,"label","Navegação principal");
+    nexoframe::a!(page,"#features","Funcionalidades");
+    nexoframe::a!(page,"#contact","Contato");
+    nexoframe::close_tag!(page); // nav
+    nexoframe::close_tag!(page); // header
+
+    nexoframe::main!(page);
+    nexoframe::class_name!(page,"nf-wrap");
+    let query = req.query_value("q");
+    nexoframe::section!(page);
+    nexoframe::class_name!(page,"nf-hero");
+    nexoframe::h1!(page,"HTML5 com macros AST, sem templates de texto");
+    nexoframe::p!(page,"Tags semânticas, atributos seguros e composição em Nova.");
+    nexoframe::a!(page,"#features","Explorar componentes");
+    let user_query = std::string::from_text(query.as_str());
+    if user_query.byte_length() > 0 {
+        nexoframe::p!(page,"Busca informada (escapada automaticamente):");
+        nexoframe::strong!(page,query.as_str());
+    }
+    nexoframe::close_tag!(page);
+
+    nexoframe::section!(page);
+    nexoframe::element_id!(page,"features");
+    nexoframe::h2!(page,"Componentes para aplicações reais");
+    nexoframe::div!(page);
+    nexoframe::class_name!(page,"nf-grid");
+    nexoframe::article!(page);
+    nexoframe::class_name!(page,"nf-feature");
+    nexoframe::h3!(page,"Imagens acessíveis");
+    nexoframe::img_lazy!(page,"/assets/logo.svg","Ícone ilustrativo da aplicação");
+    nexoframe::width!(page,"150");
+    nexoframe::height!(page,"67");
+    nexoframe::close_tag!(page);
+    nexoframe::article!(page);
+    nexoframe::class_name!(page,"nf-feature");
+    nexoframe::h3!(page,"Formulários seguros");
+    nexoframe::p!(page,"Escape automático e entrada tipada.");
+    nexoframe::close_tag!(page);
+    nexoframe::article!(page);
+    nexoframe::class_name!(page,"nf-feature");
+    nexoframe::h3!(page,"Tabelas e listas");
+    nexoframe::ul!(page);
+    nexoframe::li!(page,"Listas tipadas");
+    nexoframe::li!(page,"Links validados");
+    nexoframe::close_tag!(page);
+    nexoframe::close_tag!(page);
+    nexoframe::close_tag!(page); // div
+    nexoframe::close_tag!(page); // features
+
+    nexoframe::section!(page);
+    nexoframe::element_id!(page,"contact");
+    nexoframe::h2!(page,"Formulário de busca");
+    // GET example: CSRF protection is needed before accepting stateful POSTs.
+    nexoframe::form_begin!(page,"/","GET");
+    nexoframe::label_for!(page,"q","Pesquisa");
+    nexoframe::input_tag!(page,"search","q","",true);
+    nexoframe::button!(page,"Pesquisar",true);
+    nexoframe::close_tag!(page); // form
+    nexoframe::close_tag!(page); // section
+    nexoframe::close_tag!(page); // main
+
+    nexoframe::footer!(page);
+    nexoframe::class_name!(page,"nf-wrap");
+    nexoframe::p!(page,"Feito com a linguagem Nova e o NexoFrame.");
+    nexoframe::close_tag!(page);
+    let rendered = nexoframe::render_html!(page);
+    return nexoframe::html_page!(res,"NexoFrame 0.54",rendered.as_str());
+}
+
+fn logo(req: Request, res: Response) -> i32 {
+    let reply = res.type("image/svg+xml; charset=utf-8");
+    return reply.send("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 180 80\"><rect width=\"180\" height=\"80\" rx=\"20\" fill=\"#edf2ff\"/><text x=\"90\" y=\"53\" text-anchor=\"middle\" font-size=\"38\" font-family=\"sans-serif\" font-weight=\"bold\" fill=\"#4263eb\">NOVA</text></svg>");
+}
+
+fn css(req: Request, res: Response) -> i32 {
+    let styles = nexoframe::ui::stylesheet();
+    let reply = res.type("text/css; charset=utf-8");
+    return reply.send(styles.as_str());
+}
+
+fn main() -> i32 {
+    let app = nexoframe::create(7894) defer app.close();
+    if nexoframe::get!(&app,"/",home) != 0 { return 1; }
+    if nexoframe::get!(&app,"/assets/app.css",css) != 0 { return 2; }
+    if nexoframe::get!(&app,"/assets/logo.svg",logo) != 0 { return 3; }
+    println!("NexoFrame 0.54 em http://127.0.0.1:7894");
+    if app.listen(0) < 0 { return 4; }
+    return 0;
+}

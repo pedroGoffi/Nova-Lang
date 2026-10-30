@@ -1,0 +1,49 @@
+// Full HTTP example: typesafe macros, view composition, JSON and query parsing.
+import std;
+import nexoframe;
+use nexoframe::nova_web::nexo::request::Request;
+use nexoframe::nova_web::nexo::response::Response;
+
+fn home(req: Request, res: Response) -> i32 {
+    let view = nexoframe::html!();
+    nexoframe::html_open!(view,"main");
+    nexoframe::html_class!(view,"nf-wrap");
+    let hero = nexoframe::hero!("Developer Experience","NexoFrame 0.52","Rotas, componentes, JSON e validação com macros AST.");
+    view.raw(hero.as_str()); // HTML gerado por componente confiável
+    let card = nexoframe::card!("Olá, Nova","Valores dinâmicos são escapados por padrão.");
+    view.raw(card.as_str());
+    let link = nexoframe::link!("Testar API","/api/status?name=Nova",true);
+    view.raw(link.as_str());
+    nexoframe::html_end!(view);
+    let html = view.render();
+    return nexoframe::html_page!(res,"NexoFrame · DX",html.as_str());
+}
+
+fn status(req: Request, res: Response) -> i32 {
+    let name = nexoframe::query!(req,"name");
+    let errors = nexoframe::errors!();
+    nexoframe::required!(errors,"name",name.as_str());
+    nexoframe::validate_or_422!(res,errors);
+    let obj = nexoframe::json_object!();
+    nexoframe::json_str!(obj,"name",name.as_str());
+    nexoframe::json_bool!(obj,"ok",true);
+    nexoframe::json_int!(obj,"limit",nexoframe::query_int!(req,"limit",20));
+    return nexoframe::json_response!(res,&obj);
+}
+
+fn css(req: Request, res: Response) -> i32 {
+    let stylesheet = nexoframe::ui::stylesheet();
+    let reply = res.type("text/css; charset=utf-8");
+    return reply.send(stylesheet.as_str());
+}
+
+fn main() -> i32 {
+    let app = nexoframe::create(7893) defer app.close();
+    if nexoframe::get!(&app,"/",home) != 0 { return 1; }
+    if nexoframe::get!(&app,"/assets/app.css",css) != 0 { return 2; }
+    let api = nexoframe::group!("/api");
+    if nexoframe::group_get!(api,&app,"/status",status) != 0 { return 3; }
+    println!("NexoFrame DX em http://127.0.0.1:7893");
+    if app.listen(0) < 0 { return 4; }
+    return 0;
+}

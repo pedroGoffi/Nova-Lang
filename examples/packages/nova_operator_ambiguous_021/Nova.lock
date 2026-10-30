@@ -1,0 +1,4 @@
+# Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
+nova_operator_ambiguous_021 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/nova_operator_ambiguous_021 hash=980eeb71af577f15
+std 0.20.0 builtin hash=4c716c1330b3f691
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/nova_operator_ambiguous_021/src/main.nova hash=980eeb71af577f15

@@ -1,0 +1,14 @@
+fn main() -> i32 {
+    let letter: char = 'A';
+    let accent: char = 'ç';
+    let rocket: char = '\u{1F680}';
+    let linebreak: char = '\n';
+    if !std::char::is_ascii_uppercase(letter) { return 1; }
+    if std::char::codepoint(accent) != 231 { return 2; }
+    if std::char::codepoint(rocket) != 128640 { return 3; }
+    if linebreak != '\n' { return 4; }
+    let ascii_byte: i32 = 'A';
+    if ascii_byte != 65 { return 5; }
+    if letter == 'A' && 'A' < 'Z' { return 0; }
+    return 6;
+}

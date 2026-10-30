@@ -1,0 +1,11 @@
+// Guard uses Option: a missing cookie is not a valid user with id zero.
+use super::auth_service;
+use nexoframe::nova_web::nexo::request::Request;
+use nexoframe::nova_web::nexo::response::Response;
+
+pub fn authenticated(req: Request, res: Response) -> bool {
+    match nexoframe::auth::current_user(req,auth_service::cookie_name()) {
+        Some(user_id) => { return true; }
+        None => { res.redirect("/login"); return false; }
+    }
+}

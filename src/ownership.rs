@@ -9,7 +9,7 @@
 //! Borrowing currently has lexical lifetime inference. Precise NLL and partial
 //! moves are intentionally rejected rather than incorrectly accepted.
 use crate::{
-    hir::{self, Expr, ExprKind, LocalId, Stmt},
+    hir::{self, Expr, ExprKind, LocalId, PlaceProjection, Stmt},
     types::{TypeId, TypeKind, Types},
 };
 use std::collections::{HashMap, HashSet};
@@ -148,27 +148,68 @@ impl Checker<'_> {
                 Ok(existing_loan)
             }
             ExprKind::MoveLocal(..) => Err("compiler bug: ownership pass was run twice".into()),
-            ExprKind::AddressOf { local, mutable } => {
-                self.alive(state, *local)?;
-                if matches!(self.types.kind(expression.ty), TypeKind::Reference { .. }) {
-                    if state
-                        .loans
-                        .values()
-                        .any(|loan| loan.source == *local && (*mutable || loan.exclusive))
-                    {
-                        return Err(format!(
-                            "conflicting {}borrow of '{}'",
-                            if *mutable { "mutable " } else { "shared " },
-                            self.name(*local)
-                        ));
+            ExprKind::If { condition, then_body, else_body, result } => {
+                self.inspect(condition, state, UseMode::Read)?;
+                let mut on_true = state.clone();
+                let true_exits = self.visit_block(then_body, &mut on_true)?;
+                let mut on_false = state.clone();
+                let false_exits = self.visit_block(else_body, &mut on_false)?;
+                match (true_exits, false_exits) {
+                    (true, true) => return Err("both if branches return before yielding an expression".into()),
+                    (true, false) => *state = on_false,
+                    (false, true) => *state = on_true,
+                    (false, false) => {
+                        for (position,(left,right)) in on_true.available.iter().zip(&on_false.available).enumerate() {
+                            state.available[position] = if left==right { *left } else { Availability::MaybeMoved };
+                        }
+                        state.loans.extend(on_true.loans);
+                        state.loans.extend(on_false.loans);
                     }
-                    Ok(Some(Loan {
-                        source: *local,
-                        exclusive: *mutable,
-                    }))
+                }
+                if let Some(local) = result {
+                    self.alive(state,*local)?;
+                    if mode == UseMode::Consume && owned {
+                        self.ensure_not_borrowed(state,*local,"move")?;
+                        state.available[*local] = Availability::Moved;
+                    }
+                }
+                Ok(None)
+            }
+            ExprKind::Block { body, result } => {
+                self.visit_block(body, state)?;
+                if let Some(local) = result {
+                    self.alive(state,*local)?;
+                    if mode == UseMode::Consume && owned {
+                        self.ensure_not_borrowed(state,*local,"move")?;
+                        state.available[*local] = Availability::Moved;
+                    }
+                }
+                Ok(None)
+            }
+
+            ExprKind::AddressOf { place, mutable } => {
+                let root = place.root;
+                self.alive(state, root)?;
+                // Index calculations may depend on other named locals. Check
+                // them as reads, never consume the aggregate being borrowed.
+                for projection in &mut place.projections {
+                    if let PlaceProjection::Index(index) = projection {
+                        self.inspect(index, state, UseMode::Read)?;
+                    }
+                }
+                if matches!(self.types.kind(expression.ty), TypeKind::Reference { .. }) {
+                    // Conservatively lock the entire root (even if indices differ).
+                    // This also prevents mutating/reallocating an array while an
+                    // element reference remains live.
+                    if state.loans.values().any(|loan|
+                        loan.source == root && (*mutable || loan.exclusive)) {
+                        return Err(format!("conflicting {}borrow of '{}'",
+                            if *mutable { "mutable " } else { "shared " }, self.name(root)));
+                    }
+                    Ok(Some(Loan { source: root, exclusive: *mutable }))
                 } else {
                     Ok(None)
-                } // Raw pointers are only permitted in `unsafe`.
+                }
             }
             ExprKind::Field(parent, _) => {
                 // Reading a field does not consume its whole parent; moving
@@ -177,6 +218,22 @@ impl Checker<'_> {
                 if mode == UseMode::Consume && owned && !self.function.name.ends_with("__drop") {
                     return Err("moving an owning field out of a struct is not supported; move the whole struct".into());
                 }
+                Ok(None)
+            }
+            ExprKind::TakeMatchField(parent, _) => {
+                // A match owns the enum temporary. Extracting its single
+                // active owning payload consumes that temporary, so its
+                // generated Drop must not execute on this control-flow path.
+                let ExprKind::Local(local) = &parent.kind else {
+                    return Err("internal enum move requires a named match temporary".into());
+                };
+                let local = *local;
+                if mode != UseMode::Consume {
+                    return Err("cannot borrow an owning match payload after moving it".into());
+                }
+                self.alive(state, local)?;
+                self.ensure_not_borrowed(state, local, "move")?;
+                state.available[local] = Availability::Moved;
                 Ok(None)
             }
             ExprKind::Index(parent, index) => {
@@ -287,7 +344,8 @@ impl Checker<'_> {
                 self.inspect(right, state, UseMode::Read)?;
                 Ok(None)
             }
-            ExprKind::FunctionRef(_)
+            ExprKind::DropArray { .. } // Generated cleanup, not ordinary user code.
+            | ExprKind::FunctionRef(_)
             | ExprKind::Int(_)
             | ExprKind::Float(_)
             | ExprKind::Bool(_)
@@ -509,15 +567,57 @@ impl Checker<'_> {
         Ok(())
     }
 }
+fn collect_stmt_locals(stmt: &Stmt, out: &mut HashSet<LocalId>) {
+    match stmt {
+        Stmt::Let { init, .. } | Stmt::Set { value:init, .. }
+        | Stmt::Expr(init) | Stmt::DerefSet { value:init, .. }
+        | Stmt::FieldSet { value:init, .. } | Stmt::Defer { expr:init, .. }
+        | Stmt::Return(Some(init)) => collect_locals(init, out),
+        Stmt::If { condition, then_body, else_body } => {
+            collect_locals(condition,out);
+            for s in then_body { collect_stmt_locals(s,out); }
+            if let Some(body)=else_body { for s in body {collect_stmt_locals(s,out);} }
+        }
+        Stmt::While { condition, body } => {
+            collect_locals(condition,out);
+            for s in body {collect_stmt_locals(s,out);}
+        }
+        Stmt::For { start,end,body,.. } => {
+            collect_locals(start,out); collect_locals(end,out);
+            for s in body {collect_stmt_locals(s,out);}
+        }
+        Stmt::Loop(body) | Stmt::Unsafe(body) => {
+            for s in body {collect_stmt_locals(s,out);}
+        }
+        _ => {}
+    }
+}
 fn collect_locals(expr: &Expr, out: &mut HashSet<LocalId>) {
     match &expr.kind {
-        ExprKind::Local(id) | ExprKind::MoveLocal(id) | ExprKind::AddressOf { local: id, .. } => {
-            out.insert(*id);
+        ExprKind::If { condition, then_body, else_body, result } => {
+            collect_locals(condition, out);
+            if let Some(local) = result { out.insert(*local); }
+            for stmt in then_body.iter().chain(else_body) {
+                collect_stmt_locals(stmt, out);
+            }
+        }
+        ExprKind::Block { body, result } => {
+            if let Some(local) = result { out.insert(*local); }
+            for stmt in body { collect_stmt_locals(stmt, out); }
+        }
+        ExprKind::Local(id) | ExprKind::MoveLocal(id)
+        | ExprKind::DropArray { root: id, .. } => { out.insert(*id); }
+        ExprKind::AddressOf { place, .. } => {
+            out.insert(place.root);
+            for projection in &place.projections {
+                if let PlaceProjection::Index(index) = projection { collect_locals(index, out); }
+            }
         }
         ExprKind::Unary(_, item)
         | ExprKind::Deref(item)
         | ExprKind::Cast(item)
-        | ExprKind::Field(item, _) => collect_locals(item, out),
+        | ExprKind::Field(item, _)
+        | ExprKind::TakeMatchField(item, _) => collect_locals(item, out),
         ExprKind::Binary(left, _, right) | ExprKind::Index(left, right) => {
             collect_locals(left, out);
             collect_locals(right, out);

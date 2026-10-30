@@ -1,0 +1,7 @@
+[package]
+name = "nova_implicit_expressions_020"
+version = "0.1.0"
+entry = "src/main.nova"
+
+[dependencies]
+std = { builtin = "std" }

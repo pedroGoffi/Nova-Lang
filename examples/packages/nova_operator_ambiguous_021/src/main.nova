@@ -1,0 +1,13 @@
+#[operator(bit_or)]
+trait A {fn merge(self:Self,other:Self)->Self;}
+#[operator(bit_or)]
+trait B {fn combine(self:Self,other:Self)->Self;}
+struct Value {val:i32}
+impl A for Value {operator |(self:Value,other:Value)->Value {return new Value {val:self.val+other.val};}}
+impl B for Value {operator |(self:Value,other:Value)->Value {return new Value {val:self.val+other.val};}}
+fn main()->i32 {
+    let x:Value=new Value{val:1};
+    let y:Value=new Value{val:2};
+    let z:Value=x|y;
+    return z.val-3;
+}

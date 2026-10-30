@@ -137,6 +137,8 @@ fn recursive(
     lock: &mut Vec<String>,
     loader: &mut Loader,
     scope: &str,
+    packages: &mut HashMap<PathBuf, String>,
+    use_std: &mut bool,
 ) -> Result<ast::Program, String> {
     let root = root
         .canonicalize()
@@ -174,27 +176,41 @@ fn recursive(
         } else {
             format!("{scope}::{alias}")
         };
-        loader.dependency_roots.insert(namespace.clone());
-        let dep = if path == "@builtin/std" {
-            loader.builtin_roots.insert(namespace.clone());
-            let mut all_sources = String::new();
-            for (path, source) in modules::EMBEDDED_STD {
-                all_sources.push_str(path);
-                all_sources.push('\n');
-                all_sources.push_str(source);
+        if path == "@builtin/std" {
+            // There is one actual STD definition in the linked program.
+            // Every package's `std` dependency is an alias of that definition,
+            // not a nested copy with incompatible nominal types and drop glue.
+            *use_std = true;
+            if namespace != "std" {
+                loader.dependency_aliases.insert(namespace, "std".into());
             }
-            lock.push(format!(
-                "std 0.20.0 builtin hash={}",
-                fingerprint(&all_sources)
+            continue;
+        }
+        let dep_root = root
+            .join(path)
+            .canonicalize()
+            .map_err(|e| format!("dependency '{alias}' ({}): {e}", root.join(path).display()))?;
+        // A real dependency cycle is still an error, even when the package has
+        // already been seen by the identity cache on the current DFS path.
+        if active.contains(&dep_root) {
+            return Err(format!(
+                "cyclic path dependency involving {}",
+                dep_root.display()
             ));
-            ast::Program {
-                items: loader.embedded_std(&namespace)?,
-            }
-        } else {
-            recursive(&root.join(path), active, lock, loader, &namespace)?
-        };
-        // Keep dependency modules in their own namespace. The module linker
-        // understands dependency aliases and checks local file visibility.
+        }
+        if let Some(existing) = packages.get(&dep_root) {
+            // Multiple import routes of the same on-disk package must share
+            // one struct identity, one set of functions and one destructor.
+            loader
+                .dependency_aliases
+                .insert(namespace, existing.clone());
+            continue;
+        }
+        packages.insert(dep_root.clone(), namespace.clone());
+        loader.dependency_roots.insert(namespace.clone());
+        let dep = recursive(
+            &dep_root, active, lock, loader, &namespace, packages, use_std,
+        )?;
         ast.items.insert(
             0,
             Item::Namespace {
@@ -222,7 +238,37 @@ pub fn load_detailed(path: &Path) -> Result<(ast::Program, Vec<SourceFile>), Str
     }
     let mut lock =
         vec!["# Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)".into()];
-    let program = recursive(path, &mut HashSet::new(), &mut lock, &mut loader, "")?;
+    let mut use_std = false;
+    let mut program = recursive(
+        path,
+        &mut HashSet::new(),
+        &mut lock,
+        &mut loader,
+        "",
+        &mut HashMap::new(),
+        &mut use_std,
+    )?;
+    if use_std {
+        loader.dependency_roots.insert("std".into());
+        loader.builtin_roots.insert("std".into());
+        let mut all_sources = String::new();
+        for (name, source) in modules::EMBEDDED_STD {
+            all_sources.push_str(name);
+            all_sources.push('\n');
+            all_sources.push_str(source);
+        }
+        lock.push(format!(
+            "std 0.20.0 builtin hash={}",
+            fingerprint(&all_sources)
+        ));
+        program.items.insert(
+            0,
+            Item::Namespace {
+                name: "std".into(),
+                items: loader.embedded_std("std")?,
+            },
+        );
+    }
     let program = modules::link(program, &loader)?;
     for source in &loader.sources {
         if !source.path.starts_with('<') {

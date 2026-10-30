@@ -1,0 +1,4 @@
+concept HasValue<T> = has_field<T,value>;
+#[requires(HasValue)]
+struct Invalid { other:i32 }
+fn main()->i32{return 0;}

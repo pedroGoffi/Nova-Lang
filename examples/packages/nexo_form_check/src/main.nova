@@ -1,0 +1,55 @@
+import std;
+import nexo;
+
+fn main() -> i32 {
+    let name=nexo::form::form_value("username=admin&message=ol%C3%A1+Nova","username");
+    if !name.equals("admin") { return 1; }
+    let message=nexo::form::form_value("username=admin&message=ol%C3%A1+Nova","message");
+    if !message.equals("olá Nova") { return 2; }
+    let missing=nexo::form::form_value("username=admin","password");
+    if !missing.is_empty() { return 3; }
+    let invalid=nexo::form::form_value("message=bad%FF","message");
+    if !invalid.is_empty() { return 4; }
+    let injected=nexo::form::form_value("username=admin%00evil","username");
+    if !injected.is_empty() { return 5; }
+    match nexo::form::field("a=&b=2","a") {
+        Err(error) => { return 6; }
+        Ok(value) => {
+            match value {
+                None => { return 7; }
+                Some(text) => { if !text.is_empty() { return 8; } }
+            }
+        }
+    }
+    match nexo::form::field("a=&b=2","absent") {
+        Err(error) => { return 9; }
+        Ok(value) => {
+            match value {
+                Some(text) => { return 10; }
+                None => { }
+            }
+        }
+    }
+    match nexo::form::field("name=bad%FF","name") {
+        Ok(value) => { return 11; }
+        Err(error) => { if error.code()!=400 { return 12; } }
+    }
+    match nexo::form::require_field("a=","a") {
+        Ok(value) => { return 13; }
+        Err(error) => { if error.code()!=422 { return 14; } }
+    }
+    match nexo::form::require_field("a=ok","a") {
+        Err(error) => { return 15; }
+        Ok(value) => { if !value.equals("ok") { return 16; } }
+    }
+    match std::url::try_decode_form("one+two%21") {
+        Err(error) => { return 17; }
+        Ok(text) => { if !text.equals("one two!") { return 18; } }
+    }
+    match std::url::try_decode_form("%FF") {
+        Ok(text) => { return 19; }
+        Err(error) => { if error.code()!=1 { return 20; } }
+    }
+    println!("Nexo form decoder: 20 verificacoes concluidas.");
+    return 0;
+}

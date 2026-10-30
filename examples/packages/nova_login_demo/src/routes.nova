@@ -1,0 +1,32 @@
+// Whole backend declaration in ONE nested AST macro expression.
+// Controllers, middleware, views and services remain in their own modules.
+use super::auth_controller;
+use super::auth_middleware;
+use super::assets;
+use nexoframe::nova_web::nexo::app::App;
+use nexoframe::nova_web::nexo::request::Request;
+use nexoframe::nova_web::nexo::response::Response;
+
+fn health(req: Request, res: Response) -> i32 {
+    let payload = nexoframe::json::object();
+    payload.boolean("ok",true);
+    payload.string("service","nova_login_demo");
+    return nexoframe::views::api(res,&payload);
+}
+
+pub fn register_checked(app: &App) -> std::result::Result<i32,std::error::OwnedError> {
+    return nexoframe::backend!(app,
+        nexoframe::web!(
+            nexoframe::get!("/",auth_controller::show_login),
+            nexoframe::get!("/login",auth_controller::show_login),
+            nexoframe::post!("/login",auth_controller::submit_login),
+            nexoframe::get!("/health",health),
+            nexoframe::get!("/assets/app.css",assets::stylesheet)
+        ),
+        nexoframe::guard!(auth_middleware::authenticated,
+            nexoframe::get!("/dashboard",auth_controller::dashboard),
+            nexoframe::post!("/logout",auth_controller::logout),
+            nexoframe::post!("/session/renew",auth_controller::renew)
+        )
+    );
+}

@@ -65,6 +65,8 @@ pub struct TraitRestriction {
 }
 #[derive(Debug, Clone)]
 pub struct Trait {
+    /// Declarative compiler contracts written in Nova, e.g. #[operator(bit_or)].
+    pub attributes: Vec<Attribute>,
     pub name: String,
     pub restriction: Option<TraitRestriction>,
     pub parents: Vec<String>,
@@ -200,12 +202,7 @@ pub fn function_is_unsafe(attributes: &[Attribute], context: &str) -> Result<boo
                     attribute.name
                 ))
             }
-            _ => {
-                return Err(format!(
-                    "unsupported function attribute '{}' on {context}",
-                    attribute.name
-                ))
-            }
+            _ => {} // Custom attributes were validated against .nova metadata by meta::validate.
         }
     }
     Ok(is_unsafe)
@@ -342,6 +339,8 @@ pub enum Stmt {
     },
     Unsafe(Vec<Stmt>),
     Expr(Expr),
+    /// Final expression without semicolon; its value belongs to the enclosing block.
+    Tail(Expr),
     Match {
         value: Expr,
         arms: Vec<MatchArm>,
@@ -364,6 +363,10 @@ pub enum Expr {
     Bool(bool),
     Str(String),
     Unit,
+    /// Control flow as a typed value. The two branches must yield the same type.
+    If { condition: Box<Expr>, then_body: Vec<Stmt>, else_body: Vec<Stmt> },
+    /// A lexical scope whose final expression supplies the value.
+    Block(Vec<Stmt>),
     Var(String),
     Unary(UnaryOp, Box<Expr>),
     Binary(Box<Expr>, BinaryOp, Box<Expr>),
@@ -425,6 +428,38 @@ pub enum BinaryOp {
     Shr,
 }
 
+/// Returns the Nova method bound to this operator in a trait declaration.
+/// With one method the author chooses any method name (e.g. `merge`).
+/// For multi-operator traits each named method binds its own operator key.
+pub fn operator_trait_method<'a>(definition: &'a Trait, key: &str) -> Option<&'a str> {
+    if !definition.attributes.iter().any(|a|a.name=="operator" && a.args.iter().any(|v|v==key)) {
+        return None;
+    }
+    if definition.methods.len() == 1 {
+        return Some(definition.methods[0].name.as_str());
+    }
+    definition.methods.iter().find(|m|m.name==key).map(|m|m.name.as_str())
+}
+
+/// Operator identifier used by declarative `#[operator(...)]` in Nova code.
+/// No trait or method name is fixed here; those contracts belong to `.nova`.
+pub fn operator_key(op: BinaryOp) -> Option<&'static str> {
+    Some(match op {
+        BinaryOp::Add => "add", BinaryOp::Sub => "sub", BinaryOp::Mul => "mul",
+        BinaryOp::Div => "div", BinaryOp::Rem => "rem", BinaryOp::Eq => "eq",
+        BinaryOp::Ne => "ne", BinaryOp::Lt => "lt", BinaryOp::Le => "le",
+        BinaryOp::Gt => "gt", BinaryOp::Ge => "ge", BinaryOp::BitAnd => "bit_and",
+        BinaryOp::BitOr => "bit_or", BinaryOp::BitXor => "bit_xor",
+        BinaryOp::Shl => "shift_left", BinaryOp::Shr => "shift_right",
+        BinaryOp::And | BinaryOp::Or => return None, // preserves lazy evaluation
+    })
+}
+
+pub fn valid_operator_key(key: &str) -> bool {
+    ["add","sub","mul","div","rem","eq","ne","lt","le","gt","ge",
+     "bit_and","bit_or","bit_xor","shift_left","shift_right"].contains(&key)
+}
+
 /// Builds one of the existing assignment statements after parsing the common
 /// `PostfixExpr` prefix. Keeping this discrimination out of LALRPOP prevents
 /// `identifier.field = ...` from competing with normal field-access expressions.
@@ -459,4 +494,92 @@ pub fn assignment_stmt(target: Expr, op: Option<BinaryOp>, value: Expr) -> Stmt 
             value,
         },
     }
+}
+
+/// A final `if` can become a value only when *every* branch yields a
+/// tail expression. An exhaustive control-flow `if` whose branches `return`,
+/// `break`, or finish in a semicolon remains a statement: changing it into an
+/// Expr::If would incorrectly demand a value from diverging/unit branches.
+/// This check runs on the parsed AST, before surface type inference.
+fn value_if_chain(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::If { then_body, else_body: Some(other), .. } => {
+            if !matches!(then_body.last(), Some(Stmt::Tail(_))) {
+                return false;
+            }
+            // Else-if is represented as a single nested statement by the
+            // grammar; recurse into it rather than treating it as a unit.
+            if let [nested @ Stmt::If { .. }] = other.as_slice() {
+                value_if_chain(nested)
+            } else {
+                matches!(other.last(), Some(Stmt::Tail(_)))
+            }
+        }
+        _ => false,
+    }
+}
+
+fn final_if_as_expression(stmt: Stmt) -> Expr {
+    match stmt {
+        Stmt::If { condition, then_body, else_body: Some(other) } => {
+            let else_body = if other.len() == 1 && matches!(other.first(), Some(Stmt::If { .. })) {
+                vec![Stmt::Tail(final_if_as_expression(other.into_iter().next().unwrap()))]
+            } else {
+                other
+            };
+            Expr::If { condition: Box::new(condition), then_body, else_body }
+        }
+        _ => unreachable!("only value-producing if chains may become expressions"),
+    }
+}
+
+pub fn normalize_block_tail(mut statements: Vec<Stmt>) -> Vec<Stmt> {
+    if let Some(last) = statements.pop() {
+        if value_if_chain(&last) {
+            statements.push(Stmt::Tail(final_if_as_expression(last)));
+        } else {
+            statements.push(last);
+        }
+    }
+    statements
+}
+
+/// Decode a Nova single-quoted Unicode scalar literal. This is deliberately
+/// independent of string-literal decoding: one scalar, not one UTF-8 byte.
+/// The parser keeps the original token until the surface diagnostic pass.
+pub fn decode_char_literal(raw: &str) -> Result<char, String> {
+    let content = raw.strip_prefix('\'').and_then(|s| s.strip_suffix('\''))
+        .ok_or_else(|| "error[NOVA-CHAR001]: expected single-quoted character literal".to_string())?;
+    if content.is_empty() {
+        return Err("error[NOVA-CHAR001]: character literal cannot be empty".into());
+    }
+    let result = if let Some(rest) = content.strip_prefix('\\') {
+        match rest {
+            "n" => '\n', "r" => '\r', "t" => '\t', "0" => '\0',
+            "\\" => '\\', "'" => '\'', "\"" => '"',
+            _ if rest.starts_with("u{") && rest.ends_with('}') => {
+                let hex = &rest[2..rest.len()-1];
+                if hex.is_empty() || hex.len()>6 || !hex.bytes().all(|b|b.is_ascii_hexdigit()) {
+                    return Err("error[NOVA-CHAR002]: expected \\u{1..6 hexadecimal digits}".into());
+                }
+                let code = u32::from_str_radix(hex,16)
+                    .map_err(|_| "error[NOVA-CHAR002]: invalid Unicode escape".to_string())?;
+                char::from_u32(code).ok_or_else(||
+                    "error[NOVA-CHAR002]: Unicode escape is not a valid scalar value".to_string())?
+            }
+            _ if rest.starts_with('x') && rest.len()==3 && rest[1..].bytes().all(|b|b.is_ascii_hexdigit()) => {
+                let code = u32::from_str_radix(&rest[1..],16).unwrap();
+                char::from_u32(code).unwrap()
+            }
+            _ => return Err(format!("error[NOVA-CHAR002]: unknown character escape \\{rest}")),
+        }
+    } else {
+        let mut chars=content.chars();
+        let c=chars.next().unwrap();
+        if chars.next().is_some() || c=='\n' || c=='\r' {
+            return Err("error[NOVA-CHAR001]: character literal must contain exactly one Unicode scalar value".into());
+        }
+        c
+    };
+    Ok(result)
 }

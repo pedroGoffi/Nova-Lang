@@ -1,0 +1,47 @@
+// Regression: `if` as expression, nested else-if, lexical block values
+// and implicit function return use the same Rust-like tail expression rule.
+struct Head { guard_enabled: bool }
+
+fn classify(head: Head) -> i32 {
+    let status: i32 = if head.guard_enabled {
+        200
+    } else {
+        403
+    };
+    status
+}
+
+fn choose(x: i32) -> i32 {
+    if x > 10 {
+        3
+    } else if x > 5 {
+        2
+    } else {
+        1
+    }
+}
+
+fn block_value() -> i32 {
+    let amount: i32 = {
+        let base: i32 = 40;
+        base + 2
+    };
+    amount
+}
+
+fn old_explicit_return() -> i32 {
+    return 9;
+}
+
+fn main() -> i32 {
+    let enabled = new Head { guard_enabled: true };
+    let disabled = new Head { guard_enabled: false };
+    if classify(enabled) != 200 { return 1; }
+    if classify(disabled) != 403 { return 2; }
+    if choose(11) != 3 { return 3; }
+    if choose(7) != 2 { return 4; }
+    if choose(3) != 1 { return 5; }
+    if block_value() != 42 { return 6; }
+    if old_explicit_return() != 9 { return 7; }
+    return 0;
+}

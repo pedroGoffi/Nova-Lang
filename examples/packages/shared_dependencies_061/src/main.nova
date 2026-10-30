@@ -1,0 +1,15 @@
+import std;
+import nova_view;
+import nova_web;
+import nexoframe;
+
+fn main() -> i32 {
+    let html = nova_view::create();
+    html.element("p", "Same String type through the entire dependency graph");
+    let direct: std::string::String = html.render();
+    let component: std::string::String = nexoframe::ui::hero("Nova", "Shared STD", "RAII without text copy");
+    let text: std::string::String = std::string::from_text("OK");
+
+    println!("{} | {} | {}", direct, component, text);
+    return 0;
+}

@@ -1,0 +1,47 @@
+// Nova 0.21: the .nova trait controls the meaning of |.
+// Only syntax, type-checking and monomorphization live in the compiler.
+#[operator(bit_or)]
+trait Combine {
+    fn merge(self: Self, other: Self) -> Self;
+}
+
+#[requires(Composable, Pipeable)]
+struct Pipeline with Combine {
+    value: i32
+}
+
+impl Combine for Pipeline {
+    operator |(self: Pipeline, other: Pipeline) -> Pipeline {
+        return new Pipeline {value: self.value + other.value};
+    }
+}
+
+// The standard operator traits use the same mechanism.
+#[capabilities(std::ops::BitOr)]
+struct Mask { bits: i32 }
+
+impl std::ops::BitOr for Mask {
+    operator |(self: Mask, other: Mask) -> Mask {
+        println!("Operador | para Mask");
+        return new Mask {bits: self.bits | other.bits};
+    }
+}
+
+concept Composable<T> = implements<T,Combine>;
+concept Pipeable<T> = requires(T a,T b) { {a | b} -> T; };
+static_assert(Composable<Pipeline>);
+static_assert(Pipeable<Pipeline>);
+
+fn main() -> i32 {
+    let left: Pipeline = new Pipeline {value: 40};
+    let right: Pipeline = new Pipeline {value: 2};
+    let result: Pipeline = left | right;
+    let mut flags: i32 = 1;
+    flags |= 2;
+    if flags != 3 { return 10; }
+    let one: Mask = new Mask {bits: 1};
+    let two: Mask = new Mask {bits: 2};
+    let combined: Mask = one | two;
+    if combined.bits != 3 { return 11; }
+    return result.value - 42;
+}

@@ -1,0 +1,237 @@
+// NovaWeb 0.47: responsive, accessible, server-rendered admin dashboard.
+// Demonstration data only. Launch with: nova run examples/packages/nova_web_047
+import std;
+import nova_web;
+
+use nova_web::nexo::request::Request;
+use nova_web::nexo::response::Response;
+
+fn home(req: Request, res: Response) -> i32 {
+    let filter = req.query_value("q");
+    let view = nova_web::nova_view::create();
+
+    view.open("div");
+    view.attr("class","nv-shell");
+
+    // Left-hand navigation.
+    view.open("aside");
+    view.attr("class","nv-sidebar");
+    view.attr("aria-label","Navegação lateral");
+    view.open("a");
+    view.attr("class","nv-brand");
+    view.attr("href","/");
+    view.open("span");
+    view.attr("class","nv-brand-icon");
+    view.text("N");
+    view.end();
+    view.open("span");
+    view.text("NovaWeb");
+    view.open("small");
+    view.text("WORKSPACE");
+    view.end();
+    view.end();
+    view.end();
+
+    view.open("nav");
+    view.attr("class","nv-nav");
+    view.attr("aria-label","Menu principal");
+    let item1 = nova_web::nova_view::components::nav_link("◫  Visão geral","/",true);
+    let item2 = nova_web::nova_view::components::nav_link("◎  Pedidos","/#pedidos",false);
+    let item3 = nova_web::nova_view::components::nav_link("◈  Desempenho","/#desempenho",false);
+    let item4 = nova_web::nova_view::components::nav_link("◇  Configurações","/#configuracoes",false);
+    view.raw(item1.as_str());
+    view.raw(item2.as_str());
+    view.raw(item3.as_str());
+    view.raw(item4.as_str());
+    view.end();
+
+    view.open("div");
+    view.attr("class","nv-sidebar-foot");
+    view.open("strong");
+    view.text("Feito com Nova");
+    view.end();
+    view.open("p");
+    view.text("Renderização SSR, HTML seguro e CSS responsivo.");
+    view.end();
+    view.end();
+    view.end(); // aside
+
+    view.open("div");
+    view.attr("class","nv-content");
+    view.open("header");
+    view.attr("class","nv-topbar");
+    view.open("div");
+    view.open("strong");
+    view.text("Painel administrativo");
+    view.end();
+    view.open("small");
+    view.text("Ambiente de demonstração");
+    view.end();
+    view.end();
+    view.open("div");
+    view.attr("class","nv-topbar-right");
+    view.open("span");
+    view.attr("class","nv-muted");
+    view.text("Administrador");
+    view.end();
+    view.open("span");
+    view.attr("class","nv-avatar");
+    view.attr("aria-label","Avatar de administrador");
+    view.text("AD");
+    view.end();
+    view.end();
+    view.end(); // header
+
+    view.open("main");
+    view.attr("class","nv-main");
+    view.attr("id","conteudo");
+    view.open("div");
+    view.attr("class","nv-page-heading");
+    view.open("div");
+    view.open("p");
+    view.attr("class","nv-eyebrow");
+    view.text("RESUMO DO WORKSPACE");
+    view.end();
+    view.open("h1");
+    view.text("Bem-vindo de volta!");
+    view.end();
+    view.open("p");
+    view.text("Uma visão clara do que acontece no seu negócio.");
+    view.end();
+    view.end();
+    let action = nova_web::nova_view::components::action_link("+ Novo pedido","/#novo",true);
+    view.raw(action.as_str());
+    view.end(); // heading
+
+    let notice = nova_web::nova_view::components::notice("Demonstração NovaWeb","Os números desta página são fictícios e servem apenas para apresentar os componentes.","info");
+    view.raw(notice.as_str());
+
+    view.open("div");
+    view.attr("class","nv-stats");
+    let metric1 = nova_web::nova_view::components::metric("Receita total","R$ 48.590","↗ +12,8% no mês",true);
+    let metric2 = nova_web::nova_view::components::metric("Pedidos","1.284","↗ +8,2% no mês",true);
+    let metric3 = nova_web::nova_view::components::metric("Clientes ativos","386","+24 novos clientes",true);
+    let metric4 = nova_web::nova_view::components::metric("Taxa de conversão","4,8%","Média dos últimos 30 dias",false);
+    view.raw(metric1.as_str());
+    view.raw(metric2.as_str());
+    view.raw(metric3.as_str());
+    view.raw(metric4.as_str());
+    view.end(); // stats
+
+    view.open("div");
+    view.attr("class","nv-grid-main");
+
+    // Accessible table with escaped content. Statuses are rendered components.
+    let rows = nova_web::nova_view::create();
+    nova_web::nova_view::table::open(&rows,"Pedidos recentes (dados de exemplo)");
+    nova_web::nova_view::table::header_start(&rows);
+    nova_web::nova_view::table::heading(&rows,"Pedido");
+    nova_web::nova_view::table::heading(&rows,"Cliente");
+    nova_web::nova_view::table::heading(&rows,"Valor");
+    nova_web::nova_view::table::heading(&rows,"Status");
+    nova_web::nova_view::table::header_end(&rows);
+
+    nova_web::nova_view::table::row_start(&rows);
+    nova_web::nova_view::table::cell(&rows,"#NV-1024");
+    nova_web::nova_view::table::cell(&rows,"Ana Martins");
+    nova_web::nova_view::table::cell(&rows,"R$ 1.890,00");
+    let ok = nova_web::nova_view::components::status("Concluído","success");
+    nova_web::nova_view::table::trusted_cell(&rows,ok.as_str());
+    nova_web::nova_view::table::row_end(&rows);
+
+    nova_web::nova_view::table::row_start(&rows);
+    nova_web::nova_view::table::cell(&rows,"#NV-1023");
+    nova_web::nova_view::table::cell(&rows,"João Oliveira");
+    nova_web::nova_view::table::cell(&rows,"R$ 540,00");
+    let pending = nova_web::nova_view::components::status("Pendente","warning");
+    nova_web::nova_view::table::trusted_cell(&rows,pending.as_str());
+    nova_web::nova_view::table::row_end(&rows);
+
+    nova_web::nova_view::table::row_start(&rows);
+    nova_web::nova_view::table::cell(&rows,"#NV-1022");
+    nova_web::nova_view::table::cell(&rows,"Beatriz Costa");
+    nova_web::nova_view::table::cell(&rows,"R$ 2.450,00");
+    nova_web::nova_view::table::trusted_cell(&rows,ok.as_str());
+    nova_web::nova_view::table::row_end(&rows);
+
+    nova_web::nova_view::table::row_start(&rows);
+    nova_web::nova_view::table::cell(&rows,"#NV-1021");
+    nova_web::nova_view::table::cell(&rows,"Pedro Almeida");
+    nova_web::nova_view::table::cell(&rows,"R$ 320,00");
+    let cancelled = nova_web::nova_view::components::status("Cancelado","danger");
+    nova_web::nova_view::table::trusted_cell(&rows,cancelled.as_str());
+    nova_web::nova_view::table::row_end(&rows);
+    nova_web::nova_view::table::close(&rows);
+    let table_html = rows.render();
+    let panel_table = nova_web::nova_view::components::panel("Pedidos recentes","Acompanhe as últimas movimentações.",table_html.as_str());
+    view.raw(panel_table.as_str());
+
+    view.open("div");
+    view.attr("class","nv-stack");
+    view.attr("id","desempenho");
+    let progress_view = nova_web::nova_view::create();
+    progress_view.open("div");
+    progress_view.attr("class","nv-panel-body");
+    let p1 = nova_web::nova_view::components::progress("Meta de vendas",76);
+    let p2 = nova_web::nova_view::components::progress("Pedidos entregues",89);
+    let p3 = nova_web::nova_view::components::progress("Novos clientes",58);
+    progress_view.raw(p1.as_str());
+    progress_view.raw(p2.as_str());
+    progress_view.raw(p3.as_str());
+    progress_view.end();
+    let progress_markup = progress_view.render();
+    let progress_panel = nova_web::nova_view::components::panel("Metas do mês","Seu progresso em tempo real (exemplo).",progress_markup.as_str());
+    view.raw(progress_panel.as_str());
+
+    let form_view = nova_web::nova_view::create();
+    form_view.open("div");
+    form_view.attr("class","nv-panel-body");
+    let form = nova_web::nova_view::forms::form_open("/","get");
+    form_view.raw(form.as_str());
+    let input = nova_web::nova_view::forms::field("q","Pesquisar no painel",filter.as_str(),"search",false);
+    form_view.raw(input.as_str());
+    form_view.open("div");
+    form_view.attr("class","nv-form-actions");
+    let button = nova_web::nova_view::forms::submit("Pesquisar");
+    form_view.raw(button.as_str());
+    form_view.end();
+    form_view.raw(nova_web::nova_view::forms::form_close());
+    form_view.end();
+    let form_html = form_view.render();
+    let form_panel = nova_web::nova_view::components::panel("Busca rápida","Exemplo de formulário GET com escape automático.",form_html.as_str());
+    view.raw(form_panel.as_str());
+    view.end(); // stack
+    view.end(); // grid
+    view.end(); // main
+    view.end(); // content
+    view.end(); // shell
+
+    let markup = view.render();
+    let document = nova_web::nova_view::layout::page_with_meta(
+        "NovaWeb | Dashboard",
+        "Painel demonstrativo renderizado com a linguagem Nova",
+        markup.as_str(),"/app.css"
+    );
+    return nova_web::send(res,document.as_str());
+}
+
+fn stylesheet(req: Request, res: Response) -> i32 {
+    let css = nova_web::nova_view::theme::css();
+    let response = res.type("text/css; charset=utf-8");
+    return response.send(css.as_str());
+}
+
+fn health(req: Request, res: Response) -> i32 {
+    return res.text("OK");
+}
+
+fn main() -> i32 {
+    let app = nova_web::create(7889) defer app.close();
+    if app.get("/",home) != 0 { return 1; }
+    if app.get("/app.css",stylesheet) != 0 { return 1; }
+    if app.get("/health",health) != 0 { return 1; }
+    println!("NovaWeb 0.47: http://127.0.0.1:7889");
+    let served: i64 = app.listen(0);
+    if served < 0 { return 1; }
+    return 0;
+}

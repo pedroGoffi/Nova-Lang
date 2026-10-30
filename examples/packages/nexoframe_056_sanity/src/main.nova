@@ -1,0 +1,38 @@
+import std;
+import nexoframe;
+
+fn main() -> i32 {
+    if nexoframe::validation::has_text("") { return 1; }
+    if nexoframe::validation::has_text(" \t\n") { return 2; }
+    if !nexoframe::validation::has_text(" João ") { return 3; }
+    // "ação" has four Unicode scalar values (a, ç, ã, o), six UTF-8 bytes.
+    if !nexoframe::validation::length_between("ação",4,4) { return 4; }
+    if nexoframe::validation::length_between("ação",3,3) { return 5; }
+    // "cão" has three Unicode scalar values and four UTF-8 bytes.
+    if !nexoframe::validation::length_between("cão",3,3) { return 22; }
+    if nexoframe::validation::length_between("cão",4,4) { return 23; }
+    // A non-BMP Unicode scalar occupies four UTF-8 bytes, not four chars.
+    if !nexoframe::validation::length_between("🚀",1,1) { return 24; }
+    if nexoframe::validation::length_between("🚀",4,4) { return 25; }
+    if nexoframe::validation::length_between("x",3,1) { return 6; }
+    if !nexoframe::validation::ascii_digits("123456") { return 7; }
+    if nexoframe::validation::ascii_digits("") { return 8; }
+    if nexoframe::validation::ascii_digits("+123") { return 9; }
+    if nexoframe::validation::ascii_digits("12a") { return 10; }
+    if !nexoframe::validation::email_address("alguem+teste@exemplo.com") { return 11; }
+    if nexoframe::validation::email_address("ruim@@exemplo.com") { return 12; }
+    if nexoframe::validation::email_address("nome@-exemplo.com") { return 13; }
+    if nexoframe::validation::email_address("nome@exemplo..com") { return 14; }
+    let errors = nexoframe::validation::errors();
+    if !errors.require("nome", " Nome ") { return 15; }
+    if errors.require("nome", " \t ") { return 16; }
+    if errors.email("email", "invalid@") { return 17; }
+    if errors.length("titulo", "x", 2, 10) { return 18; }
+    if errors.integer("numero", "12x") { return 19; }
+    if errors.valid() || errors.count() != 4 { return 20; }
+    let result = errors.as_json();
+    let text = std::string::from_text(result.as_str());
+    if !text.contains("\"errors\"") { return 21; }
+    print!("NexoFrame 0.56 OK");
+    return 0;
+}

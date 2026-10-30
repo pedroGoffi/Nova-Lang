@@ -1177,3 +1177,72 @@ fn async_attribute_parses_then_checks_declared_mode() {
         .expect("async mode plus async marker should parse");
     crate::effects::validate(&program).expect("async marker matches declared mode");
 }
+
+
+#[test]
+fn procedural_macro_comptime_attributes_parse() {
+    // Regression: `comptime` is a lexer keyword as well as an attribute name.
+    // All six procedural macro integration tests previously failed in module
+    // loading with NOVA-P001 at `#[comptime]`, before expansion even ran.
+    for (name, code) in [
+        ("std meta", include_str!("../std/src/meta.nova")),
+        ("proc derive getters", include_str!("../examples/packages/nova_proc_getters_026/src/main.nova")),
+        ("proc attribute", include_str!("../examples/packages/nova_proc_attribute_026/src/main.nova")),
+        ("proc expression", include_str!("../examples/packages/nova_proc_expression_026/src/main.nova")),
+        ("proc invalid", include_str!("../examples/packages/nova_proc_invalid_026/src/main.nova")),
+        ("proc capture invalid", include_str!("../examples/packages/nova_proc_capture_invalid_026/src/main.nova")),
+    ] {
+        parses(name, code);
+    }
+    // Both syntaxes remain accepted; #[comptime] must not shadow the
+    // standalone function modifier.
+    parses("standalone modifier", "comptime fn value() -> i32 { 42 }");
+}
+
+
+#[test]
+fn meta_protocol_reserved_method_names_parse() {
+    // `next` is a unary prefix keyword but is also a legal method name.
+    // This must be accepted in attribute *arguments*, without accepting it
+    // as a general identifier at the start of an expression.
+    parses("reserved protocol next", r#"
+        #[meta_protocol(foreach_advance, next)]
+        trait ForeachAdvance { fn next(self: Self) -> Self; }
+        #[meta_protocol(task_resume, resume)]
+        trait TaskResume { fn resume(self: Self) -> Self; }
+        #[meta_protocol(task_join, join)]
+        trait TaskJoin { fn join(self: Self) -> Self; }
+    "#);
+    // The STD is the regression fixture: the earlier six tests all stopped
+    // in module loading at `foreach_advance, next`.
+    parses("std meta protocol names", include_str!("../std/src/meta.nova"));
+}
+
+#[test]
+fn character_literals_parse_in_all_value_positions() {
+    parses("Unicode char literals and escapes", r#"
+        fn main() -> i32 {
+            let a: char = 'A';
+            let b: char = 'ç';
+            let c: char = '\u{1F680}';
+            let d: char = '\n';
+            let e: char = '\'';
+            let f: char = '\\';
+            let g: char = '\x7F';
+            if a == 'A' && b != c && d == '\n' && e == '\'' && f == '\\' { return 0; }
+            return g as i32;
+        }
+    "#);
+}
+#[test]
+fn character_decoder_rejects_non_scalars_and_bad_escapes() {
+    use crate::ast::decode_char_literal as decode;
+    assert_eq!(decode("'A'").unwrap(), 'A');
+    assert_eq!(decode("'ç'").unwrap(), 'ç');
+    assert_eq!(decode(r"'\u{1F680}'").unwrap(), '🚀');
+    assert_eq!(decode(r"'\x41'").unwrap(), 'A');
+    assert_eq!(decode(r"'\n'").unwrap(), '\n');
+    for invalid in ["''", "'ab'", r"'\u{D800}'", r"'\u{110000}'", r"'\q'", "'\n'"] {
+        assert!(decode(invalid).is_err(), "unexpectedly accepted {invalid:?}");
+    }
+}

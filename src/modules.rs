@@ -23,6 +23,9 @@ pub struct Loader {
     pub module_paths: HashSet<String>,
     pub dependency_roots: HashSet<String>,
     pub builtin_roots: HashSet<String>,
+    // Dependency paths that refer to an already-loaded package (including
+    // the singleton built-in STD). These aliases never create duplicate AST.
+    pub dependency_aliases: HashMap<String, String>,
 }
 
 fn qualified(ns: &str, name: &str) -> String {
@@ -48,78 +51,53 @@ fn pub_wrap(item: Item, public: bool) -> Item {
 }
 // Embedded standard library is a recursive module tree, not one main.nova.
 // Each file is embedded individually, then resolved through public mod declarations.
-pub(crate) const EMBEDDED_STD: &[(&str, &str)] = &[
-    (
-        "internal/mod.nova",
-        include_str!("../std/src/internal/mod.nova"),
-    ),
-    (
-        "internal/map.nova",
-        include_str!("../std/src/internal/map.nova"),
-    ),
-    ("arena.nova", include_str!("../std/src/arena.nova")),
-    ("atomic.nova", include_str!("../std/src/atomic.nova")),
-    ("sync.nova", include_str!("../std/src/sync.nova")),
-    ("thread.nova", include_str!("../std/src/thread.nova")),
-    ("ops.nova", include_str!("../std/src/ops.nova")),
-    ("concepts.nova", include_str!("../std/src/concepts.nova")),
-    ("builder.nova", include_str!("../std/src/builder.nova")),
-    ("convert.nova", include_str!("../std/src/convert.nova")),
-    ("coro.nova", include_str!("../std/src/coro.nova")),
-    ("env.nova", include_str!("../std/src/env.nova")),
-    ("fs.nova", include_str!("../std/src/fs.nova")),
-    ("generator.nova", include_str!("../std/src/generator.nova")),
-    ("net.nova", include_str!("../std/src/net.nova")),
-    ("io.nova", include_str!("../std/src/io.nova")),
-    ("json.nova", include_str!("../std/src/json.nova")),
-    ("lib.nova", include_str!("../std/src/lib.nova")),
-    (
-        "libc/ctype.nova",
-        include_str!("../std/src/libc/ctype.nova"),
-    ),
-    (
-        "libc/errno.nova",
-        include_str!("../std/src/libc/errno.nova"),
-    ),
-    (
-        "libc/fcntl.nova",
-        include_str!("../std/src/libc/fcntl.nova"),
-    ),
-    ("libc/math.nova", include_str!("../std/src/libc/math.nova")),
-    ("libc/mod.nova", include_str!("../std/src/libc/mod.nova")),
-    (
-        "libc/stdio.nova",
-        include_str!("../std/src/libc/stdio.nova"),
-    ),
-    (
-        "libc/stdlib.nova",
-        include_str!("../std/src/libc/stdlib.nova"),
-    ),
-    (
-        "libc/string.nova",
-        include_str!("../std/src/libc/string.nova"),
-    ),
-    ("libc/time.nova", include_str!("../std/src/libc/time.nova")),
-    (
-        "libc/unistd.nova",
-        include_str!("../std/src/libc/unistd.nova"),
-    ),
-    ("math.nova", include_str!("../std/src/math.nova")),
-    ("memory.nova", include_str!("../std/src/memory.nova")),
-    ("raw.nova", include_str!("../std/src/raw.nova")),
-    ("string.nova", include_str!("../std/src/string.nova")),
-    ("task.nova", include_str!("../std/src/task.nova")),
-    ("ownership.nova", include_str!("../std/src/ownership.nova")),
-    ("time.nova", include_str!("../std/src/time.nova")),
-    ("vec.nova", include_str!("../std/src/vec.nova")),
-    ("set.nova", include_str!("../std/src/set.nova")),
-    ("map.nova", include_str!("../std/src/map.nova")),
-    ("symbol.nova", include_str!("../std/src/symbol.nova")),
-    ("option.nova", include_str!("../std/src/option.nova")),
-    ("result.nova", include_str!("../std/src/result.nova")),
-    ("error.nova", include_str!("../std/src/error.nova")),
-    ("panic.nova", include_str!("../std/src/panic.nova")),
-];
+// Generated at compile time from std/src/**/*.nova by build.rs.
+// New modules are embedded automatically, eliminating registry drift.
+pub(crate) const EMBEDDED_STD: &[(&str, &str)] =
+    include!(concat!(env!("OUT_DIR"), "/nova_embedded_std.rs"));
+
+// Keep the source list in sync with std/src. Missing entries produce a
+// module-loading failure that may only appear during bootstrap, so detect
+// them in regular Rust tests instead of waiting for the selfhost build.
+#[cfg(test)]
+mod embedded_std_registry_tests {
+    use super::{Loader, EMBEDDED_STD};
+    use std::collections::HashSet;
+    use std::path::{Path, PathBuf};
+
+    fn collect_sources(dir: &Path, base: &Path, paths: &mut HashSet<String>) {
+        for item in std::fs::read_dir(dir).expect("read standard library directory") {
+            let path = item.expect("read standard library entry").path();
+            if path.is_dir() {
+                collect_sources(&path, base, paths);
+            } else if path.extension().is_some_and(|ext| ext == "nova") {
+                let relative = path.strip_prefix(base).expect("path inside std/src");
+                paths.insert(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+
+    #[test]
+    fn every_standard_library_source_is_embedded_exactly_once() {
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("std/src");
+        let mut expected = HashSet::new();
+        collect_sources(&base, &base, &mut expected);
+        let mut actual = HashSet::new();
+        for (path, _) in EMBEDDED_STD {
+            assert!(actual.insert((*path).to_string()), "duplicate embedded std module: {path}");
+        }
+        assert_eq!(actual, expected, "EMBEDDED_STD must match std/src/**/*.nova");
+    }
+
+    #[test]
+    fn builtin_char_is_loaded_with_the_standard_library() {
+        let mut loader = Loader::default();
+        let _items = loader.embedded_std("std").expect("built-in standard library must load");
+        assert!(loader.module_paths.contains("std::char"), "missing std::char namespace");
+        assert!(loader.sources.iter().any(|source| source.path == "<builtin:std/src/char.nova>"),
+            "char.nova must be included as its own source");
+    }
+}
 
 impl Loader {
     pub fn load_file(
@@ -337,7 +315,7 @@ impl Loader {
                     [only] => (*only).to_string(),
                     [] => {
                         return Err(format!(
-                            "embedded std module '{name}' not found under {directory}"
+                            "embedded std module '{name}' not found under std/src/{directory} (tried {direct}, {nested}; {} modules embedded)", EMBEDDED_STD.len()
                         ))
                     }
                     _ => {
@@ -381,6 +359,7 @@ struct Index {
     file_modules: HashSet<String>,
     dependency_roots: HashSet<String>,
     builtin_roots: HashSet<String>,
+    dependency_aliases: HashMap<String, String>,
 }
 impl Index {
     fn register(&mut self, items: &[Item], ns: &str) -> Result<(), String> {
@@ -436,68 +415,73 @@ impl Index {
         }
         Ok(())
     }
+    /// Canonicalize a dependency alias at a namespace boundary, choosing the
+    /// longest matching prefix. Rewriting a prefix (rather than entire symbol
+    /// names) also works for methods and generic specializations, which are
+    /// not all registered as standalone symbols in the module index.
+    fn canonical_path(&self, name: &str) -> String {
+        let mut value = name.to_owned();
+        for _ in 0..=self.dependency_aliases.len() {
+            let alias = self
+                .dependency_aliases
+                .keys()
+                .filter(|alias| {
+                    value.as_str() == alias.as_str() || value.starts_with(&format!("{alias}::"))
+                })
+                .max_by_key(|alias| alias.len());
+            let Some(alias) = alias else { break };
+            let canonical = &self.dependency_aliases[alias];
+            let next = format!("{canonical}{}", &value[alias.len()..]);
+            if next == value {
+                break;
+            }
+            value = next;
+        }
+        value
+    }
+
     fn path(&self, original: &str, scope: &str, aliases: &HashMap<String, String>) -> String {
         let mut bits = original.split("::");
         let first = bits.next().unwrap_or("");
         let rest = bits.collect::<Vec<_>>();
         if let Some(to) = aliases.get(first) {
-            return if rest.is_empty() {
+            let path = if rest.is_empty() {
                 to.clone()
             } else {
                 format!("{}::{}", to, rest.join("::"))
             };
+            return self.canonical_path(&path);
         }
         if first == "crate" {
-            return rest.join("::");
+            return self.canonical_path(&rest.join("::"));
         }
         if first == "self" {
-            return qualified(scope, &rest.join("::"));
+            return self.canonical_path(&qualified(scope, &rest.join("::")));
         }
         if first == "super" {
             let parent = scope.rsplit_once("::").map(|(p, _)| p).unwrap_or("");
-            return qualified(parent, &rest.join("::"));
+            return self.canonical_path(&qualified(parent, &rest.join("::")));
         }
-        // Inside an embedded STD instance, `std::...` names that *same*
-        // instance. A transitive dependency may also import STD (e.g.
-        // `nexo::std`), and falling back to the application's top-level
-        // `std` would both pick the wrong ABI and trigger a spurious M015.
-        // Application scopes never get this special treatment.
-        if let Some(rest) = original.strip_prefix("std::") {
-            if let Some(root) = self
-                .builtin_roots
-                .iter()
-                .filter(|root| scope == root.as_str() || scope.starts_with(&format!("{root}::")))
-                .max_by_key(|root| root.len())
+
+        // A package's dependencies are visible from its child modules. Check
+        // lexical ancestors before the top-level symbols, so `std::String`
+        // inside a package picks that package's alias (which resolves to the
+        // shared STD), and a sibling module may use `nova_view::...`.
+        let mut ancestor = scope;
+        while !ancestor.is_empty() {
+            let candidate = qualified(ancestor, original);
+            if self.symbols.contains_key(&candidate)
+                || self.dependency_aliases.contains_key(&candidate)
+                || self
+                    .dependency_aliases
+                    .keys()
+                    .any(|alias| candidate.starts_with(&format!("{alias}::")))
             {
-                let local = qualified(root, rest);
-                if self.symbols.contains_key(&local)
-                    || self
-                        .symbols
-                        .keys()
-                        .any(|s| s.starts_with(&format!("{local}::")))
-                {
-                    return local;
-                }
+                return self.canonical_path(&candidate);
             }
+            ancestor = ancestor.rsplit_once("::").map(|(p, _)| p).unwrap_or("");
         }
-        // Locally declared symbols shadow names from the package root.
-        let lexical = qualified(scope, original);
-        if !scope.is_empty() && self.symbols.contains_key(&lexical) {
-            return lexical;
-        }
-        if self.symbols.contains_key(original) {
-            return original.to_owned();
-        }
-        // A qualified path may refer to a member declared in the child module.
-        if original.contains("::")
-            && self
-                .symbols
-                .keys()
-                .any(|s| s.starts_with(&format!("{lexical}::")))
-        {
-            return lexical;
-        }
-        original.to_owned()
+        self.canonical_path(original)
     }
     // Identify the first inaccessible component, not merely the final type.
     // Example: `mod lexer;` and `pub struct Scan` means the private *module*
@@ -569,9 +553,9 @@ impl Index {
         }
     }
     fn ensure_visible(&self, target: &str, scope: &str, spelling: &str) -> Result<(), String> {
-        // Only the particular built-in STD instance that owns the symbol may
-        // use its sealed ABI, even when imported under a renamed alias or via
-        // a transitive dependency (e.g. `vendor::std::internal::map`).
+        // Only the shared built-in STD definition may access its sealed ABI,
+        // even when application code spells the path using a transitive alias
+        // (e.g. `vendor::std::internal::map`).
         for root in &self.builtin_roots {
             let prefix = format!("{root}::internal");
             if target == prefix || target.starts_with(&format!("{prefix}::")) {
@@ -761,12 +745,12 @@ impl Index {
                 }
                 Item::Concept(c) => {
                     let mut c = c.clone();
-                    self.concept_predicate(&mut c.predicate, scope, &imports)?;
+                    self.concept_predicate(&mut c.predicate, scope, &imports, &c.generics)?;
                     Item::Concept(c)
                 }
                 Item::ConceptAssert(expr) => {
                     let mut expr = expr.clone();
-                    self.concept_predicate(&mut expr, scope, &imports)?;
+                    self.concept_predicate(&mut expr, scope, &imports, &[])?;
                     Item::ConceptAssert(expr)
                 }
                 Item::Impl(i) => {
@@ -836,6 +820,7 @@ impl Index {
         expr: &mut ast::ConceptExpr,
         scope: &str,
         imports: &HashMap<String, String>,
+        type_parameters: &[String],
     ) -> Result<(), String> {
         match expr {
             ast::ConceptExpr::Apply { name, args } => {
@@ -860,24 +845,24 @@ impl Index {
                     self.ensure_visible(name, scope, &original)?;
                 }
                 for arg in args {
-                    self.ty(arg, scope, imports)?;
+                    self.ty_in_scope(arg, scope, imports, type_parameters)?;
                 }
             }
-            ast::ConceptExpr::Not(x) => self.concept_predicate(x, scope, imports)?,
+            ast::ConceptExpr::Not(x) => self.concept_predicate(x, scope, imports, type_parameters)?,
             ast::ConceptExpr::And(a, b) | ast::ConceptExpr::Or(a, b) => {
-                self.concept_predicate(a, scope, imports)?;
-                self.concept_predicate(b, scope, imports)?;
+                self.concept_predicate(a, scope, imports, type_parameters)?;
+                self.concept_predicate(b, scope, imports, type_parameters)?;
             }
             ast::ConceptExpr::Requires { variables, rules } => {
                 for (_, ty) in variables {
-                    self.ty(ty, scope, imports)?;
+                    self.ty_in_scope(ty, scope, imports, type_parameters)?;
                 }
                 for rule in rules {
                     match rule {
                         ast::Requirement::Field { result, .. }
                         | ast::Requirement::Method { result, .. }
                         | ast::Requirement::Binary { result, .. } => {
-                            self.ty(result, scope, imports)?
+                            self.ty_in_scope(result, scope, imports, type_parameters)?
                         }
                     }
                 }
@@ -892,8 +877,29 @@ impl Index {
         scope: &str,
         imports: &HashMap<String, String>,
     ) -> Result<(), String> {
+        self.ty_in_scope(ty, scope, imports, &[])
+    }
+    /// Resolve a type in the concept's lexical scope: generic parameters
+    /// shadow module symbols, even if another package declares a private
+    /// type with the same name. All other types still undergo privacy checks.
+    fn ty_in_scope(
+        &self,
+        ty: &mut TypeRef,
+        scope: &str,
+        imports: &HashMap<String, String>,
+        type_parameters: &[String],
+    ) -> Result<(), String> {
         match ty {
             TypeRef::Named(name) => {
+                // Builtin scalar names are types, not relative module paths.
+                // In particular, inside `std::char` a `char` annotation and
+                // a character literal must not become `std::char` (the module).
+                // Generic parameters keep their own lexical priority.
+                if type_parameters.contains(name)
+                    || crate::types::is_primitive_type_name(name)
+                {
+                    return Ok(());
+                }
                 let raw = name.clone();
                 let resolved = self.path(name, scope, imports);
                 self.ensure_visible(&resolved, scope, &raw)?;
@@ -907,17 +913,17 @@ impl Index {
                 self.ensure_visible(&resolved, scope, &raw)?;
                 *name = resolved;
                 for arg in args {
-                    self.ty(arg, scope, imports)?;
+                    self.ty_in_scope(arg, scope, imports, type_parameters)?;
                 }
             }
             TypeRef::Array(inner, _)
             | TypeRef::Pointer { inner, .. }
-            | TypeRef::Reference { inner, .. } => self.ty(inner, scope, imports)?,
+            | TypeRef::Reference { inner, .. } => self.ty_in_scope(inner, scope, imports, type_parameters)?,
             TypeRef::Function { params, result } => {
                 for p in params {
-                    self.ty(p, scope, imports)?;
+                    self.ty_in_scope(p, scope, imports, type_parameters)?;
                 }
-                self.ty(result, scope, imports)?;
+                self.ty_in_scope(result, scope, imports, type_parameters)?;
             }
         }
         Ok(())
@@ -948,6 +954,12 @@ impl Index {
             _ => {}
         }
         match e {
+            Expr::If { condition, then_body, else_body } => {
+                self.expr(condition, scope, imports)?;
+                self.stmts(then_body, scope, imports)?;
+                self.stmts(else_body, scope, imports)?;
+            }
+            Expr::Block(body) => self.stmts(body, scope, imports)?,
             Expr::Call(_, args) | Expr::MacroCall(_, args) => {
                 for a in args {
                     self.expr(a, scope, imports)?;
@@ -1042,7 +1054,7 @@ impl Index {
                 | Stmt::FieldSet { value, .. }
                 | Stmt::DerefSet { value, .. }
                 | Stmt::CompoundSet { value, .. }
-                | Stmt::Expr(value)
+                | Stmt::Expr(value) | Stmt::Tail(value)
                 | Stmt::Defer(value) => self.expr(value, scope, imports)?,
                 Stmt::Return(Some(value)) => self.expr(value, scope, imports)?,
                 Stmt::If {
@@ -1113,6 +1125,7 @@ pub fn link(program: ast::Program, loader: &Loader) -> Result<ast::Program, Stri
         file_modules: loader.module_paths.clone(),
         dependency_roots: loader.dependency_roots.clone(),
         builtin_roots: loader.builtin_roots.clone(),
+        dependency_aliases: loader.dependency_aliases.clone(),
         ..Index::default()
     };
     index.register(&program.items, "")?;
@@ -1124,6 +1137,111 @@ pub fn link(program: ast::Program, loader: &Loader) -> Result<ast::Program, Stri
 #[cfg(test)]
 mod builtin_instance_resolution_tests {
     use super::*;
+
+    #[test]
+    fn transitive_aliases_share_std_types_and_method_paths() {
+        let mut index = Index::default();
+        index
+            .dependency_aliases
+            .insert("frame::std".into(), "std".into());
+        index
+            .dependency_aliases
+            .insert("frame::web::view::std".into(), "std".into());
+        index
+            .dependency_aliases
+            .insert("frame::other_view".into(), "frame::web::view".into());
+        index.builtin_roots.insert("std".into());
+        index.symbols.insert(
+            "std::string::String".into(),
+            Symbol {
+                public: true,
+                owner: "std::string".into(),
+                module: false,
+            },
+        );
+        index.symbols.insert(
+            "std::internal::map::native_create".into(),
+            Symbol {
+                public: true,
+                owner: "std::internal::map".into(),
+                module: false,
+            },
+        );
+        let imports = HashMap::new();
+        assert_eq!(
+            index.path("std::string::String", "frame::ui", &imports),
+            "std::string::String"
+        );
+        assert_eq!(
+            index.path("std::string::String", "frame::web::view::html", &imports),
+            "std::string::String"
+        );
+        assert_eq!(
+            index.path("std::string::String::from_text", "frame::ui", &imports),
+            "std::string::String::from_text"
+        );
+        assert_eq!(
+            index.path("frame::other_view::html::Html", "", &imports),
+            "frame::web::view::html::Html"
+        );
+        assert!(index
+            .ensure_visible(
+                &index.path("frame::std::internal::map::native_create", "", &imports),
+                "frame::ui",
+                "frame::std::internal::map::native_create"
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn builtin_char_remains_primitive_even_with_same_named_module() {
+        let mut index = Index::default();
+        index.symbols.insert(
+            "std::char".into(),
+            Symbol { public: true, owner: "std".into(), module: true },
+        );
+        index.symbols.insert(
+            "std::char::is_ascii".into(),
+            Symbol { public: true, owner: "std::char".into(), module: false },
+        );
+        let imports = HashMap::new();
+        // Module paths are still valid in expression positions.
+        assert_eq!(index.path("char::is_ascii", "std", &imports), "std::char::is_ascii");
+        // But the primitive type must never be rewritten to a module path.
+        let mut ty = TypeRef::Named("char".into());
+        index.ty(&mut ty, "std::char", &imports).unwrap();
+        assert!(matches!(ty, TypeRef::Named(ref n) if n == "char"));
+        let mut arg_ty = TypeRef::Pointer {
+            mutable: false,
+            inner: Box::new(TypeRef::Named("char".into())),
+        };
+        index.ty(&mut arg_ty, "std::char", &imports).unwrap();
+        assert!(matches!(arg_ty, TypeRef::Pointer { inner, .. }
+            if matches!(*inner, TypeRef::Named(ref n) if n == "char")));
+        // The same syntax also appears as a target in character literals.
+        let mut literal = Expr::Cast(
+            Box::new(Expr::Str("'\\u{007F}'".into())),
+            TypeRef::Named("char".into()),
+        );
+        index.expr(&mut literal, "std::char", &imports).unwrap();
+        assert!(matches!(literal, Expr::Cast(_, TypeRef::Named(ref n)) if n == "char"));
+        // Explicit paths keep the independently named module accessible.
+        let mut qualified_type = TypeRef::Named("std::char".into());
+        index.ty(&mut qualified_type, "std::char", &imports).unwrap();
+        assert!(matches!(qualified_type, TypeRef::Named(ref n) if n == "std::char"));
+    }
+
+    #[test]
+    fn builtin_type_names_stay_stable_in_module_scopes() {
+        let index = Index::default();
+        for name in ["()", "bool", "char", "str", "i8", "u16", "i64", "u64", "f32", "f64", "isize", "usize"] {
+            let mut ty = TypeRef::Named(name.into());
+            index.ty(&mut ty, "std::char", &HashMap::new()).unwrap();
+            assert!(matches!(&ty, TypeRef::Named(n) if n == name), "{name} became {ty:?}");
+        }
+        assert!(!crate::types::is_primitive_type_name("std::char"));
+        assert!(!crate::types::is_primitive_type_name("String"));
+    }
 
     #[test]
     fn nested_std_resolves_its_own_internal_runtime() {

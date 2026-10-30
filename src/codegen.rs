@@ -2,7 +2,7 @@
 use crate::{
     ast::{BinaryOp, UnaryOp},
     hir::FunctionKind,
-    mir::{self, Instruction, Operand, Rvalue, Terminator},
+    mir::{self, Instruction, Operand, PlaceProjection, Rvalue, Terminator},
     types::{Primitive, TypeId, TypeKind},
 };
 use std::collections::HashMap;
@@ -103,6 +103,20 @@ impl<'a> Emitter<'a> {
                 let sk = self.program.types.kind(source);
                 let dk = self.program.types.kind(*dest);
                 let op = match (sk.clone(), dk) {
+                    (TypeKind::Primitive(Primitive::Char),
+                     TypeKind::Primitive(Primitive::Signed(db)|Primitive::Unsigned(db))) => {
+                        if db==32 { return Some(value); }
+                        if db<32 { "trunc" } else { "zext" }
+                    }
+                    (TypeKind::Primitive(Primitive::Signed(sb)|Primitive::Unsigned(sb)),
+                     TypeKind::Primitive(Primitive::Char)) => {
+                        if sb==32 { return Some(value); }
+                        if sb>32 { "trunc" }
+                        else if matches!(sk,TypeKind::Primitive(Primitive::Signed(_))) { "sext" }
+                        else { "zext" }
+                    }
+                    (TypeKind::Primitive(Primitive::Char),
+                     TypeKind::Primitive(Primitive::Char)) => return Some(value),
                     (
                         TypeKind::Primitive(Primitive::Signed(sb) | Primitive::Unsigned(sb)),
                         TypeKind::Primitive(Primitive::Signed(db) | Primitive::Unsigned(db)),
@@ -444,7 +458,53 @@ impl<'a> Emitter<'a> {
                 self.needs_trap = true;
                 Some(dst)
             }
-            Rvalue::AddressOf(local) => Some(format!("%slot{local}")),
+            Rvalue::AddressOf(place) => {
+                // Address the original slot, not the by-value Index rvalue's
+                // temporary. GEP follows field/index projections in place.
+                let mut addr = format!("%slot{}", place.root);
+                let mut current_ty = self.func.locals[place.root];
+                for projection in &place.projections {
+                    let aggregate_ty = self.ty(current_ty);
+                    match projection {
+                        PlaceProjection::Field(field) => {
+                            let TypeKind::Struct(sid) = self.program.types.kind(current_ty) else {
+                                unreachable!("verified struct place")
+                            };
+                            let new_addr = self.temp();
+                            self.lines.push(format!(
+                                "  {new_addr} = getelementptr inbounds {aggregate_ty}, ptr {addr}, i32 0, i32 {field}"
+                            ));
+                            addr = new_addr;
+                            current_ty = self.program.types.structs[sid].fields[*field].ty;
+                        }
+                        PlaceProjection::Index(index) => {
+                            let TypeKind::Array { len, element } = self.program.types.kind(current_ty) else {
+                                unreachable!("verified array place")
+                            };
+                            let index_val = self.operand(index);
+                            let valid = self.temp();
+                            self.lines.push(format!("  {valid} = icmp ult i32 {index_val}, {len}"));
+                            let unique = self.next;
+                            self.next += 1;
+                            self.lines.push(format!(
+                                "  br i1 {valid}, label %borrow.index.ok{unique}, label %borrow.index.trap{unique}"
+                            ));
+                            self.lines.push(format!("borrow.index.trap{unique}:"));
+                            self.lines.push("  call void @llvm.trap()".into());
+                            self.lines.push("  unreachable".into());
+                            self.lines.push(format!("borrow.index.ok{unique}:"));
+                            let new_addr = self.temp();
+                            self.lines.push(format!(
+                                "  {new_addr} = getelementptr inbounds {aggregate_ty}, ptr {addr}, i32 0, i32 {index_val}"
+                            ));
+                            self.needs_trap = true;
+                            addr = new_addr;
+                            current_ty = element;
+                        }
+                    }
+                }
+                Some(addr)
+            },
             Rvalue::Deref(ptr) => {
                 let v = self.operand(ptr);
                 let dst = self.temp();
@@ -1155,10 +1215,16 @@ mod std_linkage_regression_tests {
             llvm.contains("call i64 @__nova_std__task____await_value("),
             "Nexo must cooperatively await pending socket retries"
         );
-        // Defined Nova functions, including RAII drops, must retain their names.
+        // The compiler now loads one canonical std for the entire package
+        // graph. Its RAII methods are defined only once under std::, not
+        // copied under a transitive `nexo::std` namespace.
         assert!(
-            llvm.contains("define void @nexo__std__vec__ByteVector__drop("),
+            llvm.contains("define void @std__vec__ByteVector__drop("),
             "{llvm}"
+        );
+        assert!(
+            !llvm.contains("define void @nexo__std__vec__ByteVector__drop("),
+            "nested std must not define another destructor: {llvm}"
         );
     }
 

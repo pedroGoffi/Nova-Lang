@@ -46,6 +46,12 @@ fn capture_expression(
     captures: &mut BTreeMap<String, TypeRef>,
 ) {
     match expression {
+        Expr::If { condition, then_body, else_body } => {
+            capture_expression(condition,outer,bound,captures);
+            capture_statements(then_body,outer,&mut bound.clone(),captures);
+            capture_statements(else_body,outer,&mut bound.clone(),captures);
+        }
+        Expr::Block(body) => capture_statements(body,outer,&mut bound.clone(),captures),
         Expr::Var(name) if !bound.contains(name) => {
             if let Some(ty) = outer.get(name) {
                 captures.insert(name.clone(), ty.clone());
@@ -146,7 +152,7 @@ fn capture_statements(
                 }
                 capture_expression(value, outer, bound, captures);
             }
-            Stmt::Defer(value) | Stmt::Expr(value) | Stmt::Return(Some(value)) => {
+            Stmt::Defer(value) | Stmt::Expr(value) | Stmt::Tail(value) | Stmt::Return(Some(value)) => {
                 capture_expression(value, outer, bound, captures)
             }
             Stmt::If {
@@ -206,6 +212,12 @@ fn rewrite_expression(
     bound: &HashSet<String>,
 ) {
     match expression {
+        Expr::If { condition, then_body, else_body } => {
+            rewrite_expression(condition,captures,bound);
+            rewrite_statements(then_body,captures,&mut bound.clone()).ok();
+            rewrite_statements(else_body,captures,&mut bound.clone()).ok();
+        }
+        Expr::Block(body) => { rewrite_statements(body,captures,&mut bound.clone()).ok(); }
         Expr::Var(name) if captures.contains_key(name) && !bound.contains(name) => {
             *expression = Expr::Field(Box::new(Expr::Var("self".into())), name.clone());
         }
@@ -297,7 +309,7 @@ fn rewrite_statements(
                 }
                 rewrite_expression(value, captures, bound);
             }
-            Stmt::Defer(value) | Stmt::Expr(value) | Stmt::Return(Some(value)) => {
+            Stmt::Defer(value) | Stmt::Expr(value) | Stmt::Tail(value) | Stmt::Return(Some(value)) => {
                 rewrite_expression(value, captures, bound)
             }
             Stmt::If {
@@ -359,6 +371,17 @@ impl Lifter {
         locals: &Locals,
     ) -> Result<(), String> {
         match expression {
+            Expr::If { condition, then_body, else_body } => {
+                self.expr(condition,generated,locals)?;
+                let mut scope=locals.clone();
+                self.statements(then_body,generated,&mut scope)?;
+                let mut scope=locals.clone();
+                self.statements(else_body,generated,&mut scope)?;
+            }
+            Expr::Block(body) => {
+                let mut scope=locals.clone();
+                self.statements(body,generated,&mut scope)?;
+            }
             Expr::Lambda {
                 params,
                 result,
@@ -529,7 +552,7 @@ impl Lifter {
                 | Stmt::CompoundSet { value, .. }
                 | Stmt::FieldSet { value, .. }
                 | Stmt::DerefSet { value, .. }
-                | Stmt::Expr(value)
+                | Stmt::Expr(value) | Stmt::Tail(value)
                 | Stmt::Return(Some(value)) => self.expr(value, generated, locals)?,
                 Stmt::If {
                     condition,

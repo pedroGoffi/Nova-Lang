@@ -1,0 +1,13 @@
+import std;
+fn main() -> i32 {
+    let password=std::env::read("NOVA_DEMO_PASSWORD");
+    if password.is_empty() {
+        std::io::println("Defina NOVA_DEMO_PASSWORD para gerar um hash, depois use unset NOVA_DEMO_PASSWORD.");
+        return 1;
+    }
+    let encoded=std::crypto::password_hash(password.as_str());
+    if encoded.is_empty() {return 2;}
+    std::io::print("NOVA_DEMO_PASSWORD_HASH=");
+    std::io::println(encoded.as_str());
+    return 0;
+}

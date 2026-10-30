@@ -14,10 +14,12 @@ mod hir;
 mod iterators;
 mod lambdas;
 mod macros;
+mod meta;
 mod mir;
 mod modules;
 mod ownership;
 mod package;
+mod proc_macros;
 mod surface;
 mod type_features;
 mod types;
@@ -44,7 +46,7 @@ mod parser_regressions;
 mod variadic_tests;
 
 fn usage() -> &'static str {
-    r#"Nova 0.20 Alpha: Nexo package + typed STDLIB + private runtime ABI — native compiler (Rust + LALRPOP + HIR/MIR + LLVM)
+    r#"Nova 0.25 Alpha: Nexo package + typed STDLIB + private runtime ABI — native compiler (Rust + LALRPOP + HIR/MIR + LLVM)
 Usage:
   nova new <name> | init | add std | add <name> --path <directory> | tree [directory]
   nova check [file.nova | package-directory]
@@ -62,6 +64,9 @@ Usage:
   nova lint [file.nova | package-directory]    Unused locals / mutability checks
   nova lsp-probe                                Check editor overlay protocol support
   nova doc [package-directory] [-o path]     Public symbol index
+  nova meta [package-directory]              Show .nova metadata contracts
+  nova meta inspect|expand [package-directory]
+  nova meta verify [package-directory]   Verify CTFE assertions without LLVM
 Options:
   -o, --output <path>    Output artifact
   --opt-level <0..3>     Optimization level for Clang (default: 0)
@@ -84,20 +89,20 @@ Defer: defer cleanup(); or auto x = make() defer x.close();"#
 pub(crate) fn strip_comments(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
     let mut chars = source.chars().peekable();
-    let mut quoted = false;
+    let mut quote: Option<char> = None;
     let mut escaped = false;
     while let Some(c) = chars.next() {
-        if quoted {
+        if let Some(delimiter) = quote {
             out.push(c);
             if escaped {
                 escaped = false;
             } else if c == '\\' {
                 escaped = true;
-            } else if c == '"' {
-                quoted = false;
+            } else if c == delimiter {
+                quote = None;
             }
-        } else if c == '"' {
-            quoted = true;
+        } else if c == '"' || c == '\'' {
+            quote = Some(c);
             out.push(c);
         } else if c == '/' && chars.peek() == Some(&'/') {
             out.push(' ');
@@ -177,6 +182,15 @@ fn require_main(hir: &hir::Program) -> Result<(), String> {
 fn llvm_path(output: &Path) -> PathBuf {
     output.with_extension("ll")
 }
+// A PostgreSQL dependency is optional. Declaration-only imports do not
+// activate it; generated calls into the private postgres ABI do.
+fn needs_crypto_runtime(ir: &str) -> bool {
+    ir.lines().any(|line| line.contains("call ") && line.contains("@__nova_std__crypto____"))
+}
+fn needs_postgres_runtime(ir: &str) -> bool {
+    ir.lines()
+        .any(|line| line.contains("call ") && line.contains("@__nova_std__postgres____pg_"))
+}
 fn build(ir: &str, output: &Path, options: &Options) -> Result<(), String> {
     if !cfg!(all(target_os = "linux", target_pointer_width = "64")) {
         return Err("Nova 0.8 coroutine runtime currently requires a 64-bit Linux host".into());
@@ -208,6 +222,48 @@ fn build(ir: &str, output: &Path, options: &Options) -> Result<(), String> {
     let sync_source = output.with_extension("nova_sync.c");
     fs::write(&sync_source, include_str!("../runtime/nova_sync.c"))
         .map_err(|error| format!("{}: {error}", sync_source.display()))?;
+    let crypto_enabled = needs_crypto_runtime(ir);
+    let crypto_source = output.with_extension("nova_crypto.c");
+    if crypto_enabled {
+        fs::write(&crypto_source, include_str!("../runtime/nova_crypto.c"))
+            .map_err(|e| format!("{}: {e}", crypto_source.display()))?;
+    }
+    let postgres_enabled = needs_postgres_runtime(ir);
+    let postgres_source = output.with_extension("nova_postgres.c");
+    let postgres_paths = if postgres_enabled {
+        let pg_config = Command::new("pg_config")
+            .arg("--includedir")
+            .output()
+            .map_err(|_| {
+                "PostgreSQL requires libpq-dev and pg_config; install libpq-dev".to_string()
+            })?;
+        if !pg_config.status.success() {
+            return Err("pg_config --includedir failed; install a working libpq-dev".into());
+        }
+        let includedir = String::from_utf8(pg_config.stdout)
+            .map_err(|_| "pg_config returned an invalid include directory")?;
+        let include = PathBuf::from(includedir.trim());
+        if !include.join("libpq-fe.h").exists() {
+            return Err(format!(
+                "PostgreSQL header libpq-fe.h missing in {}",
+                include.display()
+            ));
+        }
+        let libdir = Command::new("pg_config")
+            .arg("--libdir")
+            .output()
+            .map_err(|_| "pg_config --libdir failed".to_string())?;
+        if !libdir.status.success() {
+            return Err("pg_config --libdir failed".into());
+        }
+        let libdir = String::from_utf8(libdir.stdout)
+            .map_err(|_| "pg_config returned an invalid library directory")?;
+        fs::write(&postgres_source, include_str!("../runtime/nova_postgres.c"))
+            .map_err(|e| format!("{}: {e}", postgres_source.display()))?;
+        Some((include, PathBuf::from(libdir.trim())))
+    } else {
+        None
+    };
     let mut command = Command::new("clang");
     command
         .arg("-x")
@@ -226,6 +282,16 @@ fn build(ir: &str, output: &Path, options: &Options) -> Result<(), String> {
         .arg("-o")
         .arg(output)
         .arg("-lm");
+    if crypto_enabled {
+        command.arg(&crypto_source).arg("-lcrypto");
+    }
+    if let Some((include, libdir)) = &postgres_paths {
+        command
+            .arg(&postgres_source)
+            .arg(format!("-I{}", include.display()))
+            .arg(format!("-L{}", libdir.display()))
+            .arg("-lpq");
+    }
     if let Some(t) = &options.target {
         command.arg(format!("--target={t}"));
     }
@@ -241,6 +307,12 @@ fn build(ir: &str, output: &Path, options: &Options) -> Result<(), String> {
     let _ = fs::remove_file(&net_source);
     let _ = fs::remove_file(&atomic_source);
     let _ = fs::remove_file(&sync_source);
+    if crypto_enabled {
+        let _ = fs::remove_file(&crypto_source);
+    }
+    if postgres_enabled {
+        let _ = fs::remove_file(&postgres_source);
+    }
     let status = result.map_err(|e| format!("unable to launch clang: {e}"))?;
     if !status.success() {
         return Err(format!(
@@ -428,17 +500,42 @@ fn execute() -> Result<(), String> {
         println!("Generated {}", output.display());
         return Ok(());
     }
+    if args[0] == "meta" {
+        let inspecting = args.get(1).is_some_and(|arg|arg=="inspect");
+        let expanding = args.get(1).is_some_and(|arg|arg=="expand");
+        let verifying = args.get(1).is_some_and(|arg|arg=="verify");
+        let path = PathBuf::from(args.get(if inspecting || expanding || verifying {2}else{1}).map(String::as_str).unwrap_or("."));
+        let (ast, _) = package::load_detailed(&path)?;
+        if verifying {
+            let ast=proc_macros::expand(&ast)?;
+            let ast=macros::expand(&ast)?;
+            let ast=meta::expand(&ast)?;
+            meta::validate(&ast)?;
+            effects::validate(&ast)?;
+            let _=consteval::fold(&ast)?;
+            println!("Nova Meta CTFE: compile-time assertions satisfied");
+        }
+        else if inspecting { print!("{}", meta::inspect(&ast)?); }
+        else if expanding {
+            let ast=proc_macros::expand(&ast)?;
+            print!("{}", meta::expansion_report(&ast)?);
+        }
+        else { print!("{}", meta::describe(&ast)?); }
+        return Ok(());
+    }
     if args[0] == "lint" {
         let path = PathBuf::from(args.get(1).map(String::as_str).unwrap_or("."));
         let (ast, sources) = package::load_detailed(&path)
             .map_err(|e| diagnostics::attach_package(&e, &path, "module loading"))?;
+        let metadata_warnings=meta::lint(&ast);
+        for warning in &metadata_warnings {println!("{warning}");}
         let ast = surface::lower(&ast)
             .map_err(|e| diagnostics::semantic_with_context(&e, &sources, &path, "surface"))?;
         let hir = hir::lower(&ast)
             .map_err(|e| diagnostics::semantic_with_context(&e, &sources, &path, "hir"))?;
         let _ = mir::lower(&hir)
             .map_err(|e| diagnostics::pipeline_error("NOVA-IR001", &e, &sources, &path, "mir"))?;
-        println!("Nova lint: {} warning(s)", devtools::lint(&hir));
+        println!("Nova lint: {} warning(s)", devtools::lint(&hir)+metadata_warnings.len());
         return Ok(());
     }
     if args[0] == "new" {
@@ -622,6 +719,60 @@ fn main() -> i32 {
         let error = compile(source).unwrap_err();
         assert!(error.contains("expected bool, found str"), "{error}");
     }
+    #[test]
+    fn character_literals_have_distinct_unicode_type_and_llvm_abi() {
+        let llvm = compile(r#"
+            fn main() -> i32 {
+                let letter: char = 'A';
+                let accent: char = 'ç';
+                let rocket: char = '\u{1F680}';
+                let escaped: char = '\n';
+                let slash: i32 = '/';
+                if letter != 'A' || !(rocket > accent) { return 1; }
+                if escaped as u32 != 10 { return 2; }
+                if slash != 47 || '/' != slash { return 3; }
+                if rocket as u32 != 128640 { return 4; }
+                return 0;
+            }
+        "#).unwrap();
+        assert!(llvm.contains("define i32 @main"));
+        assert!(llvm.contains("i32 128640") || llvm.contains("128640"));
+    }
+    #[test]
+    fn character_literals_cannot_be_used_for_implicit_arithmetic() {
+        let error = compile("fn main()->i32 { let letter:char='A'; let n=letter+1; return 0; }").unwrap_err();
+        assert!(error.contains("equal types") || error.contains("numeric"), "{error}");
+    }
+    #[test]
+    fn character_literal_out_of_range_is_reported() {
+        let error = compile("fn main()->i32 { let tiny:u8='🚀'; return tiny as i32; }").unwrap_err();
+        assert!(error.contains("NOVA-CHAR003"), "{error}");
+    }
+
+    #[test]
+    fn final_if_with_explicit_returns_stays_control_flow() {
+        // Regression: a final exhaustive if must not be force-converted into
+        // an expression if its branches return instead of yielding values.
+        for source in [
+            "fn main()->i32 { if true { return 0; } else { return 1; } }",
+            "fn main()->i32 { let x:i32=2; if x == 1 { return 1; } else if x == 2 { return 0; } else { return 3; } }",
+        ] {
+            let llvm = compile(source).unwrap();
+            assert!(llvm.contains("define i32 @main"), "{source}");
+        }
+    }
+
+    #[test]
+    fn final_if_with_values_still_implicitly_returns() {
+        for source in [
+            "fn main()->i32 { if true { 0 } else { 1 } }",
+            "fn main()->i32 { let x:i32=2; if x == 1 { 1 } else if x == 2 { 0 } else { 3 } }",
+        ] {
+            let llvm = compile(source).unwrap();
+            assert!(llvm.contains("define i32 @main"), "{source}");
+        }
+    }
+
     #[test]
     fn else_if_compiles_through_mir() {
         let src="fn main() -> i32 { let x: i32 = 2; if x == 0 { return 1; } else if x == 1 { return 2; } else if x == 2 { return 0; } else { return 3; } }";
@@ -948,6 +1099,170 @@ fn main() -> i32 {
     }
 
     #[test]
+    fn borrow_array_struct_element_is_a_real_place() {
+        let ir = compile(r#"
+            struct Item { id: i32, points: i32 }
+            fn main() -> i32 {
+                let items: [Item; 2] = [
+                    new Item { id: 7, points: 10 },
+                    new Item { id: 9, points: 20 }
+                ];
+                let index: i32 = 1;
+                let item: &Item = &items[index];
+                return (*item).id - 9;
+            }
+        "#).unwrap();
+        assert!(ir.contains("borrow.index.ok"), "{ir}");
+        assert!(ir.contains("getelementptr inbounds [2 x %struct.Item], ptr %slot"), "{ir}");
+        assert!(ir.contains("@llvm.trap"), "{ir}");
+    }
+
+    #[test]
+    fn borrow_nested_field_from_array() {
+        let ir = compile(r#"
+            struct Item { id: i32, points: i32 }
+            fn main() -> i32 {
+                let items: [Item; 2] = [
+                    new Item { id: 7, points: 10 },
+                    new Item { id: 9, points: 20 }
+                ];
+                let points: &i32 = &items[1].points;
+                return *points - 20;
+            }
+        "#).unwrap();
+        assert!(ir.contains("getelementptr inbounds [2 x %struct.Item]"), "{ir}");
+        assert!(ir.contains("getelementptr inbounds %struct.Item"), "{ir}");
+    }
+
+    #[test]
+    fn borrow_direct_struct_field_without_copying_owner() {
+        let ir = compile(r#"
+            struct Item { id: i32, points: i32 }
+            fn main() -> i32 {
+                let item = new Item { id: 7, points: 11 };
+                let points: &i32 = &item.points;
+                return *points - 11;
+            }
+        "#).unwrap();
+        assert!(ir.contains("getelementptr inbounds %struct.Item"), "{ir}");
+    }
+
+    #[test]
+    fn exclusive_borrow_of_array_element_supports_mutation() {
+        let ir = compile(r#"
+            struct Item { id: i32 }
+            fn main() -> i32 {
+                let mut items: [Item; 2] = [
+                    new Item { id: 7 }, new Item { id: 9 }
+                ];
+                let id: &mut i32 = &mut items[0].id;
+                *id = 21;
+                return *id - 21;
+            }
+        "#).unwrap();
+        assert!(ir.contains("getelementptr inbounds [2 x %struct.Item]"), "{ir}");
+    }
+
+    #[test]
+    fn array_borrow_prevents_conflicting_mutable_borrow() {
+        let err = compile(r#"
+            fn main() -> i32 {
+                let mut values: [i32; 2] = [1, 2];
+                let first: &i32 = &values[0];
+                let second: &mut i32 = &mut values[1];
+                return *first + *second;
+            }
+        "#).unwrap_err();
+        assert!(err.contains("borrow"), "{err}");
+    }
+
+    #[test]
+    fn borrowed_array_cannot_be_overwritten() {
+        let err = compile(r#"
+            fn main() -> i32 {
+                let mut values: [i32; 2] = [1, 2];
+                let first: &i32 = &values[0];
+                values = [3, 4];
+                return *first;
+            }
+        "#).unwrap_err();
+        assert!(err.contains("borrow"), "{err}");
+    }
+
+    #[test]
+    fn array_borrow_literal_out_of_bounds_is_rejected() {
+        let err = compile(r#"
+            fn main() -> i32 {
+                let values: [i32; 2] = [1, 2];
+                let element: &i32 = &values[3];
+                return *element;
+            }
+        "#).unwrap_err();
+        assert!(err.contains("out of bounds"), "{err}");
+    }
+
+    #[test]
+    fn mutable_array_element_borrow_requires_mutable_root() {
+        let err = compile(r#"
+            fn main() -> i32 {
+                let values: [i32; 2] = [1, 2];
+                let element: &mut i32 = &mut values[0];
+                return *element;
+            }
+        "#).unwrap_err();
+        assert!(err.contains("mutable borrow") || err.contains("let mut"), "{err}");
+    }
+
+    #[test]
+    fn owning_array_drops_each_element_without_dropping_twice() {
+        let ir = compile(r#"
+            struct Resource { token: i32 }
+            impl Resource {
+                fn drop(self: Resource) -> () { return; }
+            }
+            fn main() -> i32 {
+                let resources: [Resource; 2] = [
+                    new Resource { token: 1 }, new Resource { token: 2 }
+                ];
+                let first: &Resource = &resources[0];
+                return (*first).token - 1;
+            }
+        "#).unwrap();
+        assert_eq!(ir.matches("call void @Resource__drop(").count(), 2, "{ir}");
+    }
+
+    #[test]
+    fn moving_owning_element_out_of_array_is_still_rejected() {
+        let err = compile(r#"
+            struct Resource { token: i32 }
+            impl Resource { fn drop(self: Resource) -> () { return; } }
+            fn main() -> i32 {
+                let items: [Resource; 2] = [
+                    new Resource { token: 1 }, new Resource { token: 2 }
+                ];
+                let removed: Resource = items[0];
+                return removed.token;
+            }
+        "#).unwrap_err();
+        assert!(err.contains("owning indexed element") || err.contains("move"), "{err}");
+    }
+
+    #[test]
+    fn borrow_nested_method_receiver_does_not_move_struct() {
+        let ir = compile(r#"
+            struct Item { id: i32 }
+            impl Item {
+                fn get_id(self: &Item) -> i32 { return self.id; }
+            }
+            fn main() -> i32 {
+                let items: [Item; 2] = [new Item { id: 3 }, new Item { id: 5 }];
+                return items[1].get_id() - 5;
+            }
+        "#).unwrap();
+        assert!(ir.contains("borrow.index.ok"), "{ir}");
+    }
+
+    #[test]
     fn cannot_write_through_shared_borrow() {
         let err = compile(
             r#"
@@ -1101,6 +1416,15 @@ fn main() -> i32 {
     #[test]
     fn inline_comment_inside_string() {
         assert!(strip_comments("\"url://host\" // comment\n").starts_with("\"url://host\""));
+    }
+    #[test]
+    fn postgres_link_is_optional_until_a_native_call_is_generated() {
+        let unused = "declare i64 @__nova_std__postgres____pg_connect(ptr)\n";
+        assert!(!needs_postgres_runtime(unused));
+        let used = "  %db = call i64 @__nova_std__postgres____pg_connect(ptr %dsn)\n";
+        assert!(needs_postgres_runtime(used));
+        let unrelated = "  %fd = call i32 @__nova_std__net____tcp_listen(i64 8080)\n";
+        assert!(!needs_postgres_runtime(unrelated));
     }
     #[test]
     fn embedded_standard_library_compiles() {

@@ -5,10 +5,17 @@
 //! This is an AST transform: no iterable-specific runtime, hidden integer IDs,
 //! or special-purpose LLVM opcodes. Range iteration continues to use `a..b`.
 use crate::ast::{self, Expr, Item, Stmt, UnaryOp};
+use std::collections::HashMap;
 
 #[derive(Default)]
 struct IteratorLowerer {
     next_id: usize,
+    protocol: HashMap<String,String>,
+}
+impl IteratorLowerer {
+    fn method(&self,key:&str,default:&str)->String {
+        self.protocol.get(key).cloned().unwrap_or_else(||default.into())
+    }
 }
 impl IteratorLowerer {
     fn statement_list(&mut self, statements: &[Stmt]) -> Vec<Stmt> {
@@ -19,21 +26,21 @@ impl IteratorLowerer {
         result
     }
 
-    fn advance(cursor_name: &str) -> Stmt {
+    fn advance(&self,cursor_name: &str) -> Stmt {
         Stmt::Set {
             name: cursor_name.into(),
             value: Expr::MethodCall(
                 Box::new(Expr::Var(cursor_name.into())),
-                "next".into(),
+                self.method("foreach_advance","next"),
                 vec![],
             ),
         }
     }
 
     // Rewrite only `continue` referring to THIS foreach, not nested loops.
-    fn continue_with_advance(statement: Stmt, cursor_name: &str) -> Vec<Stmt> {
+    fn continue_with_advance(&self,statement: Stmt, cursor_name: &str) -> Vec<Stmt> {
         match statement {
-            Stmt::Continue => vec![Self::advance(cursor_name), Stmt::Continue],
+            Stmt::Continue => vec![self.advance(cursor_name), Stmt::Continue],
             Stmt::If {
                 condition,
                 then_body,
@@ -42,11 +49,11 @@ impl IteratorLowerer {
                 condition,
                 then_body: then_body
                     .into_iter()
-                    .flat_map(|nested| Self::continue_with_advance(nested, cursor_name))
+                    .flat_map(|nested| self.continue_with_advance(nested, cursor_name))
                     .collect(),
                 else_body: else_body.map(|body| {
                     body.into_iter()
-                        .flat_map(|nested| Self::continue_with_advance(nested, cursor_name))
+                        .flat_map(|nested| self.continue_with_advance(nested, cursor_name))
                         .collect()
                 }),
             }],
@@ -58,7 +65,7 @@ impl IteratorLowerer {
                         arm.body = arm
                             .body
                             .into_iter()
-                            .flat_map(|nested| Self::continue_with_advance(nested, cursor_name))
+                            .flat_map(|nested| self.continue_with_advance(nested, cursor_name))
                             .collect();
                         arm
                     })
@@ -66,7 +73,7 @@ impl IteratorLowerer {
             }],
             Stmt::Unsafe(body) => vec![Stmt::Unsafe(
                 body.into_iter()
-                    .flat_map(|nested| Self::continue_with_advance(nested, cursor_name))
+                    .flat_map(|nested| self.continue_with_advance(nested, cursor_name))
                     .collect(),
             )],
             // A continue inside any nested loop targets that nested loop.
@@ -112,13 +119,13 @@ impl IteratorLowerer {
                     name: name.clone(),
                     mutable: false,
                     ty: None,
-                    init: make_call(cursor_ref.clone(), "value", vec![]),
+                    init: make_call(cursor_ref.clone(), &self.method("foreach_value","value"), vec![]),
                     defer: None,
                 }];
                 for nested in self.statement_list(body) {
-                    loop_body.extend(Self::continue_with_advance(nested, &cursor_name));
+                    loop_body.extend(self.continue_with_advance(nested, &cursor_name));
                 }
-                loop_body.push(Self::advance(&cursor_name));
+                loop_body.push(self.advance(&cursor_name));
 
                 let mut lowering = Vec::new();
                 if let Some(source) = source_definition {
@@ -129,20 +136,20 @@ impl IteratorLowerer {
                         name: end_name,
                         mutable: false,
                         ty: None,
-                        init: make_call(collection_ref.clone(), "end", vec![]),
+                        init: make_call(collection_ref.clone(), &self.method("foreach_end","end"), vec![]),
                         defer: None,
                     },
                     Stmt::Let {
                         name: cursor_name,
                         mutable: true,
                         ty: None,
-                        init: make_call(collection_ref, "begin", vec![]),
+                        init: make_call(collection_ref, &self.method("foreach_begin","begin"), vec![]),
                         defer: None,
                     },
                     Stmt::While {
                         condition: Expr::Unary(
                             UnaryOp::Not,
-                            Box::new(make_call(cursor_ref, "equals", vec![end_ref])),
+                            Box::new(make_call(cursor_ref, &self.method("foreach_equals","equals"), vec![end_ref])),
                         ),
                         body: loop_body,
                     },
@@ -225,9 +232,17 @@ impl IteratorLowerer {
 }
 
 pub fn desugar(program: &ast::Program) -> ast::Program {
-    ast::Program {
-        items: IteratorLowerer::default().items(&program.items),
+    // Meta is already checked by the surface pipeline. Standalone parser
+    // unit tests use the legacy names when there are no language items.
+    let mut lowerer=IteratorLowerer::default();
+    if let Ok(registry)=crate::meta::Registry::collect(program) {
+        for key in ["foreach_begin","foreach_end","foreach_equals","foreach_value","foreach_advance"] {
+            if let Some(method)=registry.protocol_method(key) {
+                lowerer.protocol.insert(key.into(),method.into());
+            }
+        }
     }
+    ast::Program {items: lowerer.items(&program.items)}
 }
 
 #[cfg(test)]
@@ -236,6 +251,13 @@ mod tests {
     use crate::grammar;
     fn desugared(source: &str) -> ast::Program {
         desugar(&grammar::ProgramParser::new().parse(source).unwrap())
+    }
+    #[test]
+    fn protocol_method_name_is_defined_in_nova() {
+        let program=desugared("#[meta_protocol(foreach_advance, advance)] trait Advance {fn advance(self:Self)->Self;} fn test()->i32 {for x in values {}return 0;}");
+        let debug=format!("{program:?}");
+        assert!(debug.contains("advance"),"{debug}");
+        assert!(!debug.contains("\"next\""),"{debug}");
     }
     #[test]
     fn foreach_uses_cursor_protocol_and_is_scoped() {

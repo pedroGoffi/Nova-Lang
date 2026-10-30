@@ -1,0 +1,14 @@
+# Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
+nova_view_043 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/nova_view_043 hash=7b2c169f673b14dd
+nova_view 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_view hash=fe4e5648bba2a93a
+std 0.20.0 builtin hash=4c716c1330b3f691
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/nova_view_043/src/main.nova hash=7b2c169f673b14dd
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_view/src/lib.nova hash=fe4e5648bba2a93a
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_view/src/escape.nova hash=d18639ff91cbdff8
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_view/src/html.nova hash=bcd04c93629337c6
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_view/src/template.nova hash=7e8ad9f85cbd7977
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_view/src/layout.nova hash=910e82410fd3e807
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_view/src/components.nova hash=85d7e56acdc71a8c
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_view/src/forms.nova hash=75bc7bb4207be111
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_view/src/table.nova hash=d136d6e6fe665fbb
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_view/src/theme.nova hash=9bee82673996b080

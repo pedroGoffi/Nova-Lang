@@ -1,0 +1,42 @@
+import std;
+import nova_view;
+
+fn main() -> i32 {
+    let encoded = nova_view::escape_html("<&>\"'");
+    if !encoded.equals("&lt;&amp;&gt;&quot;&#39;") { return 1; }
+
+    let html = nova_view::create();
+    if !html.open("div") { return 2; }
+    if !html.attr("title","< & \"") { return 3; }
+    html.text("Olá <Nova>!");
+    html.end();
+    let result = html.render();
+    if !result.equals("<div title=\"&lt; &amp; &quot;\">Olá &lt;Nova&gt;!</div>") {
+        return 4;
+    }
+
+    // Unsafe attribute names/URL schemes are rejected without side effects.
+    let safe = nova_view::create();
+    safe.open("a");
+    if safe.attr("onerror","alert(1)") { return 5; }
+    if safe.attr("href","javascript:alert(1)") { return 6; }
+    if !safe.attr("href","/users") { return 7; }
+    safe.text("Abrir");
+    safe.end();
+    let anchor = safe.render();
+    if !anchor.equals("<a href=\"/users\">Abrir</a>") { return 8; }
+
+    let vars = nova_view::context();
+    vars.set("name","<script>");
+    vars.set("name","A & B");
+    let page = nova_view::render("<h1>{{ name }}</h1>",&vars);
+    if !page.equals("<h1>A &amp; B</h1>") { return 9; }
+
+    let card = nova_view::components::card("Título",page.as_str());
+    let layout = nova_view::layout::page("Teste",card.as_str());
+    if !layout.contains("<title>Teste</title>") { return 10; }
+    if !layout.contains("<h1>A &amp; B</h1>") { return 11; }
+
+    println!("NovaView 0.43 OK");
+    return 0;
+}

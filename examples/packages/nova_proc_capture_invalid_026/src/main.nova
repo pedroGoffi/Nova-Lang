@@ -1,0 +1,11 @@
+#[comptime]
+#[proc_macro(capture)]
+fn capture(input: std::meta::MetaExpr) -> std::meta::MetaExpr {
+    // A new unbound identifier must never silently capture a caller local.
+    std::meta::variable("secret")
+}
+
+fn main() -> i32 {
+    let secret: i32 = 123;
+    capture!(0)
+}

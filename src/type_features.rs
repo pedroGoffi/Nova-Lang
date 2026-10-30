@@ -146,6 +146,12 @@ impl TypesAndTraits {
     }
     fn expression(&self, expression: &mut Expr, namespace: &str) -> Result<(), String> {
         match expression {
+            Expr::If { condition, then_body, else_body } => {
+                self.expression(condition,namespace)?;
+                self.statements(then_body,namespace)?;
+                self.statements(else_body,namespace)?;
+            }
+            Expr::Block(body) => self.statements(body,namespace)?,
             Expr::Lambda {
                 params,
                 result,
@@ -234,7 +240,7 @@ impl TypesAndTraits {
                 | Stmt::FieldSet { value, .. }
                 | Stmt::DerefSet { value, .. }
                 | Stmt::CompoundSet { value, .. }
-                | Stmt::Expr(value)
+                | Stmt::Expr(value) | Stmt::Tail(value)
                 | Stmt::Return(Some(value)) => self.expression(value, namespace)?,
                 Stmt::If {
                     condition,
@@ -541,6 +547,21 @@ impl TypesAndTraits {
         Ok(())
     }
 
+    fn validate_impl_coherence(&self, items: &[Item], namespace: &str, seen: &mut HashSet<String>) -> Result<(),String> {
+        for item in items {
+            match item {
+                Item::Public(x) => self.validate_impl_coherence(std::slice::from_ref(x.as_ref()),namespace,seen)?,
+                Item::Namespace{name,items} => self.validate_impl_coherence(items,&qualify(namespace,name),seen)?,
+                Item::Impl(x) => if let Some(name) = &x.trait_name {
+                    let (resolved,_) = lexical(&self.traits,namespace,name).ok_or_else(||format!("unknown trait '{name}'"))?;
+                    let key = format!("{resolved} for {namespace}::{:?}",x.target);
+                    if !seen.insert(key.clone()) {return Err(format!("error[NOVA-OP003]: overlapping impl {key}"));}
+                },
+                _ => {}
+            }
+        }
+        Ok(())
+    }
     fn validate_trait_graph(
         &self,
         name: &str,
@@ -560,6 +581,23 @@ impl TypesAndTraits {
             .traits
             .get(name)
             .ok_or_else(|| format!("unknown trait '{name}'"))?;
+        let mut operator_keys = HashSet::new();
+        for attribute in &definition.attributes {
+            if matches!(attribute.name.as_str(), "meta_attribute" | "meta_effect" | "meta_protocol" | "meta_derive" | "meta_derive_impl") {
+                continue; // Nova Meta validated these source declarations.
+            }
+            if attribute.name != "operator" || attribute.args.is_empty() {
+                return Err(format!("unknown or empty trait attribute on '{name}'"));
+            }
+            for key in &attribute.args {
+                if !ast::valid_operator_key(key) || !operator_keys.insert(key) {
+                    return Err(format!("invalid or duplicated operator '{key}' declared on trait '{name}'"));
+                }
+                if ast::operator_trait_method(definition,key).is_none() {
+                    return Err(format!("operator '{key}' on trait '{name}' has no corresponding method"));
+                }
+            }
+        }
         let mut declared = HashSet::new();
         for method in &definition.methods {
             if !declared.insert(&method.name) {
@@ -642,6 +680,20 @@ impl TypesAndTraits {
                         }
                         self.alias(ty, namespace)?;
                     }
+                    // `operator |(...)` is only an alias for the normal Nova
+                    // trait method named in the corresponding #[operator(bit_or)].
+                    // No separate runtime/operator implementation is created.
+                    for method in &mut transformed.methods {
+                        if let Some(key) = method.name.strip_prefix("__nova_op__") {
+                            let trait_name = block.trait_name.as_ref().ok_or_else(||
+                                format!("operator '{key}' requires `impl Trait for Type`"))?;
+                            let (_, (definition, _)) = lexical(&self.traits, namespace, trait_name)
+                                .ok_or_else(||format!("unknown operator trait '{trait_name}'"))?;
+                            method.name = ast::operator_trait_method(definition,key)
+                                .ok_or_else(||format!("trait '{trait_name}' does not bind #[operator({key})]"))?
+                                .to_string();
+                        }
+                    }
                     let bindings = transformed.associated_types.clone();
                     for method in &mut transformed.methods {
                         self.function(method, namespace)?;
@@ -709,6 +761,7 @@ pub fn lower(program: &ast::Program) -> Result<ast::Program, String> {
         let mut stack = vec![name.clone()];
         analyzer.type_ref(target, namespace, &mut stack)?;
     }
+    analyzer.validate_impl_coherence(&program.items,"",&mut HashSet::new())?;
     let mut completed = HashSet::new();
     for trait_name in analyzer.traits.keys() {
         analyzer.validate_trait_graph(trait_name, &mut Vec::new(), &mut completed)?;

@@ -1,0 +1,53 @@
+import std;
+import pg;
+
+fn main() -> i32 {
+
+    // Set NOVA_DATABASE_URL externally. Do not commit passwords into the repo.
+    let url = std::env::read("NOVA_DATABASE_URL");
+    if url.is_empty() {
+        eprintln!("Configure NOVA_DATABASE_URL para executar este exemplo.");
+        return 2;
+    }
+
+    let connection = pg::connect(url.as_str());
+    if !connection.is_connected() {
+        let error = connection.error();
+        eprintln!("Falha ao conectar: {}",error);
+        return 3;
+    }
+
+    let params = pg::parameters();
+    if !params.bind_i64(42) || !params.bind_text("Nova") {
+        eprintln!("Erro ao criar parametros");
+        return 4;
+    }
+    let rows = connection.query("SELECT $1::bigint AS id, $2::text AS name",&params);
+    if !rows.ok() {
+        let error = rows.error();
+        eprintln!("Erro SQL: {}",error);
+        return 5;
+    }
+    let id_column: i32 = rows.column("id");
+    let name_column: i32 = rows.column("name");
+    let name = rows.text(0,name_column);
+    let number: i64 = rows.i64_value(0,id_column).unwrap_or(-1);
+    println!("id={} nome={}",number,name);
+
+    // A SELECT segura, com identificadores validados e binds $N.
+    let mut q = pg::table("pg_class");
+    if !q.where_eq_text("relkind","r") || !q.order_by_asc("relname") || !q.limit(5) {
+        eprintln!("Falha ao montar consulta");
+        return 6;
+    }
+    // pg_class e uma view/tabela de catalogo acessivel sem migrations.
+    let list = q.get(&connection);
+    if !list.ok() {
+        let error = list.error();
+        eprintln!("Erro no Query Builder: {}",error);
+        return 7;
+    }
+    println!("Query Builder retornou {} tabelas",list.rows());
+    println!("Exemplo PostgreSQL concluido.");
+    return 0;
+}

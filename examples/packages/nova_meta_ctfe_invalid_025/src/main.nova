@@ -1,0 +1,6 @@
+struct Record { id: i64 }
+#[comptime_assert]
+fn record_must_have_two_fields() -> bool {
+    std::meta::field_count::<Record>() == 2
+}
+fn main() -> i32 { 0 }

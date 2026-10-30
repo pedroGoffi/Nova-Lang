@@ -1,0 +1,5 @@
+[package]
+name = "nova_char_027"
+version = "0.1.0"
+[dependencies]
+std = { builtin = "std" }

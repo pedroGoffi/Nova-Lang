@@ -1,0 +1,15 @@
+// One small stylesheet endpoint; all CSS lives outside controllers/views.
+use nexoframe::nova_web::nexo::request::Request;
+use nexoframe::nova_web::nexo::response::Response;
+
+pub fn stylesheet(req: Request, res: Response) -> i32 {
+    let css = std::string::from_text(
+        "*{box-sizing:border-box}body{margin:0;min-height:100vh;background:#f3f5f9;color:#17253d;font:16px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}"
+    );
+    css.push(".login-shell{min-height:100vh;display:grid;place-items:center;padding:24px}.login-card{width:min(100%,430px);background:#fff;padding:38px;border:1px solid #e6eaf1;border-radius:18px;box-shadow:0 16px 50px #13233d12}");
+    css.push("h1{font-size:28px;line-height:1.2;letter-spacing:-.6px;margin:12px 0}.eyebrow{color:#265bc3;font-size:12px;font-weight:800;letter-spacing:.12em}.subtitle,.note{color:#617089}.subtitle{margin-bottom:26px}.login-form{display:grid;gap:10px}");
+    css.push("label{font-size:14px;font-weight:650;margin-top:8px}input{width:100%;border:1px solid #cdd6e4;border-radius:9px;padding:13px;font:inherit;outline-color:#2d60ce}button{background:#285ac2;color:white;border:0;border-radius:9px;padding:13px 18px;font:inherit;font-weight:700;cursor:pointer;margin-top:15px}");
+    css.push("button:hover{background:#1c458f}a{display:inline-block;color:#285ac2;margin-top:20px}.note{font-size:12px;margin-top:24px}.error{color:#a52a3f;background:#fff0f2;border:1px solid #ffc5ce;border-radius:8px;padding:12px;font-size:14px}");
+    let response = res.type("text/css; charset=utf-8");
+    return response.send(css.as_str());
+}

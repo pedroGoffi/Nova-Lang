@@ -1,0 +1,8 @@
+[package]
+name = "nova_view_043"
+version = "0.1.0"
+entry = "src/main.nova"
+
+[dependencies]
+std = { builtin = "std" }
+nova_view = { path = "../../../packages/nova_view" }

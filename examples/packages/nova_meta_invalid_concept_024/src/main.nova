@@ -1,0 +1,6 @@
+concept HasId<T> = has_field<T,id>;
+#[meta_derive_impl(HasId)] trait Identifiable {
+    fn identifier(self:Self)->i64 {return self.id;}
+}
+#[derive(Identifiable)] struct NotIdentified {value:i64}
+fn main()->i32{return 0;}

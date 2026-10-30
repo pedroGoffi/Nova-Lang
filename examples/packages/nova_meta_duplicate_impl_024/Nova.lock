@@ -1,0 +1,4 @@
+# Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
+nova_meta_duplicate_impl_024 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/nova_meta_duplicate_impl_024 hash=5b4060607f0bf17e
+std 0.20.0 builtin hash=4c716c1330b3f691
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/nova_meta_duplicate_impl_024/src/main.nova hash=5b4060607f0bf17e

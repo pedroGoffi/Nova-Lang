@@ -1,0 +1,73 @@
+// Nova 0.50: minimal application using AST macros without custom compiler syntax.
+import std;
+import nexoframe;
+use nexoframe::nova_web::nexo::request::Request;
+use nexoframe::nova_web::nexo::response::Response;
+
+fn index(req: Request, res: Response) -> i32 {
+    let html = nexoframe::nova_web::nova_view::create();
+    html.open("main"); html.attr("class","nf-wrap");
+    let intro = nexoframe::ui::hero("NexoFrame · 0.50", "Build web apps in Nova",
+        "Macros tipadas, grupos de rotas, validação e componentes responsivos.");
+    html.raw(intro.as_str());
+    html.open("section"); html.attr("class","nf-metrics");
+    let a = nexoframe::ui::metric("Usuários","1.284","+12% no mês",true);
+    let b = nexoframe::ui::metric("Pedidos","386","+8% no mês",true);
+    let c = nexoframe::ui::metric("Pendências","7","Revisar",false);
+    html.raw(a.as_str()); html.raw(b.as_str()); html.raw(c.as_str());
+    html.end();
+    nexoframe::tag!(html,"h2","Últimas atividades");
+    let head = nexoframe::ui::table_head();
+    html.raw(head.as_str());
+    let row1 = nexoframe::ui::table_row("#1204","Novo cadastro","Ativo","success");
+    let row2 = nexoframe::ui::table_row("#1205","Revisão pendente","Pendente","warning");
+    html.raw(row1.as_str()); html.raw(row2.as_str());
+    html.raw(nexoframe::ui::table_end());
+    let action = nexoframe::ui::action("Testar validação","/validate?email=not-an-email",true);
+    html.open("p"); html.raw(action.as_str()); html.end();
+    html.end();
+    let content = html.render();
+    return nexoframe::page!(res,"NexoFrame · 0.50",content.as_str());
+}
+
+fn validate(req: Request, res: Response) -> i32 {
+    let name = req.query_value("name");
+    let email = req.query_value("email");
+    let errors = nexoframe::validation::errors();
+    nexoframe::required!(errors,"name",name.as_str());
+    nexoframe::email_required!(errors,"email",email.as_str());
+    if !errors.valid() { return nexoframe::invalid!(res,&errors); }
+    let payload = nexoframe::json::object();
+    nexoframe::json_bool!(payload,"ok",true);
+    nexoframe::json_str!(payload,"name",name.as_str());
+    nexoframe::json_str!(payload,"email",email.as_str());
+    return nexoframe::api!(res,&payload);
+}
+
+fn status(req: Request, res: Response) -> i32 {
+    let payload = nexoframe::json::object();
+    nexoframe::json_bool!(payload,"ok",true);
+    nexoframe::json_str!(payload,"framework","NexoFrame");
+    nexoframe::json_int!(payload,"features",20);
+    return nexoframe::api!(res,&payload);
+}
+
+fn css(req: Request, res: Response) -> i32 {
+    let sheet = nexoframe::ui::stylesheet();
+    let response = res.type("text/css; charset=utf-8");
+    return response.send(sheet.as_str());
+}
+
+fn main() -> i32 {
+    let app = nexoframe::create(7892) defer app.close();
+    if nexoframe::get!(&app,"/",index) != 0 { return 1; }
+    if nexoframe::get!(&app,"/assets/app.css",css) != 0 { return 1; }
+    let api = nexoframe::group!("/api");
+    if !api.valid() { return 2; }
+    if api.get(&app,"/status",status) != 0 { return 3; }
+    if api.get(&app,"/validate",validate) != 0 { return 4; }
+    if nexoframe::get!(&app,"/validate",validate) != 0 { return 5; }
+    println!("NexoFrame 0.50: http://127.0.0.1:7892");
+    if app.listen(0) < 0 { return 6; }
+    return 0;
+}

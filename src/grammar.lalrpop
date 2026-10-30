@@ -9,10 +9,14 @@ Item: Item = {
     //   #[derive(Clone)] pub struct X { ... }
     // Attributes apply to the declaration, and visibility wraps the item.
     "pub" <item:UnpublishedItem> => Item::Public(Box::new(item)),
-    <attributes:Attribute+> "pub" <s:StructDef> =>
-        Item::Public(Box::new(Item::Struct(Struct { attributes, ..s }))),
+    <attributes:Attribute+> "pub" <s:StructDef> => {
+        let mut flags=s.attributes.clone();flags.extend(attributes);
+        Item::Public(Box::new(Item::Struct(Struct { attributes:flags, ..s })))
+    },
     <attributes:Attribute+> "pub" <e:EnumDef> =>
         Item::Public(Box::new(Item::Enum(Enum { attributes, ..e }))),
+    <attributes:Attribute+> "pub" <t:TraitDef> =>
+        Item::Public(Box::new(Item::Trait(Trait {attributes,..t}))),
     <attributes:Attribute+> "pub" <f:FunctionBase> =>
         Item::Public(Box::new(Item::Function(Function { attributes, ..f }))),
     <attributes:Attribute+> "pub" <f:ExternFunctionBase> =>
@@ -20,7 +24,10 @@ Item: Item = {
     UnpublishedItem,
 };
 UnpublishedItem: Item = {
-    <attributes:Attribute*> <s:StructDef> => Item::Struct(Struct { attributes, ..s }),
+    <attributes:Attribute*> <s:StructDef> => {
+        let mut flags=s.attributes.clone();flags.extend(attributes);
+        Item::Struct(Struct { attributes:flags, ..s })
+    },
     <attributes:Attribute*> <e:EnumDef> => Item::Enum(Enum { attributes, ..e }),
     // Rust-style declarative rules: first matching AST fragment arm wins.
     "macro_rules" "!" <name:Ident> "{" <arms:MacroArmRule*> "}"
@@ -33,10 +40,8 @@ UnpublishedItem: Item = {
     "static_assert" "(" <predicate:ConceptOr> ")" ";" => Item::ConceptAssert(predicate),
     "concept" <name:Ident> "<" <generics:Comma<Ident>> ">" "=" <predicate:ConceptOr> ";"
         => Item::Concept(Concept {name,generics,predicate}),
-    "trait" <name:Ident> <restriction:TraitRestrictionRule?> <parents:TraitParents> "{" <associated_types:AssociatedTypeDecl*> <methods:TraitMethodRule*> "}"
-        => Item::Trait(Trait {name, restriction, parents, associated_types, methods}),
-    "trait" <restriction:TraitRestrictionRule> <name:Ident> <parents:TraitParents> "{" <associated_types:AssociatedTypeDecl*> <methods:TraitMethodRule*> "}"
-        => Item::Trait(Trait {name, restriction:Some(restriction), parents, associated_types, methods}),
+    <attributes:Attribute*> <t:TraitDef>
+        => Item::Trait(Trait {attributes,..t}),
     <f:Function> => Item::Function(f),
     <f:ExternFunction> => Item::Extern(f),
     "namespace" <name:MemberIdent> "{" <items:Item*> "}" => Item::Namespace {name,items},
@@ -48,6 +53,16 @@ UnpublishedItem: Item = {
     "mod" <at:@L> <name:MemberIdent> ";" => Item::Mod {name,at},
     "use" <at:@L> <path:Path> ";" => Item::Use {path,at},
 };
+
+// Traits carry their operator binding in source rather than in the Rust
+// compiler. #[operator(bit_or)] is metadata on the Nova trait declaration.
+TraitDef: Trait = {
+    "trait" <name:Ident> <restriction:TraitRestrictionRule?> <parents:TraitParents> "{" <associated_types:AssociatedTypeDecl*> <methods:TraitMethodRule*> "}"
+        => Trait {attributes:vec![],name,restriction,parents,associated_types,methods},
+    "trait" <restriction:TraitRestrictionRule> <name:Ident> <parents:TraitParents> "{" <associated_types:AssociatedTypeDecl*> <methods:TraitMethodRule*> "}"
+        => Trait {attributes:vec![],name,restriction:Some(restriction),parents,associated_types,methods},
+};
+
 // Typed fragments are parsed as actual AST nodes, not strings of source code.
 // Legacy `macro double(value)` continues to mean `value:expr`.
 // Arms are parsed directly as AST fragments, never token-string substitutions.
@@ -105,6 +120,12 @@ TraitMethodRule: TraitMethod = {
         => TraitMethod {name, params, result, default_body: Some(body)},
 };
 AttributeName: String = {
+    // `comptime` starts a function declaration but is also a valid marker
+    // attribute: `#[comptime]`. Keep it contextual (not a general Ident)
+    // to avoid changing expression/statement parse precedence.
+    "comptime" => "comptime".into(),
+    "operator" => "operator".into(),
+    "requires" => "requires".into(),
     "unsafe" => "unsafe".into(),
     "const" => "const".into(),
     // `async` is a keyword in function declarations, but remains valid as
@@ -112,9 +133,33 @@ AttributeName: String = {
     "async" => "async".into(),
     Ident,
 };
+// An attribute argument is metadata, not an expression. Some method and
+// protocol names (notably `next`) are reserved as expression prefixes, so
+// they cannot be parsed through Path/Ident. Accept them contextually here,
+// without broadening Ident and reintroducing LALRPOP ambiguities.
+MetaAttributeArgument: String = {
+    "struct" => "struct".into(),
+    "enum" => "enum".into(),
+    "trait" => "trait".into(),
+    "fn" => "function".into(),
+    MetaReservedArgument,
+    Path,
+};
+// Keep this list consistent with reserved member names in MemberIdent when
+// they are also valid metadata values, e.g. #[meta_protocol(advance, next)].
+MetaReservedArgument: String = {
+    "next" => "next".into(),
+    "finished" => "finished".into(),
+    "resume" => "resume".into(),
+    "join" => "join".into(),
+    "spawn" => "spawn".into(),
+    "dispose" => "dispose".into(),
+    "sync" => "sync".into(),
+    "scope" => "scope".into(),
+};
 Attribute: Attribute = {
     // Struct derives and legacy attributes.
-    "#" "[" <name:AttributeName> "(" <args:Comma<Ident>> ")" "]" => Attribute { name, args },
+    "#" "[" <name:AttributeName> "(" <args:Comma<MetaAttributeArgument>> ")" "]" => Attribute { name, args },
     // Marker attributes on functions (also accepted in Rust-style notation).
     "#" "[" <name:AttributeName> "]" => Attribute { name, args: vec![] },
     "[" "[" <name:AttributeName> "]" "]" => Attribute { name, args: vec![] },
@@ -162,6 +207,12 @@ RequireRule: Requirement = {
         => Requirement::Binary {left,operation:BinaryOp::Mul,right,result},
     "{" <left:Ident> "/" <right:Ident> "}" "->" <result:Type> ";"
         => Requirement::Binary {left,operation:BinaryOp::Div,right,result},
+    "{" <left:Ident> "|" <right:Ident> "}" "->" <result:Type> ";"
+        => Requirement::Binary {left,operation:BinaryOp::BitOr,right,result},
+    "{" <left:Ident> "&" <right:Ident> "}" "->" <result:Type> ";"
+        => Requirement::Binary {left,operation:BinaryOp::BitAnd,right,result},
+    "{" <left:Ident> "^" <right:Ident> "}" "->" <result:Type> ";"
+        => Requirement::Binary {left,operation:BinaryOp::BitXor,right,result},
 };
 ConceptUse: ConceptBound = {
     <name:Path> "<" <args:Comma<Type>> ">" => ConceptBound{name,args},
@@ -191,15 +242,61 @@ Generics: Vec<String> = {
     "<" <generics:Comma<Ident>> ">" => generics,
     => vec![],
 };
+// `with Trait1, Trait2` is Nova syntax for #[capabilities(...)]. Both
+// forms enter the same compile-time validation path; no LLVM flags exist.
+CapabilityClause: Vec<String> = {
+    "with" <traits:Comma<Path>> => traits,
+};
 StructDef: Struct = {
-    "struct" <name:Ident> <generics:Generics> <parent:Parent?> "{" <fields:Comma<Field>> "}"
-        => Struct { name, generics, fields, attributes: vec![], is_class: false, parent },
-    "class" <name:Ident> <generics:Generics> <parent:Parent?> "{" <fields:Comma<Field>> "}"
-        => Struct { name, generics, fields, attributes: vec![], is_class: true, parent },
+    "struct" <name:Ident> <generics:Generics> <flags:CapabilityClause?> <parent:Parent?> "{" <fields:Comma<Field>> "}"
+        => Struct { name, generics, fields,
+            attributes:flags.map(|args|vec![Attribute{name:"capabilities".into(),args}]).unwrap_or_default(),
+            is_class: false, parent },
+    "class" <name:Ident> <generics:Generics> <flags:CapabilityClause?> <parent:Parent?> "{" <fields:Comma<Field>> "}"
+        => Struct { name, generics, fields,
+            attributes:flags.map(|args|vec![Attribute{name:"capabilities".into(),args}]).unwrap_or_default(),
+            is_class: true, parent },
 };
 Parent: TypeRef = { ":" <base:Type> => base };
+
+// Syntactic sugar for a method in an explicit `impl Trait for Type`.
+// The trait's #[operator(...)] metadata decides the actual method name;
+// the symbol itself does not hard-code a method in the compiler.
+OperatorToken: String = {
+    "+" => "add".into(),
+    "-" => "sub".into(),
+    "*" => "mul".into(),
+    "/" => "div".into(),
+    "%" => "rem".into(),
+    "==" => "eq".into(),
+    "!=" => "ne".into(),
+    "<" => "lt".into(),
+    "<=" => "le".into(),
+    ">" => "gt".into(),
+    ">=" => "ge".into(),
+    "&" => "bit_and".into(),
+    "|" => "bit_or".into(),
+    "^" => "bit_xor".into(),
+    "<<" => "shift_left".into(),
+    ">>" => "shift_right".into(),
+};
+OperatorMethod: Function = {
+    "operator" <key:OperatorToken> "(" <params:Comma<FnParam>> ")" "->" <result:Type> <body:Block>
+        => {
+            let variadic=params.last().map(|(_,v)|*v).unwrap_or(false);
+            let params=params.into_iter().map(|(mut p,v)| {
+                if v && !variadic {p.name=format!("__nova_invalid_pack__{}",p.name);}
+                p
+            }).collect();
+            Function {mode:FunctionMode::Normal,name:format!("__nova_op__{key}"),
+                generics:vec![],concept_bounds:vec![],params,variadic,result,body,
+                is_virtual:false,is_override:false,attributes:vec![]}
+        },
+};
+
 // Modifiers apply only to methods. `override` requires a virtual ancestor.
 Method: Function = {
+    OperatorMethod,
     "virtual" <f:Function> => Function { is_virtual: true, ..f },
     "override" <f:Function> => Function { is_override: true, ..f },
     Function,
@@ -215,6 +312,7 @@ Variant: Variant = {
 Field: Field = { <name:MemberIdent> ":" <ty:Type> => Field { name, ty } };
 Function: Function = {
     "const" <f:FunctionBase> => Function { attributes:vec![Attribute{name:"const".into(),args:vec![]}],..f },
+    "comptime" <f:FunctionBase> => Function { attributes:vec![Attribute{name:"comptime".into(),args:vec![]}],..f },
     <attributes:Attribute+> <f:FunctionBase> => Function { attributes, ..f },
     FunctionBase,
 };
@@ -312,7 +410,16 @@ Path: String = {
         name
     },
 };
-Block: Vec<Stmt> = { "{" <body:Stmt*> "}" => body };
+// A block's final expression is the only expression without a semicolon.
+// Bare `if` statements remain statements, but an exhaustive final if/else
+// chain is converted into a value after parsing, avoiding an LALR(1)
+// competition between Stmt::If and Expr::If.
+Block: Vec<Stmt> = {
+    "{" <mut body:Stmt*> <tail:Expr?> "}" => {
+        if let Some(value) = tail { body.push(Stmt::Tail(value)); }
+        crate::ast::normalize_block_tail(body)
+    }
+};
 // Syntactic sugar: else if becomes a nested If inside the else block.
 // This preserves the existing AST/HIR/MIR representation and avoids an extra variant.
 ElseBlock: Vec<Stmt> = {
@@ -335,9 +442,9 @@ Stmt: Stmt = {
         condition:Expr::Var("__nova_macro_stmt_repeat_optional".into()),
         then_body:body, else_body:None
     },
-    "let" <mutability:"mut"?> <name:Ident> <ty:(":" <Type>)?> "=" <init:Expr> <defer:("defer" <Expr>)?> ";"
+    "let" <mutability:"mut"?> <name:Ident> <ty:(":" <Type>)?> "=" <init:ValueExpr> <defer:("defer" <Expr>)?> ";"
         => Stmt::Let { name, mutable: mutability.is_some(), ty: ty.filter(|t| *t != TypeRef::Named("auto".into())), init, defer },
-    "auto" <mutability:"mut"?> <name:Ident> "=" <init:Expr> <defer:("defer" <Expr>)?> ";"
+    "auto" <mutability:"mut"?> <name:Ident> "=" <init:ValueExpr> <defer:("defer" <Expr>)?> ";"
         => Stmt::Let { name, mutable: mutability.is_some(), ty: None, init, defer },
     "defer" <cleanup:Expr> ";" => Stmt::Defer(cleanup),
     "*" <name:Ident> "=" <value:Expr> ";" => Stmt::DerefSet{name,value},
@@ -349,7 +456,7 @@ Stmt: Stmt = {
     // are currently supported by the semantic lowering pipeline.
     <target:PostfixExpr> <op:AssignmentOp> <value:Expr> ";"
         => crate::ast::assignment_stmt(target, op, value),
-    "return" <value:Expr> ";" => Stmt::Return(Some(value)),
+    "return" <value:ValueExpr> ";" => Stmt::Return(Some(value)),
     "return" ";" => Stmt::Return(None),
     "if" <condition:Expr> <then_body:Block> <else_body:ElseBlock?>
         => Stmt::If { condition, then_body, else_body },
@@ -375,7 +482,7 @@ Stmt: Stmt = {
         condition: Expr::Bool(true), then_body: body, else_body: None
     },
     "unsafe" <body:Block> => Stmt::Unsafe(body),
-    "match" <value:Expr> "{" <arms:MatchArm*> "}"
+    "match" <value:Expr> "{" <arms:MatchArms> "}"
         => Stmt::Match { value, arms },
     <expression:Expr> ";" => Stmt::Expr(expression),
 };
@@ -388,9 +495,33 @@ AssignmentOp: Option<BinaryOp> = {
     "*=" => Some(BinaryOp::Mul),
     "/=" => Some(BinaryOp::Div),
     "%=" => Some(BinaryOp::Rem),
+    "&=" => Some(BinaryOp::BitAnd),
+    "|=" => Some(BinaryOp::BitOr),
+    "^=" => Some(BinaryOp::BitXor),
+    "<<=" => Some(BinaryOp::Shl),
+    ">>=" => Some(BinaryOp::Shr),
 };
 MatchArm: MatchArm = {
-    <pattern:Pattern> "=>" <body:Block> <_comma:","?> => MatchArm {pattern,body},
+    <pattern:Pattern> "=>" <body:Block> => MatchArm {pattern,body},
+};
+// Nova permits adjacent match arms without commas (as used in std::crypto),
+// comma-separated arms and an optional trailing comma.
+// Keep the comma outside MatchArm: an optional comma *inside* MatchArm
+// conflicts with reducing the arm in LALRPOP when the next token is a comma.
+// In this right-recursive list, the next token after a complete arm chooses
+// the comma branch, the adjacent-pattern branch, or the empty tail.
+MatchArms: Vec<MatchArm> = {
+    => vec![],
+    <head:MatchArm> "," <tail:MatchArms> => {
+        let mut output = vec![head];
+        output.extend(tail);
+        output
+    },
+    <head:MatchArm> <tail:MatchArms> => {
+        let mut output = vec![head];
+        output.extend(tail);
+        output
+    },
 };
 Pattern: Pattern = {
     <path:Path> "(" <bindings:Comma<Ident>> ")" => Pattern::Variant {path,bindings},
@@ -460,6 +591,24 @@ PostfixExpr: Expr = {
     <e:PostfixExpr> "[" <index:Expr> "]" => Expr::Index(Box::new(e),Box::new(index)),
     Atom,
 };
+// A value-producing if must have an else. Keep its starting keyword outside
+// Atom: otherwise "if" can begin both Stmt::If and an Expr at the tail of a
+// block, which produces a shift/reduce conflict in LALRPOP.
+IfValueElse: Vec<Stmt> = {
+    <body:Block> => body,
+    <nested:IfValue> => vec![Stmt::Tail(nested)],
+};
+IfValue: Expr = {
+    "if" <condition:Expr> <then_body:Block> "else" <else_body:IfValueElse>
+        => Expr::If { condition:Box::new(condition), then_body, else_body },
+};
+// Braced lexical blocks and if/else values can appear in value positions.
+// Ordinary expressions still use the existing precedence grammar.
+ValueExpr: Expr = {
+    IfValue,
+    <body:Block> => Expr::Block(body),
+    Expr,
+};
 Atom: Expr = {
     "resume" "(" <handle:Expr> "," <resume_value:Expr> ")"
         => Expr::Call("std::coro::native_resume".into(), vec![handle,resume_value]),
@@ -470,6 +619,10 @@ Atom: Expr = {
     "false" => Expr::Bool(false),
     "(" ")" => Expr::Unit,
     <s:r#""([^"\\]|\\.)*""#> => Expr::Str(s.to_string()),
+    // A Unicode character literal is distinct from a string. The surface
+    // pass decodes and validates escapes before lowering to a typed char.
+    <s:r#"'([^'\\]|\\.)*'"#> => Expr::Cast(
+        Box::new(Expr::Str(s.to_string())), TypeRef::Named("char".into())),
     "new" <name:Path> "<" <generics:Comma<Type>> ">" "{" <fields:Comma<FieldInit>> "}"
         => Expr::GenericStructInit(name,generics,fields),
     "new" <name:Path> "{" <fields:Comma<FieldInit>> "}"

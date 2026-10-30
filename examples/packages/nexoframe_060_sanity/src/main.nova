@@ -1,0 +1,53 @@
+// Regression: NexoFrame's public String must not be the nested NovaView String.
+// All returned values remain owned and support String methods and RAII drop.
+import std;
+import nexoframe;
+
+fn main() -> i32 {
+    let hero = nexoframe::ui::hero("Painel", "Olá <Nova>", "Bem-vindo");
+    if !hero.contains("&lt;Nova&gt;") { return 1; }
+
+    let feature = nexoframe::ui::feature("Código", "Seguro & tipado", "✦");
+    if !feature.contains("Seguro &amp; tipado") { return 2; }
+
+    let navigation = nexoframe::ui::nav_link("Início", "/", true);
+    if !navigation.contains("aria-current") { return 3; }
+
+    let alert = nexoframe::ui::alert("success", "Salvo", "Tudo certo");
+    if !alert.contains("nf-alert-success") { return 4; }
+
+    let metric = nexoframe::ui::metric("Receita", "R$ 42", "+5%", true);
+    if !metric.contains("nf-metric") { return 5; }
+
+    let pill = nexoframe::ui::pill("Ativo", "success");
+    if !pill.contains("is-success") { return 6; }
+
+    let action = nexoframe::ui::action("Abrir", "/users", true);
+    if !action.contains("/users") { return 7; }
+
+    let head = nexoframe::ui::table_head();
+    if !head.contains("<thead>") { return 8; }
+
+    let row = nexoframe::ui::table_row("Maria", "Conta", "Ativo", "success");
+    if !row.contains("Maria") { return 9; }
+
+    let empty = nexoframe::ui::empty_state("Sem dados", "Nada encontrado", "/");
+    if !empty.contains("Sem dados") { return 10; }
+
+    let card = nexoframe::ui::card("Título", "Descrição");
+    if !card.contains("nf-card") { return 11; }
+
+    let css = nexoframe::ui::stylesheet();
+    if !css.contains("nf-metric") { return 12; }
+
+    let errors = nexoframe::validation::errors();
+    let blank = errors.summary();
+    if !blank.equals("") { return 13; }
+    if errors.require("email", "") { return 14; }
+    let summary = errors.summary();
+    if !summary.contains("email") { return 15; }
+    if !summary.contains("Campo obrigatório") { return 16; }
+
+    println!("NexoFrame 0.60 ownership OK");
+    return 0;
+}

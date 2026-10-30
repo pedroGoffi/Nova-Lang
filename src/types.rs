@@ -8,11 +8,39 @@ pub type StructId = usize;
 pub enum Primitive {
     Unit,
     Bool,
+    Char,
     Signed(u8),
     Unsigned(u8),
     Float(u8),
     Str,
 }
+// Single source of truth for builtin scalar type names. A module named
+// `std::char` must never shadow the primitive `char` in type positions.
+const PRIMITIVE_TYPE_DEFINITIONS: &[(&str, Primitive)] = &[
+    ("()", Primitive::Unit),
+    ("bool", Primitive::Bool),
+    ("char", Primitive::Char),
+    ("i8", Primitive::Signed(8)),
+    ("i16", Primitive::Signed(16)),
+    ("i32", Primitive::Signed(32)),
+    ("i64", Primitive::Signed(64)),
+    ("u8", Primitive::Unsigned(8)),
+    ("u16", Primitive::Unsigned(16)),
+    ("u32", Primitive::Unsigned(32)),
+    ("u64", Primitive::Unsigned(64)),
+    ("isize", Primitive::Signed(64)),
+    ("usize", Primitive::Unsigned(64)),
+    ("f32", Primitive::Float(32)),
+    ("f64", Primitive::Float(64)),
+    ("str", Primitive::Str),
+];
+
+pub(crate) fn is_primitive_type_name(name: &str) -> bool {
+    PRIMITIVE_TYPE_DEFINITIONS
+        .iter()
+        .any(|(primitive_name, _)| *primitive_name == name)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeKind {
     Primitive(Primitive),
@@ -50,23 +78,7 @@ impl Types {
             names: HashMap::new(),
             structs: Vec::new(),
         };
-        for (name, prim) in [
-            ("()", Primitive::Unit),
-            ("bool", Primitive::Bool),
-            ("i8", Primitive::Signed(8)),
-            ("i16", Primitive::Signed(16)),
-            ("i32", Primitive::Signed(32)),
-            ("i64", Primitive::Signed(64)),
-            ("u8", Primitive::Unsigned(8)),
-            ("u16", Primitive::Unsigned(16)),
-            ("u32", Primitive::Unsigned(32)),
-            ("u64", Primitive::Unsigned(64)),
-            ("isize", Primitive::Signed(64)),
-            ("usize", Primitive::Unsigned(64)),
-            ("f32", Primitive::Float(32)),
-            ("f64", Primitive::Float(64)),
-            ("str", Primitive::Str),
-        ] {
+        for &(name, prim) in PRIMITIVE_TYPE_DEFINITIONS {
             let id = s.intern(TypeKind::Primitive(prim));
             s.names.insert(name.into(), id);
         }
@@ -91,6 +103,9 @@ impl Types {
     }
     pub fn primitive(&self, primitive: Primitive) -> TypeId {
         self.interned[&TypeKind::Primitive(primitive)]
+    }
+    pub fn character(&self) -> TypeId {
+        self.primitive(Primitive::Char)
     }
     pub fn boolean(&self) -> TypeId {
         self.primitive(Primitive::Bool)
@@ -191,6 +206,7 @@ impl Types {
             TypeKind::Primitive(p) => match p {
                 Primitive::Unit => "()".into(),
                 Primitive::Bool => "bool".into(),
+                Primitive::Char => "char".into(),
                 Primitive::Str => "str".into(),
                 Primitive::Signed(bits) => format!("i{bits}"),
                 Primitive::Unsigned(bits) => format!("u{bits}"),
@@ -224,6 +240,7 @@ impl Types {
             TypeKind::Primitive(p) => match p {
                 Primitive::Unit => "void".into(),
                 Primitive::Bool => "i1".into(),
+                Primitive::Char => "i32".into(),
                 Primitive::Signed(n) | Primitive::Unsigned(n) => format!("i{n}"),
                 Primitive::Float(32) => "float".into(),
                 Primitive::Float(_) => "double".into(),
@@ -252,6 +269,10 @@ impl Types {
     pub fn can_numeric_cast(&self, from: TypeId, to: TypeId) -> bool {
         from == to
             || (self.numeric(from) && self.numeric(to))
+            // Explicit code-point conversions; char itself never participates
+            // in integer arithmetic or implicit numeric promotion.
+            || (from == self.character() && self.integer(to).is_some())
+            || (to == self.character() && self.integer(from).is_some())
             || (matches!(self.kind(from), TypeKind::Function { .. })
                 && self.kind(to) == TypeKind::Primitive(Primitive::Unsigned(64)))
             || (self.kind(from) == TypeKind::Primitive(Primitive::Unsigned(64))

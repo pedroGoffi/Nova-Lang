@@ -1,4 +1,4 @@
 # Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
 stdlib_owners 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/stdlib_owners hash=75f154342396a7a8
-std 0.20.0 builtin hash=e9fbac7494a68486
+std 0.20.0 builtin hash=4c716c1330b3f691
 source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/packages/stdlib_owners/src/main.nova hash=75f154342396a7a8

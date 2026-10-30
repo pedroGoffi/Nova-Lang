@@ -1,0 +1,7 @@
+#[meta_derive_impl]
+trait Incomplete {
+    fn value(self:Self)->i64;
+}
+#[derive(Incomplete)]
+struct S {id:i64}
+fn main()->i32{return 0;}

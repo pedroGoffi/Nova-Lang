@@ -1,0 +1,7 @@
+[package]
+name = "nova_operator_missing_021"
+version = "0.1.0"
+entry = "src/main.nova"
+
+[dependencies]
+std = { builtin = "std" }
