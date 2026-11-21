@@ -9,7 +9,7 @@ pub type FunctionId = usize;
 pub type LocalId = usize;
 
 fn dyn_method_metadata(name: &str) -> Option<(String, String, usize)> {
-    let rest = name.strip_prefix("__nova_dyn__")?;
+    let rest = name.split_once("__nova_dyn__")?.1;
     let parts = rest.rsplitn(3, "__").collect::<Vec<_>>();
     let method = parts.first()?.to_string();
     let slot = parts.get(1)?.parse().ok()?;
@@ -1267,13 +1267,38 @@ fn unescape_string(raw: &str) -> Result<String, String> {
     Ok(out)
 }
 fn field_has_drop(types: &Types, ty: TypeId, signatures: &HashMap<String, Signature>) -> bool {
-    match types.kind(ty) {
-        TypeKind::Struct(id) => {
-            signatures.contains_key(&format!("{}__drop", types.structs[id].name))
+    fn visit(
+        types: &Types,
+        ty: TypeId,
+        signatures: &HashMap<String, Signature>,
+        seen: &mut std::collections::HashSet<StructId>,
+    ) -> bool {
+        match types.kind(ty) {
+            TypeKind::Struct(id) => {
+                // Keep match-payload ownership aligned with ownership.rs:
+                // classes are move-only even when they have no destructor.
+                if types.structs[id].is_class
+                    || signatures.contains_key(&format!("{}__drop", types.structs[id].name))
+                {
+                    return true;
+                }
+                if !seen.insert(id) {
+                    return false;
+                }
+                let owns_field = types.structs[id]
+                    .fields
+                    .iter()
+                    .any(|field| visit(types, field.ty, signatures, seen));
+                seen.remove(&id);
+                owns_field
+            }
+            TypeKind::Array { element, .. } => visit(types, element, signatures, seen),
+            _ => false,
         }
-        TypeKind::Array { element, .. } => field_has_drop(types, element, signatures),
-        _ => false,
     }
+
+    let mut seen = std::collections::HashSet::new();
+    visit(types, ty, signatures, &mut seen)
 }
 /// Build calls that dispose owned fields from last to first. The destructor's
 /// `self` is already consumed, so moving its fields is safe here.

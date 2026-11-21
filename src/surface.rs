@@ -248,10 +248,29 @@ fn replace_self_with_dyn(ty: &TypeRef, trait_name: &str) -> TypeRef {
         _ => ty.clone(),
     }
 }
+fn contains_associated_self_type(ty: &TypeRef) -> bool {
+    match ty {
+        TypeRef::Named(name) => name.starts_with("Self::"),
+        TypeRef::Applied(_, args) => args.iter().any(contains_associated_self_type),
+        TypeRef::Array(inner, _)
+        | TypeRef::Pointer { inner, .. }
+        | TypeRef::Reference { inner, .. } => contains_associated_self_type(inner),
+        TypeRef::Function { params, result } => params.iter().any(contains_associated_self_type)
+            || contains_associated_self_type(result),
+    }
+}
 fn dyn_methods_for_trait(trait_decl: &ast::Trait, namespace: &str) -> Vec<Item> {
     let trait_name = join(namespace, &trait_decl.name);
     let trait_key = ident(&trait_name);
-    trait_decl.methods.iter().enumerate().map(|(slot, method)| {
+    trait_decl.methods.iter().enumerate().filter_map(|(slot, method)| {
+        // Associated types require a binding such as dyn Iterator<Item=T>.
+        // Until that syntax exists, these methods are not object-safe and do
+        // not receive a callable vtable slot.
+        if contains_associated_self_type(&method.result)
+            || method.params.iter().any(|param| contains_associated_self_type(&param.ty))
+        {
+            return None;
+        }
         let name = format!("__nova_dyn__{trait_key}__{slot}__{}", method.name);
         let params = method.params.iter().map(|param| ast::Param {
             name: param.name.clone(),
@@ -260,7 +279,7 @@ fn dyn_methods_for_trait(trait_decl: &ast::Trait, namespace: &str) -> Vec<Item> 
             attributes: vec![],
         }).collect();
         let result = replace_self_with_dyn(&method.result, &trait_name);
-        Item::Function(ast::Function {
+        Some(Item::Function(ast::Function {
             mode: ast::FunctionMode::Normal,
             name,
             generics: vec![],
@@ -272,7 +291,7 @@ fn dyn_methods_for_trait(trait_decl: &ast::Trait, namespace: &str) -> Vec<Item> 
             is_virtual: false,
             is_override: false,
             attributes: vec![],
-        })
+        }))
     }).collect()
 }
 fn materialize_dyn_methods(items: &mut Vec<Item>, namespace: &str) {
@@ -280,8 +299,14 @@ fn materialize_dyn_methods(items: &mut Vec<Item>, namespace: &str) {
     for item in items.iter_mut() {
         match item {
             Item::Namespace { name, items } => materialize_dyn_methods(items, &join(namespace, name)),
-            Item::Public(inner) => if let Item::Trait(trait_decl) = inner.as_ref() {
-                generated.extend(dyn_methods_for_trait(trait_decl, namespace));
+            Item::Public(inner) => match inner.as_mut() {
+                Item::Trait(trait_decl) => {
+                    generated.extend(dyn_methods_for_trait(trait_decl, namespace));
+                }
+                Item::Namespace { name, items } => {
+                    materialize_dyn_methods(items, &join(namespace, name));
+                }
+                _ => {}
             },
             Item::Trait(trait_decl) => generated.extend(dyn_methods_for_trait(trait_decl, namespace)),
             _ => {}
@@ -1658,6 +1683,27 @@ impl Engine {
     ) -> Result<TypeRef, String> {
         match substitute(ty, subst) {
             TypeRef::Named(n) => {
+                if let Some(trait_name) = dyn_trait_name(&n) {
+                    // `use path::Trait` must canonicalize the trait inside a
+                    // dyn object too. Otherwise method lookup searches for a
+                    // short-name vtable while materialization generated one
+                    // for the fully-qualified trait identity.
+                    let imported = self.imports.iter().rev().find_map(|(scope, path)| {
+                        let visible = scope == ns
+                            || (!scope.is_empty() && ns.starts_with(&format!("{scope}::")));
+                        (visible && path.rsplit("::").next() == Some(trait_name))
+                            .then(|| path.clone())
+                    });
+                    let canonical = imported.unwrap_or_else(|| {
+                        let qualified = self.qualify(trait_name, ns);
+                        if qualified == trait_name && !trait_name.contains("::") && !ns.is_empty() {
+                            join(ns, trait_name)
+                        } else {
+                            qualified
+                        }
+                    });
+                    return Ok(TypeRef::Named(format!("dyn {canonical}")));
+                }
                 let q = self.qualify(&n, ns);
                 if self.structs.contains_key(&q) || self.enums.contains_key(&q) {
                     self.instantiate_type(&q, &[])
@@ -4018,6 +4064,9 @@ impl Engine {
                         let (function, result) = self.instantiate_function(&selected, &[], None)?;
                         return Ok((Expr::Call(function, actual), result));
                     }
+                    return Err(format!(
+                        "dynamic method '{name}' is not available for dyn {trait_name}"
+                    ));
                 }
                 // Generator/coroutine handles are represented as u64 during
                 // bootstrap. `dispose handle` is parsed as `.drop()`, but a
@@ -4142,7 +4191,11 @@ impl Engine {
                 candidates.sort();
                 let receiver_is_addressable = addressable_receiver(&base);
                 let mut selected=candidates.into_iter().find(|f| {
-                    let target=self.overload_base(f).rsplit_once("::").unwrap().0;
+                    // Free functions can share a method name. They are not
+                    // receiver candidates and must not crash method lookup.
+                    let Some((target, _)) = self.overload_base(f).rsplit_once("::") else {
+                        return false;
+                    };
                     let function=&self.funcs[f].decl;
                     let fixed=function.params.len()-usize::from(function.variadic);
                     let arity_matches=(function.variadic && args.len()+1>=fixed)

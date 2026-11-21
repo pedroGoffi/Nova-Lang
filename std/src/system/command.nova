@@ -1,9 +1,9 @@
-use std::abi::native::libc::stdio::fgets;
-use std::abi::native::libc::stdio::feof;
-use std::abi::native::libc::stdio::pclose;
-use std::abi::native::libc::stdio::popen;
-use std::abi::native::libc::stdlib::free;
-use std::abi::native::libc::stdlib::malloc;
+use std::abi::llvm::process_close;
+use std::abi::llvm::process_eof;
+use std::abi::llvm::process_open;
+use std::abi::llvm::process_read_line;
+use std::abi::llvm::heap_allocate;
+use std::abi::llvm::heap_free;
 use std::abi::native::libc::stdlib::system;
 use std::core;
 use std::core::types::Size;
@@ -17,12 +17,15 @@ use std::system::traits::ProcessControl;
 // host shell, just like C/C++ system(). Do not concatenate untrusted input.
 pub class Command { value: str, arguments: std::text::string::String }
 
-pub struct Output { status: ExitCode, stdout: std::text::string::String }
+pub struct Output { exit_status: ExitCode, captured_stdout: std::text::string::String }
 
 impl Output {
-    fn status(self: &Output) -> ExitCode { return ExitCode::new(self.status.value()); }
-    fn stdout(self: &Output) -> str { return self.stdout.as_str(); }
-    fn success(self: &Output) -> bool { return self.status.is_success(); }
+    fn status(self: &Output) -> ExitCode { return ExitCode::new(self.exit_status.value()); }
+    fn stdout(self: &Output) -> str { return self.captured_stdout.as_str(); }
+    fn success(self: &Output) -> bool { return self.exit_status.is_success(); }
+    // Marks Output as an owning aggregate. HIR then moves the complete enum
+    // payload out of Result and releases captured_stdout with the aggregate.
+    fn drop(self: Output) -> () { return; }
 }
 
 impl Command {
@@ -57,34 +60,65 @@ impl Command {
         return Ok(ExitCode::new((status >> 8) & 255));
     }
 
+    // Captures stdout into caller-owned storage. This form is useful when the
+    // caller wants to retain and process text without moving an owning Output
+    // payload out of Result.
+    fn output_into(self: &Command, destination: &mut std::text::string::String) -> Result<ExitCode,Error> {
+        let complete: std::text::string::String = self.shell_command();
+        let stream: Size = unsafe { process_open(complete.as_str(), "r") };
+        if stream == 0 {
+            return Err(Error::new(-1, "could not open command output"));
+        }
+
+        let buffer: Size = unsafe { heap_allocate(8, 4096) };
+        if buffer == 0 {
+            unsafe { process_close(stream); }
+            return Err(Error::new(-12, "could not allocate command output buffer"));
+        }
+
+        unsafe {
+            while process_eof(stream) == 0 {
+                let line: Size = process_read_line(buffer, 4096, stream);
+                if line == 0 { break; }
+                destination.append(core::borrow(buffer));
+            }
+        }
+
+        let raw_status: i32 = unsafe { process_close(stream) };
+        unsafe { heap_free(buffer); }
+        if raw_status < 0 { return Err(Error::new(raw_status, "could not wait for command")); }
+        if (raw_status & 127) != 0 {
+            return Err(Error::new(raw_status, "command terminated by signal"));
+        }
+        return Ok(ExitCode::new((raw_status >> 8) & 255));
+    }
+
     // Executes through the shell and captures stdout. Stderr remains attached
     // to the parent process, matching the usual popen("r") behavior.
     fn output(self: &Command) -> Result<Output,Error> {
         let complete: std::text::string::String = self.shell_command();
-        let stream: *mut u8 = unsafe { popen(complete.as_str(), "r") };
-        let stream_address: Size = unsafe { stream as Size };
-        if stream_address == 0 {
+        let stream: Size = unsafe { process_open(complete.as_str(), "r") };
+        if stream == 0 {
             return Err(Error::new(-1, "could not open command output"));
         }
 
-        let buffer: *mut u8 = unsafe { malloc(4096) };
-        let buffer_address: Size = unsafe { buffer as Size };
-        if buffer_address == 0 {
-            unsafe { pclose(stream); }
+        let buffer: Size = unsafe { heap_allocate(8, 4096) };
+        if buffer == 0 {
+            unsafe { process_close(stream); }
             return Err(Error::new(-12, "could not allocate command output buffer"));
         }
 
         let mut captured: std::text::string::String = String::new();
         unsafe {
-            while feof(stream) == 0 {
-                let line: *mut u8 = fgets(buffer, 4096, stream);
-                if (line as Size) == 0 { break; }
-                captured.append(core::borrow(buffer as Size));
+            while process_eof(stream) == 0 {
+                let line: Size = process_read_line(buffer, 4096, stream);
+                if line == 0 { break; }
+                captured.append(core::borrow(buffer));
             }
         }
 
-        let raw_status: i32 = unsafe { pclose(stream) };
-        unsafe { free(buffer); }
+        let raw_status: i32 = unsafe { process_close(stream) };
+        unsafe { heap_free(buffer); }
         if raw_status < 0 {
             return Err(Error::new(raw_status, "could not wait for command"));
         }
@@ -93,8 +127,8 @@ impl Command {
         }
 
         return Ok(new Output {
-            status: ExitCode::new((raw_status >> 8) & 255),
-            stdout: captured
+            exit_status: ExitCode::new((raw_status >> 8) & 255),
+            captured_stdout: captured
         });
     }
 }
@@ -107,6 +141,11 @@ impl ProcessControl for Command {
 }
 
 pub fn run(command: str) -> Result<ExitCode,Error> {
+    let command_value: Command = Command::new(command);
+    return command_value.status();
+}
+
+pub fn exec(command: str) -> Result<ExitCode,Error> {
     let command_value: Command = Command::new(command);
     return command_value.status();
 }

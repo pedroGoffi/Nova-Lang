@@ -52,7 +52,8 @@ struct Emitter<'a> {
 }
 fn dyn_name_part(value: &str) -> String { value.replace("::", "__") }
 fn dyn_method_info(name: &str) -> Option<(String, usize, String)> {
-    let rest = name.strip_prefix("__nova_dyn__")?;
+    // Namespaced traits prefix the generated slot with their module name.
+    let rest = name.split_once("__nova_dyn__")?.1;
     let parts = rest.rsplitn(3, "__").collect::<Vec<_>>();
     Some((parts.get(2)?.to_string(), parts.get(1)?.parse().ok()?, parts.first()?.to_string()))
 }
@@ -1485,7 +1486,12 @@ fn generate_impl(program: &mir::Program, live: Option<&std::collections::HashSet
     // Deduplicate declarations, including aliases imported by other packages.
     let mut llvm_builtin_decls = String::new();
     let mut llvm_intrinsics_seen = std::collections::HashSet::new();
-    let mut llvm_libc_declarations_seen = std::collections::HashSet::new();
+    // These are also emitted by legacy compiler intrinsics used by generated
+    // String/drop code. Keep them approved, but emit each ABI declaration once.
+    let mut llvm_libc_declarations_seen = std::collections::HashSet::from([
+        "aligned_alloc".to_owned(),
+        "free".to_owned(),
+    ]);
     for (id, f) in program.functions.iter().enumerate() {
         if !emit(id) { continue; }
         if let FunctionKind::LlvmIntrinsic(kind) = f.kind {

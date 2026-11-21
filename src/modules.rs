@@ -969,6 +969,20 @@ impl Index {
     ) -> Result<(), String> {
         match ty {
             TypeRef::Named(name) => {
+                // `dyn Trait` and `impl Trait` carry a type path inside their
+                // surface spelling. Resolve that inner path through `use`
+                // aliases just like an ordinary named type.
+                if let Some((prefix, trait_name)) = name
+                    .strip_prefix("dyn ")
+                    .map(|inner| ("dyn ", inner))
+                    .or_else(|| name.strip_prefix("impl ").map(|inner| ("impl ", inner)))
+                {
+                    let raw = trait_name.to_owned();
+                    let resolved = self.path(trait_name, scope, imports);
+                    self.ensure_visible(&resolved, scope, &raw)?;
+                    *name = format!("{prefix}{resolved}");
+                    return Ok(());
+                }
                 // Builtin scalar names are types, not relative module paths.
                 // In particular, inside `std::old::char` a `char` annotation and
                 // a character literal must not become `std::old::char` (the module).

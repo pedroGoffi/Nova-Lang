@@ -14,9 +14,10 @@ pub enum Intrinsic {
     NetSocket, NetSetSockOpt, NetBind, NetListen, NetAccept, NetRecv, NetSend,
     NetGetFlags, NetSetFlags, NetConnect, NetResolve, NetFreeAddresses, NetGetSockOpt, NetPoll, ReadFd, GetEnvAddress, BorrowText, GetRandom,
     AtomicLoad, AtomicStore, AtomicSwap, AtomicFetchAdd, AtomicFetchSub, AtomicFetchAnd, AtomicFetchOr, AtomicFetchXor, AtomicCompareExchange,
+    ProcessOpen, ProcessReadLine, ProcessEof, ProcessClose,
 }
 impl Intrinsic {
-    pub const ALL: [Self; 60] = [
+    pub const ALL: [Self; 64] = [
         Self::CopyBytes, Self::MoveBytes, Self::SetBytes, Self::Popcount64,
         Self::LeadingZeros64, Self::TrailingZeros64, Self::ByteSwap64,
         Self::ReverseBits64, Self::SqrtF64, Self::AbsF64, Self::FloorF64, Self::CeilF64,
@@ -30,6 +31,7 @@ impl Intrinsic {
         Self::NetConnect, Self::NetResolve, Self::NetFreeAddresses, Self::NetGetSockOpt, Self::NetPoll,
         Self::ReadFd, Self::GetEnvAddress, Self::BorrowText, Self::GetRandom,
         Self::AtomicLoad, Self::AtomicStore, Self::AtomicSwap, Self::AtomicFetchAdd, Self::AtomicFetchSub, Self::AtomicFetchAnd, Self::AtomicFetchOr, Self::AtomicFetchXor, Self::AtomicCompareExchange,
+        Self::ProcessOpen, Self::ProcessReadLine, Self::ProcessEof, Self::ProcessClose,
     ];
     pub fn from_name(name: &str) -> Option<Self> {
         // Surface lowering flattens std::abi::llvm::foo to std__abi__llvm__foo.
@@ -96,6 +98,10 @@ impl Intrinsic {
             "atomic_fetch_or_i64" => Some(Self::AtomicFetchOr),
             "atomic_fetch_xor_i64" => Some(Self::AtomicFetchXor),
             "atomic_compare_exchange_i64" => Some(Self::AtomicCompareExchange),
+            "process_open" => Some(Self::ProcessOpen),
+            "process_read_line" => Some(Self::ProcessReadLine),
+            "process_eof" => Some(Self::ProcessEof),
+            "process_close" => Some(Self::ProcessClose),
 
             _ => None,
         }
@@ -146,6 +152,10 @@ impl Intrinsic {
             Self::AtomicFetchOr => "atomic_fetch_or_i64",
             Self::AtomicFetchXor => "atomic_fetch_xor_i64",
             Self::AtomicCompareExchange => "atomic_compare_exchange_i64",
+            Self::ProcessOpen => "popen",
+            Self::ProcessReadLine => "fgets",
+            Self::ProcessEof => "feof",
+            Self::ProcessClose => "pclose",
 
         }
     }
@@ -199,6 +209,9 @@ impl Intrinsic {
             Self::AtomicSwap | Self::AtomicFetchAdd | Self::AtomicFetchSub |
             Self::AtomicFetchAnd | Self::AtomicFetchOr | Self::AtomicFetchXor => ("i64", &["ptr", "i64", "i32"]),
             Self::AtomicCompareExchange => ("i32", &["ptr", "i64", "i64", "i32", "i32"]),
+            Self::ProcessOpen => ("i64", &["ptr", "ptr"]),
+            Self::ProcessReadLine => ("i64", &["i64", "i32", "i64"]),
+            Self::ProcessEof | Self::ProcessClose => ("i32", &["i64"]),
         }
     }
     pub fn is_atomic(self) -> bool {
@@ -219,7 +232,8 @@ impl Intrinsic {
             Self::NetFreeAddresses | Self::NetGetSockOpt | Self::NetPoll | Self::ReadFd | Self::BorrowText | Self::GetRandom |
             Self::AtomicLoad | Self::AtomicStore | Self::AtomicSwap |
             Self::AtomicFetchAdd | Self::AtomicFetchSub | Self::AtomicFetchAnd |
-            Self::AtomicFetchOr | Self::AtomicFetchXor | Self::AtomicCompareExchange)
+            Self::AtomicFetchOr | Self::AtomicFetchXor | Self::AtomicCompareExchange |
+            Self::ProcessOpen | Self::ProcessReadLine | Self::ProcessEof | Self::ProcessClose)
     }
     pub fn declaration(self) -> &'static str {
         match self {
@@ -273,6 +287,10 @@ impl Intrinsic {
             Self::AtomicLoad | Self::AtomicStore | Self::AtomicSwap |
             Self::AtomicFetchAdd | Self::AtomicFetchSub | Self::AtomicFetchAnd |
             Self::AtomicFetchOr | Self::AtomicFetchXor | Self::AtomicCompareExchange => "",
+            Self::ProcessOpen => "declare ptr @popen(ptr, ptr)\n",
+            Self::ProcessReadLine => "declare ptr @fgets(ptr, i32, ptr)\n",
+            Self::ProcessEof => "declare i32 @feof(ptr)\n",
+            Self::ProcessClose => "declare i32 @pclose(ptr)\n",
         }
     }
     /// For a declared compiler intrinsic, synthesize its function definition.
@@ -394,6 +412,18 @@ impl Intrinsic {
             },
             Self::PointerOffset => {
                 return format!("define i64 @{symbol}({parameters}) {{\nentry:\n  %base = inttoptr i64 %arg0 to ptr\n  %result = getelementptr i8, ptr %base, i64 %arg1\n  %address = ptrtoint ptr %result to i64\n  ret i64 %address\n}}\n\n");
+            },
+            Self::ProcessOpen => {
+                return format!("define i64 @{symbol}({parameters}) {{\nentry:\n  %stream = call ptr @popen(ptr %arg0, ptr %arg1)\n  %address = ptrtoint ptr %stream to i64\n  ret i64 %address\n}}\n\n");
+            },
+            Self::ProcessReadLine => {
+                return format!("define i64 @{symbol}({parameters}) {{\nentry:\n  %destination = inttoptr i64 %arg0 to ptr\n  %stream = inttoptr i64 %arg2 to ptr\n  %line = call ptr @fgets(ptr %destination, i32 %arg1, ptr %stream)\n  %address = ptrtoint ptr %line to i64\n  ret i64 %address\n}}\n\n");
+            },
+            Self::ProcessEof => {
+                return format!("define i32 @{symbol}({parameters}) {{\nentry:\n  %stream = inttoptr i64 %arg0 to ptr\n  %status = call i32 @feof(ptr %stream)\n  ret i32 %status\n}}\n\n");
+            },
+            Self::ProcessClose => {
+                return format!("define i32 @{symbol}({parameters}) {{\nentry:\n  %stream = inttoptr i64 %arg0 to ptr\n  %status = call i32 @pclose(ptr %stream)\n  ret i32 %status\n}}\n\n");
             },
         };
         if self == Self::HeapAllocate {

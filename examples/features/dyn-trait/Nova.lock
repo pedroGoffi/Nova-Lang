@@ -1,4 +1,4 @@
 # Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
 dyn_trait 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/features/dyn-trait hash=6b0bcf21df65d3ad
-std 0.20.0 builtin hash=99a226b8e30e7093
+std 0.20.0 builtin hash=079f80b606df7d6e
 source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/features/dyn-trait/src/main.nova hash=6b0bcf21df65d3ad
