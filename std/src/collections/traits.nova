@@ -1,0 +1,8 @@
+use std::core::types::Size;
+
+pub trait Collection {
+    fn len(self: &Self) -> Size;
+    fn is_empty(self: &Self) -> bool;
+}
+
+pub concept CollectionLike<T> = implements<T,Collection>;

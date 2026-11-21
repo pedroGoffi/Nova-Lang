@@ -1,0 +1,7 @@
+use std::iter::traits::Iterator;
+
+pub class Empty<T> {}
+impl<T> Empty<T> {
+    static fn new() -> Self { return new Empty<T> {}; }
+    fn has_next(self: &Empty<T>) -> bool { return false; }
+}

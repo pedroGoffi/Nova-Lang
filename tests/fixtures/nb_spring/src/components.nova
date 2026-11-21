@@ -1,0 +1,54 @@
+use NB::*;
+pub fn record(event:str)->() {
+    let path=std::env::read("NB_LIFECYCLE_LOG");if path.is_empty() {return;}
+    let content=std::string::new_string();
+    if std::fs::exists(path.as_str()) {let previous=std::fs::read_string(path.as_str());content.push(previous.as_str());}
+    content.push(event);content.push("\n");std::fs::write_text(path.as_str(),content.as_str());return;
+}
+@Repository(name="counter")
+pub class Counter { value:i64=0 }
+impl Counter {
+    @PostConstruct fn initialize(self:&mut Self)->() {self.value=41;record("counter.init");return;}
+    @PreDestroy fn cleanup(self:&mut Self)->() {record("counter.destroy");return;}
+    fn read(self:&Self)->i64 {return self.value;}
+    fn increment(self:&mut Self)->i64 {self.value+=1;return self.value;}
+}
+@Service
+pub class CountingService {
+    counter:@Autowired @Qualifier("counter") NB::context::Bean<Counter>,
+    label:@Value("${nb.test.label:Nova}") std::string::String,
+    enabled:@Value("${nb.test.enabled:true}") bool
+}
+impl CountingService {
+    @PostConstruct fn initialize(self:&Self)->() {record("service.init");return;}
+    @PreDestroy fn cleanup(self:&Self)->() {record("service.destroy");return;}
+    fn count(self:&Self)->i64 {return self.counter.with(Counter::read);}
+    fn label_copy(self:&Self)->std::string::String {return self.label.clone();}
+    fn enabled(self:&Self)->bool {return self.enabled;}
+}
+@Configuration
+pub class Settings {}
+impl Settings {
+    @HealthIndicator("database") static fn database()->NB::health::HealthResult {return NB::health::Health::down("offline\"\n");}
+    @Bean @Primary static fn answer()->i64 {return 42;}
+    @Bean static fn alternative()->i64 {return 7;}
+}
+@Component(scope="prototype")
+pub class Transient {value:i64=1}
+impl Transient {
+    @PostConstruct fn initialize(self:&mut Self)->() {record("prototype.init");return;}
+    @PreDestroy fn cleanup(self:&Self)->() {record("prototype.destroy");return;}
+    fn read(self:&Self)->i64 {return self.value;}
+}
+@RestController(path="/spring")
+pub class CounterController {service:@Autowired NB::context::Bean<CountingService>}
+impl CounterController {
+    @PostConstruct fn initialize(self:&Self)->() {record("controller.init");return;}
+    @PreDestroy fn cleanup(self:&Self)->() {record("controller.destroy");return;}
+    @GetMapping("/value")
+    fn value(self:&Self,response:&NB::http::Response,request:&NB::http::Request)->() {
+        let value=self.service.with(CountingService::count);
+        let label=self.service.with(CountingService::label_copy);
+        let output=format!("{}:{}",label.as_str(),value);response.text(output.as_str());return;
+    }
+}

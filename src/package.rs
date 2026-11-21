@@ -16,6 +16,7 @@ struct Manifest {
     name: String,
     version: String,
     entry: String,
+    main: Option<String>,
     deps: Vec<(String, String)>,
 }
 fn value(raw: &str) -> Result<String, String> {
@@ -60,7 +61,7 @@ fn manifest(root: &Path) -> Result<Manifest, String> {
         let raw_value = raw_value.trim();
         match section.as_str() {
             "package" => {
-                if !["name", "version", "entry"].contains(&key) {
+                if !["name", "version", "entry", "main"].contains(&key) {
                     return Err(format!("unknown [package] key '{key}'"));
                 }
                 if package.insert(key.to_string(), value(raw_value)?).is_some() {
@@ -116,10 +117,12 @@ fn manifest(root: &Path) -> Result<Manifest, String> {
         return Err("package version cannot be empty".into());
     }
     let entry = package.remove("entry").unwrap_or("src/main.nova".into());
+    let main = package.remove("main");
     Ok(Manifest {
         name,
         version,
         entry,
+        main,
         deps,
     })
 }
@@ -131,6 +134,72 @@ fn fingerprint(data: &str) -> String {
     }
     format!("{hash:016x}")
 }
+
+fn imported_name(path: &str) -> &str {
+    path.split("::").next().unwrap_or(path)
+}
+
+/// Resolve an `import foo;` against configured Nova module roots. A root may
+/// point at a package directory, a `src` directory, or a flat module tree.
+/// This keeps the manifest focused on build metadata while imports describe
+/// the source graph, like Go package imports.
+fn search_import(loader: &Loader, name: &str) -> Option<(PathBuf, PathBuf)> {
+    for root in &loader.search_paths {
+        let package = root.join(name);
+        let candidates = [
+            (package.join("src/lib.nova"), package.clone()),
+            (package.join("src/main.nova"), package.clone()),
+            (package.join("lib.nova"), package.clone()),
+            (package.join("main.nova"), package.clone()),
+            (root.join(format!("{name}.nova")), root.clone()),
+            (root.join(name).join("mod.nova"), root.clone()),
+        ];
+        if let Some((file, package_root)) = candidates
+            .into_iter()
+            .find(|(file, _)| crate::editor_overlay::exists(file))
+        {
+            return Some((file, package_root));
+        }
+    }
+    None
+}
+
+fn load_search_imports(
+    items: &mut Vec<Item>,
+    loader: &mut Loader,
+) -> Result<(), String> {
+    let imports = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Import(path) => Some(path.clone()),
+            Item::Public(inner) => match inner.as_ref() {
+                Item::Import(path) => Some(path.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut loaded = HashSet::new();
+    for path in imports {
+        let name = imported_name(&path);
+        if name == "std" || !loaded.insert(name.to_owned()) {
+            continue;
+        }
+        let Some((file, package_root)) = search_import(loader, name) else {
+            continue;
+        };
+        let children = loader.load_file(&file, &package_root, name)?;
+        items.insert(
+            0,
+            Item::Namespace {
+                name: name.to_owned(),
+                items: children,
+            },
+        );
+    }
+    Ok(())
+}
+
 fn recursive(
     root: &Path,
     active: &mut HashSet<PathBuf>,
@@ -157,7 +226,8 @@ fn recursive(
     }
     let source = crate::editor_overlay::read_to_string(&source_path)
         .map_err(|e| format!("{}: {e}", source_path.display()))?;
-    let items = loader.load_file(&source_path, &root, scope)?;
+    let mut items = loader.load_file(&source_path, &root, scope)?;
+    load_search_imports(&mut items, loader)?;
     let mut ast = ast::Program { items };
     lock.push(format!(
         "{} {} path={} hash={}",
@@ -225,17 +295,37 @@ fn recursive(
 
 /// The same loader is used for standalone sources, manifests, and tests.
 pub fn load_detailed(path: &Path) -> Result<(ast::Program, Vec<SourceFile>), String> {
+    load_detailed_with_paths(path, &[])
+}
+
+/// Load a package while allowing module/package roots outside Nova.toml.
+/// `NOVA_PATH` follows the usual platform convention (`:` on Unix, `;` on
+/// Windows); explicit CLI paths are appended and take precedence.
+pub fn load_detailed_with_paths(
+    path: &Path,
+    module_paths: &[PathBuf],
+) -> Result<(ast::Program, Vec<SourceFile>), String> {
     let mut loader = Loader::default();
+    let mut search_paths = module_paths.to_vec();
+    if let Some(raw) = std::env::var_os("NOVA_PATH") {
+        search_paths.extend(std::env::split_paths(&raw));
+    }
+    loader.search_paths = search_paths
+        .into_iter()
+        .filter_map(|p| p.canonicalize().ok())
+        .collect();
     if crate::editor_overlay::exists(path) && path.extension().is_some_and(|ext| ext == "nova") {
         let root = crate::editor_overlay::normalized_path(path)
             .map_err(|e| e.to_string())?
             .parent()
             .ok_or("source has no parent")?
             .to_owned();
-        let items = loader.load_file(path, &root, "")?;
+        let mut items = loader.load_file(path, &root, "")?;
+        load_search_imports(&mut items, &mut loader)?;
         let linked = modules::link(ast::Program { items }, &loader)?;
         return Ok((linked, loader.sources));
     }
+    let selected_main = manifest(path)?.main;
     let mut lock =
         vec!["# Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)".into()];
     let mut use_std = false;
@@ -270,6 +360,10 @@ pub fn load_detailed(path: &Path) -> Result<(ast::Program, Vec<SourceFile>), Str
         );
     }
     let program = modules::link(program, &loader)?;
+    let program = match selected_main {
+        Some(method) => crate::entrypoint::generate(&program, &method)?,
+        None => program,
+    };
     for source in &loader.sources {
         if !source.path.starts_with('<') {
             lock.push(format!(
@@ -300,7 +394,7 @@ pub fn new(name: &str) -> Result<(), String> {
     }
     fs::create_dir_all(root.join("src")).map_err(|e| e.to_string())?;
     fs::write(root.join("Nova.toml"),format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nentry = \"src/main.nova\"\n\n[dependencies]\nstd = {{ builtin = \"std\" }}\n")).map_err(|e|e.to_string())?;
-    fs::write(root.join("src/main.nova"),"fn main() -> i32 {\n    std::io::native_println(\"Hello from Nova!\");\n    return 0;\n}\n").map_err(|e|e.to_string())?;
+    fs::write(root.join("src/main.nova"),"fn main() -> i32 {\n    std::old::io::println(\"Hello from Nova!\");\n    return 0;\n}\n").map_err(|e|e.to_string())?;
     println!("Created Nova package '{name}'");
     Ok(())
 }

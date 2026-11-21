@@ -1,0 +1,6 @@
+use std::core::types::Size;
+pub class BinaryReader { data: *const u8, length: Size, position: Size }
+impl BinaryReader {
+    [[unsafe]] static fn from_raw(data: *const u8, length: Size) -> Self { return new BinaryReader { data: data, length: length, position: 0 }; }
+    fn remaining(self: &BinaryReader) -> Size { return self.length - self.position; }
+}

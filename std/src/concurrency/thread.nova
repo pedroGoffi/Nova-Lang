@@ -1,0 +1,11 @@
+use std::abi::llvm::thread_start;
+use std::abi::llvm::thread_join;
+pub class Thread { identifier: i64 }
+impl Thread {
+    [[unsafe]] static fn start(callback: fn() -> ()) -> Thread {
+        let mut identifier: i64 = 0;
+        unsafe { thread_start(callback, &mut identifier as (*mut i64)); }
+        return new Thread { identifier: identifier };
+    }
+    fn join(self: &Thread) -> i32 { unsafe { return thread_join(self.identifier as u64); } }
+}

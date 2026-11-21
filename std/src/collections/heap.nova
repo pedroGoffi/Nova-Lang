@@ -1,0 +1,16 @@
+use std::collections::vec::Vec;
+use std::core::types::Size;
+use std::collections::traits::Collection;
+pub class MinHeap<T> { values: Vec<T> }
+impl<T> MinHeap<T> {
+    static fn new() -> Self { return new MinHeap<T> { values: Vec::new() }; }
+    fn len(self: &MinHeap<T>) -> Size { return self.values.len(); }
+    fn is_empty(self: &MinHeap<T>) -> bool { return self.values.is_empty(); }
+    fn push(self: &MinHeap<T>, value: T) -> () { self.values.push(value); return; }
+    fn pop(self: &MinHeap<T>) -> T { return self.values.pop(); }
+}
+
+impl<T> Collection for MinHeap<T> {
+    fn len(self: &MinHeap<T>) -> Size { return self.len(); }
+    fn is_empty(self: &MinHeap<T>) -> bool { return self.is_empty(); }
+}

@@ -1,0 +1,46 @@
+// Compiler-backed operations exposed with Nova names.
+// The facade stays stable at std::core; each primitive family has its own
+// module for methods and policies.
+use std::core::types::Size;
+use std::core::types::Word;
+
+pub mod types;
+pub mod value;
+pub mod control;
+pub mod option;
+pub mod prelude;
+pub mod integer;
+pub mod float;
+pub mod boolean;
+pub mod pointer;
+pub mod text;
+pub mod panic;
+
+pub fn copy(destination: *mut u8, source: *const u8, count: Size) -> () {
+    unsafe { __nova_internal_copy_bytes(destination as Size, source as Size, count); }
+    return;
+}
+pub fn move(destination: *mut u8, source: *const u8, count: Size) -> () {
+    unsafe { __nova_internal_move_bytes(destination as Size, source as Size, count); }
+    return;
+}
+pub fn fill(destination: *mut u8, value: u8, count: Size) -> () {
+    unsafe { __nova_internal_set_bytes(destination as Size, value, count); }
+    return;
+}
+pub fn text_size(value: str) -> Size { return __nova_internal_text_length(value); }
+pub fn address(value: str) -> Word { return __nova_internal_text_address(value); }
+pub fn load(address: Word) -> u8 { unsafe { return __nova_internal_load_byte(address); } }
+pub fn offset(address: Word, count: Size) -> Word {
+    let pointer: *mut u8 = unsafe { address as (*mut u8) };
+    return unsafe { byte_offset(pointer, count) as Word };
+}
+pub fn borrow(address: Word) -> str { unsafe { return __nova_internal_borrow_text(address); } }
+
+[[unsafe]] pub fn allocate(alignment: Size, size: Size) -> Word {
+    unsafe { return __nova_internal_heap_allocate(alignment, size); }
+}
+[[unsafe]] pub fn deallocate(address: Word) -> () {
+    unsafe { __nova_internal_heap_free(address); }
+    return;
+}

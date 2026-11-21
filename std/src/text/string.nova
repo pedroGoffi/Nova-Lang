@@ -1,0 +1,118 @@
+use std::core;
+use std::memory::raw;
+use std::text::text::Text;
+use std::core::types::Size;
+use std::core::value::Clone;
+use std::core::value::Display;
+use std::serialization::traits::Serialize;
+use std::serialization::traits::Deserialize;
+use std::text::traits::Appendable;
+use std::text::traits::TextLike;
+
+pub class String : std::text::text::Text {}
+
+impl String {
+    static fn new() -> String { return new std::text::string::String {}; }
+    static fn with_capacity(bytes: Size) -> Self {
+        let mut result: String = String::new();
+        result.reserve(bytes);
+        return result;
+    }
+    static fn from(value: str) -> Self {
+        let mut result: String = String::new();
+        result.append(value);
+        return result;
+    }
+    fn append(self: &mut String, value: str) -> () {
+        let count: Size = core::text_size(value);
+        if self.length + count + 1 > self.capacity {
+            let mut target: Size = self.capacity;
+            if target == 0 { target = 8; }
+            while target < self.length + count + 1 { target *= 2; }
+            unsafe { self.data = raw::reallocate_elements::<u8>(self.data, self.capacity, target); }
+            self.capacity = target;
+        }
+        unsafe {
+            core::copy(raw::element_at::<u8>(self.data, self.length),
+                core::address(value) as (*const u8), count);
+            self.length += count;
+            let terminator: *mut u8 = raw::element_at::<u8>(self.data, self.length);
+            *terminator = 0;
+        }
+        return;
+    }
+    fn as_str(self: &String) -> str {
+        if self.capacity == 0 { return ""; }
+        return unsafe { core::borrow(self.data as Size) };
+    }
+    // Consuming overload used by expressions such as
+    // `writer.write_line(format!("...").as_str())`. The temporary remains
+    // usable for the enclosing call. Copying also keeps the view valid after
+    // the consumed String is dropped by the expression lowering.
+    fn as_str(self: String) -> str {
+        if self.capacity == 0 { return ""; }
+        let copy: *mut u8 = unsafe { raw::alloc_elements::<u8>(self.length + 1) };
+        unsafe { core::copy(copy, self.data as (*const u8), self.length + 1); }
+        return unsafe { core::borrow(copy as Size) };
+    }
+    fn len(self: &String) -> Size { return self.length; }
+    fn byte_at(self: &String, index: Size) -> u8 {
+        if index >= self.length { return 0; }
+        unsafe { return *raw::element_at::<u8>(self.data, index); }
+    }
+    fn backspace(self: &mut String) -> () {
+        if self.length == 0 { return; }
+        self.length -= 1;
+        unsafe {
+            let terminator: *mut u8 = raw::element_at::<u8>(self.data, self.length);
+            *terminator = 0;
+        }
+        return;
+    }
+    fn is_empty(self: &String) -> bool { return self.length == 0; }
+    fn clone(self: &String) -> String { return String::from(self.as_str()); }
+    fn to_string(self: &String) -> str { return self.as_str(); }
+    fn drop(self: String) -> () {
+        unsafe { raw::deallocate_bytes(self.data); }
+        return;
+    }
+}
+
+impl TextLike for String {
+    fn as_str(self: &String) -> str { return self.as_str(); }
+    fn len(self: &String) -> Size { return self.len(); }
+    fn is_empty(self: &String) -> bool { return self.is_empty(); }
+}
+
+impl Appendable for String {
+    fn append(self: &mut String, value: str) -> () { self.append(value); return; }
+}
+
+pub fn new_string() -> String { return String::new(); }
+pub fn from_text(value: str) -> String { return String::from(value); }
+pub fn owned_text(value: str) -> impl TextLike { return String::from(value); }
+pub fn text_length(value: str) -> Size { return core::text_size(value); }
+
+// Compiler lowering helpers for format!. They are ordinary std functions;
+// format! only selects them according to the statically known value type.
+pub fn format_add_text(base: String, value: str) -> String {
+    let mut result: String = base;
+    result.append(value);
+    return result;
+}
+
+impl Clone for String {
+    fn clone(self: &String) -> String { return self.clone(); }
+}
+
+impl Display for String {
+    fn to_string(self: &String) -> str { return self.as_str(); }
+}
+
+impl Serialize for String {
+    fn serialize(self: &String) -> str { return self.as_str(); }
+}
+
+impl Deserialize for String {
+    static fn deserialize(value: str) -> String { return String::from(value); }
+}

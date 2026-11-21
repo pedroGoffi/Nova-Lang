@@ -1,0 +1,19 @@
+use std::platform::sdl2;
+
+pub trait Widget {
+    fn draw(self: &Self, renderer: &sdl2::Renderer) -> ();
+}
+
+pub trait EventHandler {
+    fn handle(self: &Self, event: u32) -> bool;
+}
+
+pub trait Editable {
+    fn insert(self: &mut Self, value: str) -> ();
+    fn erase(self: &mut Self) -> ();
+}
+
+pub trait RendererBackend {
+    fn clear(self: &Self, red: u8, green: u8, blue: u8, alpha: u8) -> ();
+    fn present(self: &Self) -> ();
+}

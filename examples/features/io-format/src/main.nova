@@ -1,0 +1,9 @@
+import std;
+use std::io;
+
+fn main() -> i32 {
+    // read obtains input; format builds a string and write_line sends it out.
+    let input = io::stdin().read();
+    io::stdout().write_line(format!("read {input}").as_str());
+    return 0;
+}

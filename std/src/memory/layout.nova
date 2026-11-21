@@ -1,0 +1,24 @@
+use std::core::types::Size;
+use std::error::error::Error;
+use std::error::result::Result;
+
+pub struct Layout { size: Size, alignment: Size }
+
+impl Layout {
+    static fn try_new(size: Size, alignment: Size) -> Result<Layout,Error> {
+        if alignment == 0 || (alignment & (alignment - 1)) != 0 {
+            return Err(Error::new(-22, "alignment must be a power of two"));
+        }
+        let padding: Size = alignment - 1;
+        if size > (-1 as Size) - padding {
+            return Err(Error::new(-75, "allocation layout size overflow"));
+        }
+        return Ok(new Layout { size: size, alignment: alignment });
+    }
+    fn size(self: &Layout) -> Size { return self.size; }
+    fn alignment(self: &Layout) -> Size { return self.alignment; }
+}
+
+pub fn layout_of<T>() -> Result<Layout,Error> {
+    return Layout::try_new(size_of::<T>(), align_of::<T>());
+}

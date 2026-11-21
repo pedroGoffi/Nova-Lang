@@ -1,0 +1,7 @@
+// Private runtime interface. Do not call from application code.
+// Ownership, type constraints and behavior belong to std public modules.
+pub extern fn native_resume(handle: u64, input: i64) -> i64;
+pub extern fn native_done(handle: u64) -> bool;
+pub extern fn native_yielded(handle: u64) -> bool;
+pub extern fn native_drop(handle: u64) -> ();
+pub extern fn native_yield_value(value: i64) -> i64;

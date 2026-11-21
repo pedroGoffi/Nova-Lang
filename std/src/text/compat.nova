@@ -1,0 +1,3 @@
+
+pub typedef String = std::text::string::String;
+pub typedef StringBuilder = std::text::builder::StringBuilder;

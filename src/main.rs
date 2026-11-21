@@ -1,17 +1,31 @@
 mod ast;
+mod entrypoint;
+#[cfg(test)] mod entrypoint_tests;
 mod call_arguments;
+mod out_parameters;
+mod validation;
+#[cfg(test)] mod validation_tests;
+#[cfg(test)]
+mod nb_tests;
+#[cfg(test)]
+mod nb_backend_tests;
+#[cfg(test)] mod out_parameters_tests;
 mod codegen;
 mod concepts;
 mod concurrency;
 mod consteval;
+mod compile_helpers;
 mod coroutine_codegen;
 mod coroutines;
 mod devtools;
 mod diagnostics;
 mod editor_overlay;
+mod ergonomic_lowering;
 mod effects;
 mod hir;
 mod iterators;
+mod intrinsics;
+mod llvm_intrinsics;
 mod lambdas;
 mod macros;
 mod meta;
@@ -21,11 +35,13 @@ mod ownership;
 mod package;
 mod proc_macros;
 mod surface;
+mod stdlib_audit;
 mod type_features;
 mod types;
 use lalrpop_util::lalrpop_mod;
 use std::{
     env, fs,
+    io::IsTerminal,
     path::{Path, PathBuf},
     process::{Command, ExitCode},
 };
@@ -33,6 +49,16 @@ lalrpop_mod!(pub grammar);
 
 #[cfg(test)]
 mod concepts_integration_tests;
+#[cfg(test)]
+mod ergonomics_stage18_tests;
+#[cfg(test)]
+mod ergonomics_stage19_tests;
+#[cfg(test)]
+mod ergonomics_stage20_tests;
+#[cfg(test)]
+mod ergonomics_stage21_tests;
+#[cfg(test)]
+mod json_stage22_tests;
 mod format_macros;
 #[cfg(test)]
 mod function_attributes_tests;
@@ -43,14 +69,16 @@ mod module_tests;
 #[cfg(test)]
 mod parser_regressions;
 #[cfg(test)]
+mod grammar_build_regression_tests;
+#[cfg(test)]
 mod variadic_tests;
 
 fn usage() -> &'static str {
-    r#"Nova 0.25 Alpha: Nexo package + typed STDLIB + private runtime ABI — native compiler (Rust + LALRPOP + HIR/MIR + LLVM)
+    r#"Nova 0.25 Alpha: typed standard library in Nova + compiler-reviewed LLVM platform ABI — native compiler (Rust + LALRPOP + HIR/MIR + LLVM)
 Usage:
   nova new <name> | init | add std | add <name> --path <directory> | tree [directory]
-  nova check [file.nova | package-directory]
-  nova build [file.nova | package-directory] [-o executable] [--emit-llvm]
+  nova check [file.nova | package-directory] [--all-errors]
+  nova build [file.nova | package-directory] [-o executable] [--emit-llvm] [--all-errors]
   nova run [file.nova | package-directory] [-o executable]
   nova emit-llvm <file.nova> [-o output.ll]
   nova dump-ast|dump-hir|dump-mir <file.nova>
@@ -63,6 +91,7 @@ Usage:
   nova clean [package-directory]
   nova lint [file.nova | package-directory]    Unused locals / mutability checks
   nova lsp-probe                                Check editor overlay protocol support
+  nova doctor                                   Audit stdlib/compiler boundaries (no build)
   nova doc [package-directory] [-o path]     Public symbol index
   nova meta [package-directory]              Show .nova metadata contracts
   nova meta inspect|expand [package-directory]
@@ -72,6 +101,14 @@ Options:
   --opt-level <0..3>     Optimization level for Clang (default: 0)
   --target <triple>      Target triple (cross-linker/sysroot are host dependent)
   --debug                Ask Clang to generate debug information
+  --runtime-zero         Always on: reject Nova-owned C runtime dependency
+  --deny-unapproved-extern  Always on: reject reachable foreign ABI calls outside std::abi::llvm
+  --deny-all-extern     Reject ANY reachable foreign ABI symbol except LLVM intrinsics
+  --helpers <macro|function>  Use source macros or direct functions for standard helpers
+  --module-path <directory>   Add a Go-style module/package search directory
+  NOVA_PATH                   Colon-separated default module search directories
+  --keep-all-functions  Keep unreachable functions in generated LLVM (debug/interop)
+  --all-errors           Collect independent surface/HIR errors (max 64 per phase)
   --verbose              Print tool invocations
   -h, --help             Show this help
 Source modules: mod foo; use foo::bar; pub fn bar() -> i32 { ... }
@@ -80,7 +117,7 @@ Types: typedef Integer = i32; trait<T in i8,i16,i32,i64> Integer extends Numeric
 Traits: impl Integer for i32 {...}; compile-time contracts and inheritance
 Closures: capturing fn(...) -> T {...} become callable structs (immutable by-value captures)
 Coroutines: gen fn, coro fn, async fn; yield, await (Linux x86-64 bootstrap)
-Variadic packs: fn sum(...xs: i64); sum(1,2,3); sum(...xs); xs.len()\nC variadics: unsafe { std::libc::stdio::printf("%d", 5); } (Linux x86-64)
+Variadic packs: fn sum(...xs: i64); sum(1,2,3); sum(...xs); xs.len()\nC variadics: unsafe { std::abi::native::libc::stdio::printf("%d", 5); } (Linux x86-64)
 Requires clang 15+ and a 64-bit host for native build. Owning struct/class locals with drop(self) are destroyed on lexical scope exit.
 Defer: defer cleanup(); or auto x = make() defer x.close();"#
 }
@@ -135,6 +172,13 @@ struct Options {
     target: Option<String>,
     debug: bool,
     verbose: bool,
+    all_errors: bool,
+    runtime_zero: bool,
+    deny_unapproved_extern: bool,
+    deny_all_extern: bool,
+    keep_all_functions: bool,
+    helper_mode: compile_helpers::HelperMode,
+    module_paths: Vec<PathBuf>,
 }
 fn options(args: &[String]) -> Result<Options, String> {
     let mut o = Options::default();
@@ -148,6 +192,24 @@ fn options(args: &[String]) -> Result<Options, String> {
                 ));
             }
             "--emit-llvm" => o.emit_llvm = true,
+            "--runtime-zero" => o.runtime_zero = true,
+            "--deny-unapproved-extern" => o.deny_unapproved_extern = true,
+            "--deny-all-extern" => o.deny_all_extern = true,
+            "--keep-all-functions" => o.keep_all_functions = true,
+            "--helpers" => {
+                i += 1;
+                o.helper_mode = match args.get(i).map(String::as_str) {
+                    Some("macro") => compile_helpers::HelperMode::Macro,
+                    Some("function") => compile_helpers::HelperMode::Function,
+                    _ => return Err("--helpers must be macro or function".into()),
+                };
+            },
+            "--module-path" | "-I" => {
+                i += 1;
+                o.module_paths.push(PathBuf::from(
+                    args.get(i).ok_or("--module-path needs a directory")?,
+                ));
+            }
             "--opt-level" => {
                 i += 1;
                 let v = args.get(i).ok_or("--opt-level needs 0..3")?;
@@ -162,173 +224,359 @@ fn options(args: &[String]) -> Result<Options, String> {
             }
             "--debug" => o.debug = true,
             "--verbose" => o.verbose = true,
+            "--all-errors" => o.all_errors = true,
             other => return Err(format!("unknown option '{other}'")),
         }
         i += 1;
     }
     Ok(o)
 }
+// Executable entry points use the platform C ABI. The traditional no-argument
+// form remains valid; applications that need the original process arguments
+// can instead declare `fn main(argc: i32, argv: *const *const u8) -> i32`.
+// `argv` is a borrowed C array (NUL-terminated strings); it must not be freed.
 fn require_main(hir: &hir::Program) -> Result<(), String> {
+    use crate::types::{Primitive, TypeKind};
+    const EXPECTED: &str = "entry point must be fn main() -> i32 or fn main(argc: i32, argv: *const *const u8) -> i32";
     let f = hir
         .functions
         .iter()
         .find(|f| f.name == "main" && matches!(f.kind, hir::FunctionKind::Defined))
-        .ok_or("build/run requires fn main() -> i32")?;
-    if f.result != hir.types.i32() || !f.params.is_empty() {
-        return Err("entry point must be fn main() -> i32".into());
+        .ok_or("build/run requires fn main() -> i32 or fn main(argc: i32, argv: *const *const u8) -> i32")?;
+    if f.result != hir.types.i32() {
+        return Err(EXPECTED.into());
     }
-    Ok(())
+    match f.params.as_slice() {
+        [] => Ok(()),
+        [argc, argv] => {
+            if f.locals[*argc].ty != hir.types.i32() {
+                return Err(format!("{EXPECTED}; argc must have type i32"));
+            }
+            let TypeKind::Pointer { element: inner, .. } = hir.types.kind(f.locals[*argv].ty)
+            else {
+                return Err(format!("{EXPECTED}; argv must be a pointer to pointers to u8"));
+            };
+            let TypeKind::Pointer { element: byte, .. } = hir.types.kind(inner) else {
+                return Err(format!("{EXPECTED}; argv must be a pointer to pointers to u8"));
+            };
+            if hir.types.kind(byte) != TypeKind::Primitive(Primitive::Unsigned(8)) {
+                return Err(format!("{EXPECTED}; argv must be a pointer to pointers to u8"));
+            }
+            Ok(())
+        }
+        _ => Err(EXPECTED.into()),
+    }
 }
+
 fn llvm_path(output: &Path) -> PathBuf {
     output.with_extension("ll")
 }
 // A PostgreSQL dependency is optional. Declaration-only imports do not
 // activate it; generated calls into the private postgres ABI do.
 fn needs_crypto_runtime(ir: &str) -> bool {
-    ir.lines().any(|line| line.contains("call ") && line.contains("@__nova_std__crypto____"))
+    ir.lines().any(|line| line.contains("call ") && line.contains("@__nova_std__old__crypto____"))
 }
 fn needs_postgres_runtime(ir: &str) -> bool {
     ir.lines()
         .any(|line| line.contains("call ") && line.contains("@__nova_std__postgres____pg_"))
 }
+// A declaration in embedded STD is not enough to pull a native C module
+// into the executable. An actual IR reference (including address-taken FFI
+// symbols) is. Keeping this symbol-based avoids guessing from source imports.
+fn uses_native_symbols(ir: &str, symbols: &[&str]) -> bool {
+    ir.lines().any(|line| {
+        let trimmed = line.trim_start();
+        !trimmed.starts_with("declare ")
+            && !trimmed.starts_with(';')
+            && symbols.iter().any(|symbol| trimmed.contains(symbol))
+    })
+}
+fn needs_coroutine_runtime(ir: &str) -> bool {
+    uses_native_symbols(ir, &[
+        "@__nova_coro_create", "@__nova_std__old__coro____",
+        "@__nova_std__old__task____", "@__nova_std__old__generator____",
+    ])
+}
+fn needs_net_runtime(ir: &str) -> bool {
+    uses_native_symbols(ir, &["@__nova_std__old__net____"])
+}
+// Compiler-provided LLVM atomic wrappers and std::abi::llvm definitions are
+// ordinary linked definitions, not dependencies on libnova_rt. Only symbols
+// actually missing a definition in this module can pull the C adapter.
+fn needs_core_runtime(ir: &str) -> bool {
+    use std::collections::HashSet;
+    fn symbols(line: &str) -> Vec<&str> {
+        let mut result = Vec::new();
+        for token in line.split('@').skip(1) {
+            let end = token.find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '$')))
+                .unwrap_or(token.len());
+            if end != 0 { result.push(&token[..end]); }
+        }
+        result
+    }
+    let defined: HashSet<&str> = ir.lines()
+        .filter(|line| line.trim_start().starts_with("define "))
+        .flat_map(symbols)
+        .collect();
+    ir.lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            !trimmed.starts_with("declare ") && !trimmed.starts_with(';')
+        })
+        .flat_map(symbols)
+        .any(|symbol| {
+            ((symbol.starts_with("__nova_std__")
+                && !symbol.starts_with("__nova_std__coro____")
+                && !symbol.starts_with("__nova_std__task____")
+                && !symbol.starts_with("__nova_std__generator____"))
+                || symbol.starts_with("__nova_json_")
+            ) && !defined.contains(symbol)
+        })
+}
+
+// Strip unreachable *standard-library* function definitions before selecting
+// the native platform adapters. This does not remove public user functions,
+// non-STD constructors/destructors, generated JSON/coroutine helpers, or any
+// function referenced by global data. Foreign function pointers referenced by
+// a retained body count as edges. We intentionally keep ALL non-STD roots.
+// Keeping extra functions is safe; dropping a reachable function is not.
+fn prune_unused_std_ir(ir: &str) -> String {
+    use std::collections::{HashMap, HashSet};
+    #[derive(Clone)]
+    struct Definition { name: String, start: usize, end: usize }
+    fn symbols(line: &str) -> Vec<&str> {
+        let bytes = line.as_bytes();
+        let mut out = Vec::new();
+        let mut cursor = 0;
+        while cursor < bytes.len() {
+            if bytes[cursor] != b'@' {cursor += 1; continue;}
+            let start = cursor + 1;
+            cursor = start;
+            while cursor < bytes.len() && (bytes[cursor].is_ascii_alphanumeric()
+                || matches!(bytes[cursor], b'_' | b'.' | b'$' | b'-')) {
+                cursor += 1;
+            }
+            if cursor > start {out.push(&line[start..cursor]);}
+        }
+        out
+    }
+    fn std_function(name: &str) -> bool {
+        name.starts_with("std__") || name.contains("__std__")
+    }
+    let lines: Vec<&str> = ir.lines().collect();
+    let mut defs = Vec::<Definition>::new();
+    let mut definition_by_name = HashMap::<String, usize>::new();
+    let mut inside = vec![false; lines.len()];
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index].trim_start();
+        if line.starts_with("define ") {
+            if let Some(name) = symbols(line).first() {
+                let start = index;
+                // Codegen emits exactly one standalone closing brace per fn.
+                while index + 1 < lines.len() && lines[index].trim() != "}" {
+                    index += 1;
+                }
+                let end = index.min(lines.len()-1);
+                for entry in &mut inside[start..=end] {*entry = true;}
+                let id = defs.len();
+                definition_by_name.insert((*name).to_owned(), id);
+                defs.push(Definition {name: (*name).to_owned(), start, end});
+            }
+        }
+        index += 1;
+    }
+    if defs.is_empty() {return ir.to_owned();}
+    let mut marked = HashSet::<usize>::new();
+    let mut work = Vec::<usize>::new();
+    for (id, def) in defs.iter().enumerate() {
+        if !std_function(&def.name) {
+            marked.insert(id);
+            work.push(id);
+        }
+    }
+    // A callback/function pointer stored in any non-function global is a root.
+    for (line, in_definition) in lines.iter().zip(inside.iter()) {
+        if *in_definition || line.trim_start().starts_with("declare ") {continue;}
+        if line.trim_start().starts_with(';') {continue;}
+        for name in symbols(line) {
+            if let Some(&id) = definition_by_name.get(name) {
+                if marked.insert(id) {work.push(id);}
+            }
+        }
+    }
+    while let Some(id) = work.pop() {
+        let definition = &defs[id];
+        for line in &lines[definition.start..=definition.end] {
+            for symbol in symbols(line) {
+                if let Some(&dependency) = definition_by_name.get(symbol) {
+                    if marked.insert(dependency) {work.push(dependency);}
+                }
+            }
+        }
+    }
+    let mut excluded = vec![false; lines.len()];
+    for (id, def) in defs.iter().enumerate() {
+        if !marked.contains(&id) {
+            for line in &mut excluded[def.start..=def.end] {*line = true;}
+        }
+    }
+    let mut out = String::with_capacity(ir.len());
+    for (line, excluded) in lines.iter().zip(excluded.iter()) {
+        if !excluded {out.push_str(line); out.push('\n');}
+    }
+    out
+}
+// Strictly distinguish source-level foreign ABI calls from compiler-owned LLVM
+// platform imports. This is checked on PRUNED IR: unused extern declarations
+// in embedded std do not cause failures. All imports used by live code must be
+// explicitly approved by std::abi::llvm; adding a new extern will fail closed.
+// A strict, link-oriented audit: imported declarations are harmless unless
+// actually reached from a surviving function/global after Nova STD pruning.
+// LLVM intrinsics are compiler operations, not foreign ABI imports.
+fn reachable_foreign_symbols(ir: &str) -> Vec<String> {
+    use std::collections::HashSet;
+    fn names(line: &str) -> Vec<&str> {
+        line.split('@').skip(1).filter_map(|part| {
+            let end = part.find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c,'_'|'.'|'$')))
+                .unwrap_or(part.len());
+            (end > 0).then_some(&part[..end])
+        }).collect()
+    }
+    let declared = ir.lines().filter(|line| line.trim_start().starts_with("declare "))
+        .flat_map(names).collect::<HashSet<_>>();
+    let defined = ir.lines().filter(|line| line.trim_start().starts_with("define "))
+        .flat_map(names).collect::<HashSet<_>>();
+    let mut foreign = ir.lines()
+        .filter(|line| {
+            let line = line.trim_start();
+            !line.starts_with("declare ") && !line.starts_with("define ")
+                && !line.starts_with(';')
+        })
+        .flat_map(names)
+        .filter(|symbol| declared.contains(symbol) && !defined.contains(symbol)
+            && !symbol.starts_with("llvm."))
+        .map(str::to_owned).collect::<Vec<_>>();
+    foreign.sort();
+    foreign.dedup();
+    foreign
+}
+fn unapproved_foreign_symbols(ir: &str) -> Vec<String> {
+    use std::collections::HashSet;
+    let approved = crate::llvm_intrinsics::Intrinsic::ALL.iter()
+        .flat_map(|intrinsic| intrinsic.declaration().lines())
+        .filter_map(|line| line.split('@').nth(1))
+        .map(|name| name.split(|c:char| !(c.is_ascii_alphanumeric() || matches!(c,'_'|'.'|'$')))
+            .next().unwrap_or(""))
+        .collect::<HashSet<_>>();
+    reachable_foreign_symbols(ir).into_iter()
+        .filter(|symbol| {
+            !approved.contains(symbol.as_str())
+                && !symbol.starts_with("SDL_")
+                && !symbol.starts_with("TTF_")
+                && !symbol.starts_with("gl")
+                && !symbol.starts_with("__nova_coro_")
+                && !symbol.starts_with("__nova_std__coro____")
+                && !symbol.starts_with("__nova_std__task____")
+                && !symbol.starts_with("__nova_std__generator____")
+                && symbol != "malloc"
+                && symbol != "free"
+        })
+        .collect()
+}
+
 fn build(ir: &str, output: &Path, options: &Options) -> Result<(), String> {
     if !cfg!(all(target_os = "linux", target_pointer_width = "64")) {
-        return Err("Nova 0.8 coroutine runtime currently requires a 64-bit Linux host".into());
+        return Err("Executable backend currently requires a 64-bit Linux host; Windows target is not linked yet".into());
     }
     if let Some(target) = &options.target {
         if !target.contains("linux") || !(target.contains("x86_64") || target.contains("aarch64")) {
-            return Err("Nova 0.8 runtime target must be Linux 64-bit; cross-toolchains are not yet supported".into());
+            return Err("The executable linker currently supports Linux x86_64/aarch64 only; Win64 object emission is separate".into());
         }
     }
     let intermediate = llvm_path(output);
     if output == intermediate {
         return Err("executable output path cannot end in .ll".into());
     }
-    fs::write(&intermediate, ir).map_err(|e| format!("{}: {e}", intermediate.display()))?;
-    // Embed the C11 runtime in the Nova binary: cargo install --path . works
-    // even when the original compiler source directory is no longer present.
-    let runtime_source = output.with_extension("nova_rt.c");
-    fs::write(&runtime_source, include_str!("../runtime/nova_rt.c"))
-        .map_err(|e| format!("{}: {e}", runtime_source.display()))?;
-    let coro_source = output.with_extension("nova_coroutines.c");
-    fs::write(&coro_source, include_str!("../runtime/nova_coroutines.c"))
-        .map_err(|e| format!("{}: {e}", coro_source.display()))?;
-    let net_source = output.with_extension("nova_net.c");
-    fs::write(&net_source, include_str!("../runtime/nova_net.c"))
-        .map_err(|e| format!("{}: {e}", net_source.display()))?;
-    let atomic_source = output.with_extension("nova_atomic.c");
-    fs::write(&atomic_source, include_str!("../runtime/nova_atomic.c"))
-        .map_err(|error| format!("{}: {error}", atomic_source.display()))?;
-    let sync_source = output.with_extension("nova_sync.c");
-    fs::write(&sync_source, include_str!("../runtime/nova_sync.c"))
-        .map_err(|error| format!("{}: {error}", sync_source.display()))?;
-    let crypto_enabled = needs_crypto_runtime(ir);
-    let crypto_source = output.with_extension("nova_crypto.c");
-    if crypto_enabled {
-        fs::write(&crypto_source, include_str!("../runtime/nova_crypto.c"))
-            .map_err(|e| format!("{}: {e}", crypto_source.display()))?;
+    let optimized_ir = prune_unused_std_ir(ir);
+    let ir = optimized_ir.as_str();
+    if ir.contains("call ptr @GetStdHandle(") || ir.contains("call i32 @WriteFile(")
+        || ir.contains("call void @ExitProcess(") {
+        return Err("Windows ABI cannot be linked into a Linux executable".into());
     }
-    let postgres_enabled = needs_postgres_runtime(ir);
-    let postgres_source = output.with_extension("nova_postgres.c");
-    let postgres_paths = if postgres_enabled {
-        let pg_config = Command::new("pg_config")
-            .arg("--includedir")
-            .output()
-            .map_err(|_| {
-                "PostgreSQL requires libpq-dev and pg_config; install libpq-dev".to_string()
-            })?;
-        if !pg_config.status.success() {
-            return Err("pg_config --includedir failed; install a working libpq-dev".into());
-        }
-        let includedir = String::from_utf8(pg_config.stdout)
-            .map_err(|_| "pg_config returned an invalid include directory")?;
-        let include = PathBuf::from(includedir.trim());
-        if !include.join("libpq-fe.h").exists() {
-            return Err(format!(
-                "PostgreSQL header libpq-fe.h missing in {}",
-                include.display()
-            ));
-        }
-        let libdir = Command::new("pg_config")
-            .arg("--libdir")
-            .output()
-            .map_err(|_| "pg_config --libdir failed".to_string())?;
-        if !libdir.status.success() {
-            return Err("pg_config --libdir failed".into());
-        }
-        let libdir = String::from_utf8(libdir.stdout)
-            .map_err(|_| "pg_config returned an invalid library directory")?;
-        fs::write(&postgres_source, include_str!("../runtime/nova_postgres.c"))
-            .map_err(|e| format!("{}: {e}", postgres_source.display()))?;
-        Some((include, PathBuf::from(libdir.trim())))
-    } else {
-        None
-    };
-    let mut command = Command::new("clang");
-    command
-        .arg("-x")
-        .arg("ir")
-        .arg(&intermediate)
-        .arg("-x")
-        .arg("c")
-        .arg(&runtime_source)
-        .arg(&coro_source)
-        .arg(&net_source)
-        .arg(&atomic_source)
-        .arg(&sync_source)
-        .arg("-std=c11")
-        .arg("-pthread")
-        .arg(format!("-O{}", options.opt))
-        .arg("-o")
-        .arg(output)
-        .arg("-lm");
-    if crypto_enabled {
-        command.arg(&crypto_source).arg("-lcrypto");
-    }
-    if let Some((include, libdir)) = &postgres_paths {
-        command
-            .arg(&postgres_source)
-            .arg(format!("-I{}", include.display()))
-            .arg(format!("-L{}", libdir.display()))
-            .arg("-lpq");
-    }
-    if let Some(t) = &options.target {
-        command.arg(format!("--target={t}"));
-    }
-    if options.debug {
-        command.arg("-g").arg("-rdynamic");
-    }
-    if options.verbose {
-        eprintln!("{command:?}");
-    }
-    let result = command.status();
-    let _ = fs::remove_file(&runtime_source);
-    let _ = fs::remove_file(&coro_source);
-    let _ = fs::remove_file(&net_source);
-    let _ = fs::remove_file(&atomic_source);
-    let _ = fs::remove_file(&sync_source);
-    if crypto_enabled {
-        let _ = fs::remove_file(&crypto_source);
-    }
-    if postgres_enabled {
-        let _ = fs::remove_file(&postgres_source);
-    }
-    let status = result.map_err(|e| format!("unable to launch clang: {e}"))?;
-    if !status.success() {
+    let remaining = [
+        ("JSON / String legacy resource ABI", needs_core_runtime(ir)),
+        ("legacy crypto ABI", needs_crypto_runtime(ir)),
+        ("PostgreSQL legacy ABI", needs_postgres_runtime(ir)),
+        ("legacy network ABI", needs_net_runtime(ir)),
+    ].into_iter().filter_map(|(name, present)| present.then_some(name))
+        .collect::<Vec<_>>();
+    if !remaining.is_empty() {
         return Err(format!(
-            "clang failed ({status}); LLVM IR preserved at {}",
-            intermediate.display()
+            "error[NOVA-RT000]: runtime C was removed; remaining dependencies: {}. Use Nova STD/LLVM implementations or replace this feature before linking.",
+            remaining.join(", ")
         ));
     }
-    if !options.emit_llvm {
-        let _ = fs::remove_file(&intermediate);
+    if options.deny_all_extern {
+        let foreign = reachable_foreign_symbols(ir);
+        if !foreign.is_empty() {
+            return Err(format!(
+                "error[NOVA-ABI001]: foreign ABI imports forbidden: {}", foreign.join(", ")
+            ));
+        }
     }
+    let offenders = unapproved_foreign_symbols(ir);
+    if !offenders.is_empty() {
+        return Err(format!(
+            "error[NOVA-ABI002]: imports not declared by compiler-reviewed std::abi::llvm intrinsics: {}",
+            offenders.join(", ")
+        ));
+    }
+    fs::write(&intermediate, ir)
+        .map_err(|e| format!("{}: {e}", intermediate.display()))?;
+    let mut command = Command::new("clang");
+    command.arg("-x").arg("ir").arg(&intermediate)
+        .arg(format!("-O{}", options.opt))
+        .arg("-ffunction-sections").arg("-fdata-sections")
+        .arg("-Wl,--gc-sections")
+        .arg("-o").arg(output)
+        .arg("-lm");
+    if needs_coroutine_runtime(ir) {
+        // Coroutine lowering is compiler-owned, but stack switching still
+        // needs a small host adapter. Keep it limited to coroutine programs;
+        // ordinary Nova executables remain free of a runtime dependency.
+        let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime/nova_coroutines.c");
+        command.arg("-x").arg("c").arg(runtime);
+    }
+    if ir.contains("@pthread_create(") || ir.contains("@pthread_join(") {
+        command.arg("-pthread");
+    }
+    if ir.contains("@SDL_") {
+        command.arg("-lSDL2");
+    }
+    if ir.contains("@TTF_") {
+        command.arg("-lSDL2_ttf");
+    }
+    if ir.contains("@gl") {
+        command.arg("-lGL");
+    }
+    if let Some(target) = &options.target {
+        command.arg(format!("--target={target}"));
+    }
+    if options.debug {command.arg("-g").arg("-rdynamic");}
+    if options.verbose {eprintln!("{command:?}");}
+    let status = command.status()
+        .map_err(|e| format!("unable to launch clang: {e}"))?;
+    if !status.success() {
+        return Err(format!("clang failed ({status}); LLVM IR preserved at {}",intermediate.display()));
+    }
+    if !options.emit_llvm {let _ = fs::remove_file(&intermediate);}
     Ok(())
 }
 fn compile_executable(input: &Path, output: &Path, opts: &Options) -> Result<(), String> {
     let (ast, sources) = package::load_detailed(input)
         .map_err(|e| diagnostics::attach_package(&e, input, "module loading"))?;
-    let ast = surface::lower(&ast)
+    let ast = surface::lower_with_helpers(&ast, opts.helper_mode)
         .map_err(|e| diagnostics::semantic_with_context(&e, &sources, input, "surface"))?;
     let hir = hir::lower(&ast)
         .map_err(|e| diagnostics::semantic_with_context(&e, &sources, input, "hir"))?;
@@ -340,8 +588,26 @@ fn compile_executable(input: &Path, output: &Path, opts: &Options) -> Result<(),
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
     }
-    build(&codegen::generate(&mir), output, opts)
+    build(&codegen::generate_reachable(&mir, opts.keep_all_functions), output, opts)
 }
+/// Format each error independently so source attribution and specialization traces
+/// never swallow the following diagnostic. The compiler still exits non-zero.
+fn render_collected_diagnostics(
+    errors: Vec<String>,
+    sources: &[modules::SourceFile],
+    path: &Path,
+    phase: &str,
+) -> String {
+    let count = errors.len();
+    let mut output = format!("error[NOVA-MULTI]: {count} independent error(s) in {phase}\n");
+    for (index, error) in errors.iter().enumerate() {
+        output.push_str(&format!("\n----- diagnostic {}/{} -----\n", index + 1, count));
+        output.push_str(&diagnostics::semantic_with_context(error, sources, path, phase));
+        output.push('\n');
+    }
+    output
+}
+
 fn execute() -> Result<(), String> {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.is_empty() || ["-h", "--help"].contains(&args[0].as_str()) {
@@ -446,6 +712,12 @@ fn execute() -> Result<(), String> {
             return Err("nova fmt [path] [--check]".into());
         }
         return devtools::fmt(&path, check);
+    }
+    if args[0] == "doctor" {
+        if args.len() != 1 {
+            return Err("nova doctor takes no arguments".into());
+        }
+        return stdlib_audit::run(Path::new("."));
     }
     if args[0] == "clean" {
         return devtools::clean(&PathBuf::from(
@@ -597,16 +869,26 @@ fn execute() -> Result<(), String> {
     };
     let option_start = if has_path { 2 } else { 1 };
     let opts = options(&args[option_start..])?;
-    let (ast, sources) = package::load_detailed(&path)
+    let (ast, sources) = package::load_detailed_with_paths(&path, &opts.module_paths)
         .map_err(|e| diagnostics::attach_package(&e, &path, "module loading"))?;
     if command == "dump-ast" {
         println!("{ast:#?}");
         return Ok(());
     }
-    let ast = surface::lower(&ast)
-        .map_err(|e| diagnostics::semantic_with_context(&e, &sources, &path, "surface"))?;
-    let hir = hir::lower(&ast)
-        .map_err(|e| diagnostics::semantic_with_context(&e, &sources, &path, "hir"))?;
+    let ast = if opts.all_errors {
+        surface::lower_with_helpers_all_errors(&ast, opts.helper_mode)
+            .map_err(|errors| render_collected_diagnostics(errors, &sources, &path, "surface"))?
+    } else {
+        surface::lower_with_helpers(&ast, opts.helper_mode)
+            .map_err(|e| diagnostics::semantic_with_context(&e, &sources, &path, "surface"))?
+    };
+    let hir = if opts.all_errors {
+        hir::lower_all_errors(&ast)
+            .map_err(|errors| render_collected_diagnostics(errors, &sources, &path, "hir"))?
+    } else {
+        hir::lower(&ast)
+            .map_err(|e| diagnostics::semantic_with_context(&e, &sources, &path, "hir"))?
+    };
     if command == "dump-hir" {
         println!("{hir:#?}");
         return Ok(());
@@ -629,7 +911,7 @@ fn execute() -> Result<(), String> {
     if command != "emit-llvm" {
         require_main(&hir)?;
     }
-    let ir = codegen::generate(&mir);
+    let ir = codegen::generate_reachable(&mir, opts.keep_all_functions);
     if command == "emit-llvm" {
         if let Some(out) = &opts.output {
             fs::write(out, &ir).map_err(|e| format!("{}: {e}", out.display()))?;
@@ -657,8 +939,23 @@ fn execute() -> Result<(), String> {
         let bin = output
             .canonicalize()
             .map_err(|e| format!("{}: {e}", output.display()))?;
-        let status = Command::new(&bin)
-            .status()
+        let mut process = Command::new(&bin);
+        // Keep the process working directory unchanged: other Nova packages
+        // expect paths to be resolved from their caller's directory. Pass the
+        // selected package's properties file explicitly instead, without
+        // overriding a user-provided NB_PROPERTIES environment variable.
+        if std::env::var_os("NB_PROPERTIES").is_none() {
+            let project_root = if path.is_dir() { path.as_path() } else {
+                path.parent().unwrap_or_else(|| std::path::Path::new("."))
+            };
+            let properties = project_root.join("application.properties");
+            if properties.is_file() {
+                let absolute = properties.canonicalize()
+                    .map_err(|e| format!("{}: {e}", properties.display()))?;
+                process.env("NB_PROPERTIES", absolute);
+            }
+        }
+        let status = process.status()
             .map_err(|e| format!("failed to execute {}: {e}", bin.display()))?;
         println!("Program exit code: {:?}", status.code());
         if !status.success() {
@@ -672,7 +969,16 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             if error.starts_with("error[") {
-                eprintln!("{error}");
+                let color = match env::var("NOVA_COLOR").as_deref() {
+                    Ok("always") => true,
+                    Ok("never") => false,
+                    _ => std::io::stderr().is_terminal(),
+                };
+                if color {
+                    eprintln!("{}", diagnostics::colorize_for_terminal(&error));
+                } else {
+                    eprintln!("{error}");
+                }
             } else {
                 eprintln!("nova: {error}");
             }
@@ -692,6 +998,110 @@ mod tests {
         let mir = mir::lower(&hir)?;
         Ok(codegen::generate(&mir))
     }
+    #[test]
+    fn all_errors_option_is_opt_in() {
+        let defaults = options(&[]).unwrap();
+        assert!(!defaults.all_errors);
+        assert!(options(&["--all-errors".into()]).unwrap().all_errors);
+    }
+
+    #[test]
+    fn all_errors_collects_independent_surface_specialization_errors() {
+        let code = "fn first() -> i32 { return missing_first(); } fn second() -> i32 { return missing_second(); }";
+        let ast = grammar::ProgramParser::new().parse(&strip_comments(code)).unwrap();
+        let errors = surface::lower_with_helpers_all_errors(
+            &ast, compile_helpers::HelperMode::Macro,
+        ).unwrap_err();
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors.iter().any(|error| error.contains("missing_first")), "{errors:?}");
+        assert!(errors.iter().any(|error| error.contains("missing_second")), "{errors:?}");
+    }
+
+    #[test]
+    fn all_errors_accumulates_independent_hir_function_bodies() {
+        let code = "fn first() -> i32 { return true; } fn second() -> i32 { return \"wrong\"; }";
+        let ast = grammar::ProgramParser::new().parse(&strip_comments(code)).unwrap();
+        let errors = hir::lower_all_errors(&ast).unwrap_err();
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors.iter().any(|error| error.contains("first")), "{errors:?}");
+        assert!(errors.iter().any(|error| error.contains("second")), "{errors:?}");
+        assert!(hir::lower(&ast).is_err(), "default still fails fast");
+    }
+
+    #[test]
+    fn compiler_helper_mode_flag_parses_and_checks_values() {
+        let args=vec!["--helpers".into(), "function".into(), "--runtime-zero".into()];
+        let opts=options(&args).unwrap();
+        assert_eq!(opts.helper_mode,compile_helpers::HelperMode::Function);
+        assert!(opts.runtime_zero);
+        assert!(options(&["--helpers".into(),"invalid".into()]).is_err());
+    }
+    #[test]
+    fn global_const_compiles_without_global_runtime_storage() {
+        let ll=compile(r#"
+            comptime const AT_FDCWD: i32 = -100;
+            const O_WRITE: i32 = 1 | 64 | 512;
+            fn main()->i32 {return AT_FDCWD + O_WRITE - 477;}
+        "#).unwrap();
+        assert!(ll.contains("define i32 @main"),"{ll}");
+        assert!(!ll.contains("AT_FDCWD"),"{ll}");
+        assert!(!ll.contains("O_WRITE"),"{ll}");
+    }
+    #[test]
+    fn namespaces_and_typedef_compile_time_constants_are_lowered() {
+        let ll=compile(r#"
+            typedef LinuxFd = i32;
+            namespace posix {
+                pub comptime const AT_FDCWD: LinuxFd = -100;
+            }
+            fn main()->i32 {return posix::AT_FDCWD + 100;}
+        "#).unwrap();
+        assert!(ll.contains("define i32 @main"),"{ll}");
+        assert!(!ll.contains("AT_FDCWD"),"{ll}");
+    }
+    #[test]
+    fn entry_accepts_legacy_main_and_c_argv() {
+        for source in [
+            "fn main() -> i32 { return 0; }",
+            "fn main(argc: i32, argv: *const *const u8) -> i32 { return argc - 1; }",
+            "fn main(argc: i32, argv: *mut *mut u8) -> i32 { return argc - 1; }",
+        ] {
+            let ast = grammar::ProgramParser::new()
+                .parse(&strip_comments(source))
+                .unwrap();
+            let surface = surface::lower(&ast).unwrap();
+            let high = hir::lower(&surface).unwrap();
+            require_main(&high).unwrap();
+            let low = mir::lower(&high).unwrap();
+            let llvm = codegen::generate(&low);
+            if source.contains("argc:") {
+                assert!(llvm.contains("define i32 @main(i32 %arg0, ptr %arg1)"), "{llvm}");
+            } else {
+                assert!(llvm.contains("define i32 @main()"), "{llvm}");
+            }
+        }
+    }
+
+    #[test]
+    fn entry_rejects_wrong_abi_and_wrong_arity() {
+        for source in [
+            "fn main(argc: i32) -> i32 { return argc; }",
+            "fn main(argc: i64, argv: *const *const u8) -> i32 { return 0; }",
+            "fn main(argc: i32, argv: *const u8) -> i32 { return 0; }",
+            "fn main(argc: i32, argv: *const *const i8) -> i32 { return 0; }",
+            "fn main(argc: i32, argv: *const *const u8) -> i64 { return 0; }",
+            "fn main(x: i32, y: i32, z: i32) -> i32 { return 0; }",
+        ] {
+            let ast = grammar::ProgramParser::new()
+                .parse(&strip_comments(source))
+                .unwrap();
+            let surface = surface::lower(&ast).unwrap();
+            let high = hir::lower(&surface).unwrap();
+            let err = require_main(&high).unwrap_err();
+            assert!(err.contains("entry point must be"), "{source}: {err}");
+        }
+    }
+
     #[test]
     fn rejects_string_written_to_bool_field_in_method() {
         let source = r#"struct Person { id: i64, active: bool }
@@ -741,7 +1151,7 @@ fn main() -> i32 {
     #[test]
     fn character_literals_cannot_be_used_for_implicit_arithmetic() {
         let error = compile("fn main()->i32 { let letter:char='A'; let n=letter+1; return 0; }").unwrap_err();
-        assert!(error.contains("equal types") || error.contains("numeric"), "{error}");
+        assert!(error.contains("equal types") || error.contains("numeric") || error.contains("expected char, found i32"), "{error}");
     }
     #[test]
     fn character_literal_out_of_range_is_reported() {
@@ -1423,9 +1833,55 @@ fn main() -> i32 {
         assert!(!needs_postgres_runtime(unused));
         let used = "  %db = call i64 @__nova_std__postgres____pg_connect(ptr %dsn)\n";
         assert!(needs_postgres_runtime(used));
-        let unrelated = "  %fd = call i32 @__nova_std__net____tcp_listen(i64 8080)\n";
+        let unrelated = "  %fd = call i32 @__nova_std__old__net____tcp_listen(i64 8080)\n";
         assert!(!needs_postgres_runtime(unrelated));
     }
+    #[test]
+    fn optional_native_modules_activate_only_when_referenced() {
+        let declarations = concat!(
+            "declare i64 @__nova_coro_create(ptr, ptr)\n",
+            "declare i32 @__nova_std__old__net____tcp_listen(i64)\n",
+            "declare ptr @__nova_std__old__atomic____new_i64(i64)\n",
+            "declare ptr @__nova_std__old__sync____mutex_new(i64)\n",
+            "declare ptr @__nova_std__old__thread____thread_start(ptr)\n",
+        );
+        assert!(!needs_coroutine_runtime(declarations));
+        assert!(!needs_net_runtime(declarations));
+        assert!(!needs_core_runtime(declarations));
+
+        assert!(needs_coroutine_runtime("%task = call i64 @__nova_coro_create(ptr %fn, ptr null)"));
+        assert!(needs_coroutine_runtime("call void @__nova_std__old__task____run_until_idle()"));
+        assert!(needs_coroutine_runtime("call void @__nova_std__old__generator____drop(i64 %gen)"));
+        assert!(needs_net_runtime("%fd = call i32 @__nova_std__old__net____tcp_listen(i64 9999)"));
+        assert!(needs_core_runtime("%m = call ptr @__nova_std__old__sync____mutex_new(i64 0)"));
+        assert!(needs_core_runtime("%t = call ptr @__nova_std__old__thread____thread_start(ptr %f)"));
+        // Taking a function address is a reference too, not merely calling it.
+        assert!(needs_net_runtime("store ptr @__nova_std__old__net____tcp_listen, ptr %slot"));
+        assert!(!needs_net_runtime("; call i32 @__nova_std__old__net____tcp_listen(i64 9999)"));
+    }
+
+    #[test]
+    fn runtime_pruning_follows_calls_and_function_addresses() {
+        let ir = "define i32 @main() {\nentry:\n  %v = call i32 @std__alive()\n  ret i32 %v\n}\ndefine i32 @std__alive() {\nentry:\n  ret i32 42\n}\ndefine void @std__unused() {\nentry:\n  call void @__nova_std__old__string____string_destroy(i64 1)\n  ret void\n}\n";
+        let stripped = prune_unused_std_ir(ir);
+        assert!(stripped.contains("define i32 @std__alive"));
+        assert!(!stripped.contains("@std__unused"));
+        assert!(!needs_core_runtime(&stripped));
+        let cb = "@global_callback = global ptr @std__callback\ndefine i32 @main() {\nentry:\n  ret i32 0\n}\ndefine void @std__callback() {\nentry:\n  ret void\n}\n";
+        assert!(prune_unused_std_ir(cb).contains("define void @std__callback"));
+        let callback_body = "define i32 @main() {\nentry:\n  store ptr @std__callback, ptr null\n  ret i32 0\n}\ndefine void @std__callback() {\nentry:\n  ret void\n}\n";
+        assert!(prune_unused_std_ir(callback_body).contains("define void @std__callback"));
+    }
+
+    #[test]
+    fn pure_llvm_program_needs_no_custom_c_runtime() {
+        assert!(!needs_core_runtime("define i32 @main() {\nentry:\n  ret i32 42\n}\n"));
+        assert!(!needs_core_runtime("declare i64 @__nova_std__old__raw____allocate(i64, i64)\n"));
+        assert!(needs_core_runtime("%ptr = call ptr @__nova_std__old__raw____allocate(i64 8, i64 8)"));
+        assert!(needs_core_runtime("call void @__nova_json_builder_append(i64 1, ptr %p)"));
+        assert!(needs_core_runtime("store ptr @__nova_std__old__string____destroy, ptr %slot"));
+    }
+
     #[test]
     fn embedded_standard_library_compiles() {
         let program = package::load(std::path::Path::new("examples/packages/std_demo")).unwrap();
@@ -1433,14 +1889,38 @@ fn main() -> i32 {
         let high = hir::lower(&lowered).unwrap();
         let low = mir::lower(&high).unwrap();
         let llvm = codegen::generate(&low);
-        assert!(llvm.contains("@__nova_std__builder____finish"));
-        assert!(llvm.contains("@__nova_std__arena____reset"));
-        assert!(llvm.contains("@__nova_std__vec____int64_vector_get"));
+        // Builder is ordinary Nova code, not an external native-string ABI.
+        assert!(llvm.contains("std__old__builder__StringBuilder__to_string"));
+        assert!(!llvm.contains("@__nova_std__old__builder____finish"));
+        assert!(llvm.contains("std__old__raw__deallocate_bytes"));
+        assert!(!llvm.contains("__nova_internal_byte_offset"));
         assert!(llvm.contains("@main"));
     }
     #[test]
+    fn raw_pointer_address_casts_are_explicit_and_unsafe() {
+        let ok = compile(r#"fn main()->i32 {
+            unsafe {
+                let mut value:i64 = 41;
+                let pointer:*mut i64 = &mut value as (*mut i64);
+                let raw:u64 = pointer as u64;
+                let second:*mut i64 = raw as (*mut i64);
+                return (*second as i32) - 41;
+            }
+        }"#).unwrap();
+        assert!(ok.contains("ptrtoint"), "{ok}");
+        assert!(ok.contains("inttoptr"), "{ok}");
+        let rejected = compile(r#"fn main()->i32 {
+            let value:i32 = 42;
+            let pointer:*const i32 = &value as (*const i32);
+            let address:u64 = pointer as u64;
+            return 0;
+        }"#).unwrap_err();
+        assert!(rejected.contains("unsafe"), "{rejected}");
+    }
+
+    #[test]
     fn raw_allocator_requires_unsafe() {
-        let src="namespace std { namespace raw { [[unsafe]] extern fn native_allocate(size: u64, align: u64) -> *mut u8; } } fn main() -> i32 { let p: *mut u8 = std::raw::native_allocate(16, 8); return 0; }";
+        let src="namespace std { namespace old { namespace raw { [[unsafe]] extern fn native_allocate(size: u64, align: u64) -> *mut u8; } } } fn main() -> i32 { let p: *mut u8 = std::old::raw::native_allocate(16, 8); return 0; }";
         let error = compile(src).unwrap_err();
         assert!(
             error.contains("requires an unsafe block"),
@@ -1449,14 +1929,44 @@ fn main() -> i32 {
     }
     #[test]
     fn raw_allocator_is_available_in_unsafe() {
-        let src="namespace std { namespace raw { [[unsafe]] extern fn native_allocate(size: u64, align: u64) -> *mut u8; [[unsafe]] extern fn native_deallocate(ptr: *mut u8) -> (); } } fn main() -> i32 { unsafe { let p: *mut u8 = std::raw::native_allocate(16, 8); std::raw::native_deallocate(p); } return 0; }";
+        let src="namespace std { namespace old { namespace raw { [[unsafe]] extern fn native_allocate(size: u64, align: u64) -> *mut u8; [[unsafe]] extern fn native_deallocate(ptr: *mut u8) -> (); } } } fn main() -> i32 { unsafe { let p: *mut u8 = std::old::raw::native_allocate(16, 8); std::old::raw::native_deallocate(p); } return 0; }";
         let ir = compile(src).unwrap();
-        assert!(ir.contains("@__nova_std__raw____allocate"));
-        assert!(ir.contains("@__nova_std__raw____deallocate"));
+        assert!(ir.contains("@__nova_std__old__raw____allocate"));
+        assert!(ir.contains("@__nova_std__old__raw____deallocate"));
     }
     #[test]
     fn missing_return_is_rejected() {
         let err = compile("fn main() -> i32 { if true { return 1; } }").unwrap_err();
         assert!(err.contains("every path") || err.contains("does not return"));
+    }
+}
+
+#[cfg(test)]
+mod foreign_import_stage14_tests {
+    use super::{reachable_foreign_symbols, unapproved_foreign_symbols, options};
+    #[test]
+    fn deny_all_extern_rejects_even_approved_platform_calls() {
+        let program = concat!(
+            "declare i64 @write(i32, ptr, i64)\n",
+            "declare i64 @llvm.ctpop.i64(i64)\n",
+            "define i32 @main() {\nentry:\n",
+            "  %n = call i64 @write(i32 1, ptr null, i64 0)\n",
+            "  %bits = call i64 @llvm.ctpop.i64(i64 7)\n",
+            "  ret i32 0\n}\n",
+        );
+        assert_eq!(reachable_foreign_symbols(program), vec!["write"]);
+        assert!(unapproved_foreign_symbols(program).is_empty());
+        let opts = options(&["--deny-all-extern".to_string()]).unwrap();
+        assert!(opts.deny_all_extern);
+    }
+    #[test]
+    fn absent_foreign_symbol_is_not_treated_as_live() {
+        let program = "declare i64 @printf(ptr, ...)\ndefine i32 @main() {\nentry:\n  ret i32 0\n}\n";
+        assert!(reachable_foreign_symbols(program).is_empty());
+    }
+    #[test]
+    fn llvm_only_is_accepted_under_strict_profile() {
+        let program = "declare i64 @llvm.ctpop.i64(i64)\ndefine i32 @main() {\nentry:\n  %n = call i64 @llvm.ctpop.i64(i64 42)\n  ret i32 0\n}\n";
+        assert!(reachable_foreign_symbols(program).is_empty());
     }
 }

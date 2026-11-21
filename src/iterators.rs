@@ -33,6 +33,7 @@ impl IteratorLowerer {
                 Box::new(Expr::Var(cursor_name.into())),
                 self.method("foreach_advance","next"),
                 vec![],
+                vec![],
             ),
         }
     }
@@ -94,7 +95,7 @@ impl IteratorLowerer {
                 let cursor_name = format!("__nova_foreach_cursor_{unique}");
                 let end_name = format!("__nova_foreach_end_{unique}");
                 // Borrow a named collection rather than implicitly copying a
-                // potentially owning struct (such as std::vec::Int64Vector).
+                // potentially owning struct (such as std::old::vec::Int64Vector).
                 // A temporary expression is evaluated exactly once.
                 let (source_definition, collection_ref) = match iterable {
                     Expr::Var(existing_name) => (None, Expr::Var(existing_name.clone())),
@@ -112,7 +113,7 @@ impl IteratorLowerer {
                 let cursor_ref = Expr::Var(cursor_name.clone());
                 let end_ref = Expr::Var(end_name.clone());
                 let make_call = |receiver: Expr, method: &str, args: Vec<Expr>| {
-                    Expr::MethodCall(Box::new(receiver), method.into(), args)
+                    Expr::MethodCall(Box::new(receiver), method.into(), args, vec![])
                 };
 
                 let mut loop_body = vec![Stmt::Let {

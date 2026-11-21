@@ -2,6 +2,16 @@
 name = "nova"
 version = "0.20.0-alpha.1"
 edition = "2021"
+autotests = false
+
+[[bin]]
+name = "nova"
+path = "src/main.rs"
+test = false
+
+[[test]]
+name = "feature_examples"
+path = "tests/feature_examples.rs"
 
 [dependencies]
 lalrpop-util = { version = "0.22", features = ["lexer"] }

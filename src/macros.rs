@@ -71,7 +71,7 @@ fn rename_expr(expr: &mut Expr, env: &HashMap<String, String>) {
                 rename_expr(arg, env);
             }
         }
-        Expr::CallIndirect(receiver, args) | Expr::MethodCall(receiver, _, args) => {
+        Expr::CallIndirect(receiver, args) | Expr::MethodCall(receiver, _, args, _) => {
             rename_expr(receiver, env);
             for arg in args {
                 rename_expr(arg, env);
@@ -318,6 +318,7 @@ fn concept_helpers(definition: &MacroDef) -> Vec<Item> {
                     name: "value".into(),
                     ty: type_parameter.clone(),
                     default: None,
+                    attributes: vec![],
                 }],
                 variadic: false,
                 result: type_parameter,
@@ -354,6 +355,14 @@ impl Expander {
                 return Some(candidate);
             }
             if namespace.is_empty() {
+                // Source-defined helper macros are available as an unqualified
+                // fallback when there is no macro in the caller's lexical scope.
+                // Do not special-case macro names: modules extending std::old::helpers
+                // must participate in the same resolution rule.
+                let helper = format!("std::old::helpers::{name}");
+                if self.definitions.contains_key(&helper) {
+                    return Some(helper);
+                }
                 return None;
             }
             namespace = namespace
@@ -590,10 +599,11 @@ impl Expander {
                 types.clone(),
                 self.expressions(arguments, namespace, bindings, stack)?,
             ),
-            MethodCall(receiver, name, arguments) => MethodCall(
+            MethodCall(receiver, name, arguments, types) => MethodCall(
                 Box::new(self.expression(receiver, namespace, bindings, stack)?),
                 self.identifier(name, bindings)?,
                 self.expressions(arguments, namespace, bindings, stack)?,
+                types.clone(),
             ),
             StructInit(name, fields) => StructInit(
                 self.identifier(name, bindings)?,
@@ -723,7 +733,7 @@ impl Expander {
                     self.repeated_names(arg, found);
                 }
             }
-            Expr::MethodCall(receiver, _, args) => {
+            Expr::MethodCall(receiver, _, args, _) => {
                 self.repeated_names(receiver, found);
                 for arg in args {
                     self.repeated_names(arg, found);
@@ -1082,6 +1092,23 @@ impl Expander {
                     name: name.clone(),
                     items: self.items(items, &qualified(namespace, name))?,
                 },
+                Item::Struct(decl) => {
+                    let mut decl=decl.clone();
+                    for field in &mut decl.fields {
+                        if let Some(init)=field.default.take() {
+                            field.default=Some(self.expression(&init,namespace,
+                                &Bindings::new(),&mut Vec::new())?);
+                        }
+                    }
+                    Item::Struct(decl)
+                }
+                Item::CompileTimeConst(decl) => {
+                    let mut decl = decl.clone();
+                    decl.value = self.expression(
+                        &decl.value, namespace, &Bindings::new(), &mut Vec::new(),
+                    )?;
+                    Item::CompileTimeConst(decl)
+                }
                 Item::Function(function) => {
                     let mut function = function.clone();
                     function.body = self.statements(
@@ -1128,6 +1155,18 @@ mod tests {
             .parse(source)
             .map_err(|error| error.to_string())?;
         expand(&parsed)
+    }
+    #[test]
+    fn source_helper_fallback_and_macro_in_comptime_const() {
+        let ast=compile(r#"
+            namespace std { namespace helpers { macro bump(value) => value + 1; } }
+            macro plus_one(value) => value + 1;
+            comptime const FIXED: i32 = plus_one!(41);
+            fn main()->i32 {return bump!(FIXED) - 43;}
+        "#).unwrap();
+        let Item::Function(main)=ast.items.last().unwrap() else {panic!()};
+        assert!(!format!("{:?}",main.body).contains("MacroCall"));
+        assert!(ast.items.iter().any(|item|matches!(item,Item::CompileTimeConst(_))));
     }
     #[test]
     fn concept_bound_macro_emits_typed_specialization_checks() {
@@ -1340,7 +1379,7 @@ mod tests {
         let program = compile(
             r#"
             macro_rules! repeat_output {
-                ($($text:expr),*) => { $(std::io::println($text);)* };
+                ($($text:expr),*) => { $(std::old::io::println($text);)* };
             }
             fn main()->i32 { repeat_output!("one","two","three"); return 0; }
         "#,

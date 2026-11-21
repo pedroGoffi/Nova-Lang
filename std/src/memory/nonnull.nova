@@ -1,0 +1,13 @@
+use std::core::option::Option;
+use std::core::types::Size;
+
+pub struct NonNull<T> { pointer: *mut T }
+
+impl<T> NonNull<T> {
+    [[unsafe]] static fn try_new(pointer: *mut T) -> Option<NonNull<T> > {
+        if (pointer as Size) == 0 { return None; }
+        return Some(new NonNull<T> { pointer: pointer });
+    }
+    [[unsafe]] fn as_ptr(self: &NonNull<T>) -> *mut T { return self.pointer; }
+    fn address(self: &NonNull<T>) -> Size { return self.pointer as Size; }
+}

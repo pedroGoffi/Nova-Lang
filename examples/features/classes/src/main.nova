@@ -1,0 +1,56 @@
+import std;
+
+// Traits describe behavior that can be implemented by unrelated types.
+trait Score {
+    fn score(self: &Self) -> i32;
+}
+
+// Entity is the base class. Its constructor initializes inherited state.
+class Entity { id: i32 }
+
+impl Entity {
+    static fn new() -> Self {
+        return new Entity { id: 40 };
+    }
+
+    // virtual permits a derived class to replace this method.
+    virtual fn value(self: Entity) -> i32 {
+        return self.id;
+    }
+}
+
+// Player inherits Entity and adds its own field and constructor.
+class Player : Entity { points: i32 }
+
+impl Player {
+    static fn new(points: i32) -> Self {
+        return new Player { points: points };
+    }
+
+    // override replaces the virtual method and super calls the parent version.
+    override fn value(self: Player) -> i32 {
+        let points = self.points;
+        return super.value() + points;
+    }
+
+    // &mut allows a method to update the instance in place.
+    fn add_points(self: &mut Player, points: i32) -> () {
+        self.points += points;
+        return;
+    }
+}
+
+impl Score for Player {
+    fn score(self: &Player) -> i32 {
+        return self.id + self.points;
+    }
+}
+
+fn main() -> i32 {
+    // new calls the class constructor; both trait and virtual dispatch are used.
+    let mut player = Player::new(2);
+    player.add_points(1);
+    let trait_score = player.score();
+    let virtual_score = player.value();
+    return trait_score + virtual_score - 86;
+}

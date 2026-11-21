@@ -1,0 +1,20 @@
+use std::core::value::Clone;
+use std::core::value::Display;
+
+pub class Error { code: i32, message: str }
+
+impl Error {
+    static fn new(code: i32, message: str) -> Self {
+        return new Error { code: code, message: message };
+    }
+    fn code(self: &Error) -> i32 { return self.code; }
+    fn message(self: &Error) -> str { return self.message; }
+}
+
+impl Clone for Error {
+    fn clone(self: &Error) -> Error { return Error::new(self.code, self.message); }
+}
+
+impl Display for Error {
+    fn to_string(self: &Error) -> str { return self.message; }
+}

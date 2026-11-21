@@ -1,0 +1,6 @@
+// Nova GUI: safe traits and widgets over the reviewed SDL2/OpenGL platform
+// modules. Applications do not need to touch raw handles or FFI symbols.
+mod traits;
+mod window;
+mod widgets;
+mod editor;

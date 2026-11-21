@@ -1,0 +1,21 @@
+use std::core::value::Clone;
+use std::core::value::Display;
+use std::core::text;
+
+pub class Path { value: str }
+
+impl Path {
+    static fn new(value: str) -> Self { return new Path { value: value }; }
+    fn as_str(self: &Path) -> str { return self.value; }
+    fn is_absolute(self: &Path) -> bool {
+        return text::byte_at(self.value, 0) == 47;
+    }
+}
+
+impl Clone for Path {
+    fn clone(self: &Path) -> Path { return Path::new(self.value); }
+}
+
+impl Display for Path {
+    fn to_string(self: &Path) -> str { return self.value; }
+}

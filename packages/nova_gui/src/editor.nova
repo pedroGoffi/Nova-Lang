@@ -1,0 +1,704 @@
+use std::core::types::Size;
+use std::core;
+use std::memory::raw;
+use std::platform::sdl2;
+use std::io::file::read_into;
+use std::io::file::write_all;
+use super::traits::Widget;
+use super::traits::EventHandler;
+use super::traits::Editable;
+
+pub class TextBuffer {
+    data: *mut u8,
+    length: Size,
+    capacity: Size
+}
+
+impl TextBuffer {
+    static fn new() -> Self {
+        let data: *mut u8 = unsafe { raw::alloc_elements::<u8>(1) };
+        unsafe { *data = 0; }
+        return new TextBuffer { data: data, length: 0, capacity: 1 };
+    }
+    fn len(self: &TextBuffer) -> Size { return self.length; }
+    fn reserve(self: &mut TextBuffer, requested: Size) -> () {
+        if requested <= self.capacity { return; }
+        unsafe { self.data = raw::reallocate_elements::<u8>(self.data, self.capacity, requested); }
+        self.capacity = requested;
+        return;
+    }
+    fn load(self: &mut TextBuffer, path: str) -> bool {
+        self.clear();
+        self.reserve(1048576);
+        let count = read_into(path, self.data, self.capacity - 1);
+        if count < 0 { return false; }
+        self.length = count as Size;
+        let terminator: *mut u8 = unsafe { raw::element_at::<u8>(self.data, self.length) };
+        unsafe { *terminator = 0; }
+        return true;
+    }
+    fn insert_at(self: &mut TextBuffer, index: Size, value: str) -> () {
+        let count = core::text_size(value);
+        let mut position = index;
+        if position > self.length { position = self.length; }
+        if self.length + count + 1 > self.capacity {
+            let mut target = self.capacity;
+            if target == 0 { target = 64; }
+            while target < self.length + count + 1 { target *= 2; }
+            unsafe { self.data = raw::reallocate_elements::<u8>(self.data, self.capacity, target); }
+            self.capacity = target;
+        }
+        let mut shift = self.length;
+        while shift > position {
+            shift -= 1;
+            unsafe {
+                let source: *mut u8 = raw::element_at::<u8>(self.data, shift);
+                let destination: *mut u8 = raw::element_at::<u8>(self.data, shift + count);
+                *destination = *source;
+            }
+        }
+        unsafe { core::copy(raw::element_at::<u8>(self.data, position), core::address(value) as (*const u8), count); }
+        self.length += count;
+        let terminator: *mut u8 = unsafe { raw::element_at::<u8>(self.data, self.length) };
+        unsafe { *terminator = 0; }
+        return;
+    }
+    fn remove_at(self: &mut TextBuffer, index: Size) -> () {
+        if index >= self.length { return; }
+        let mut read = index + 1;
+        while read < self.length {
+            unsafe {
+                let source: *mut u8 = raw::element_at::<u8>(self.data, read);
+                let destination: *mut u8 = raw::element_at::<u8>(self.data, read - 1);
+                *destination = *source;
+            }
+            read += 1;
+        }
+        self.length -= 1;
+        let terminator: *mut u8 = unsafe { raw::element_at::<u8>(self.data, self.length) };
+        unsafe { *terminator = 0; }
+        return;
+    }
+    fn byte_at(self: &TextBuffer, index: Size) -> u8 {
+        if index >= self.length { return 0; }
+        unsafe { return *raw::element_at::<u8>(self.data, index); }
+    }
+    fn as_str(self: &TextBuffer) -> str {
+        unsafe { return core::borrow(self.data as u64); }
+    }
+    fn release(self: &mut TextBuffer) -> () { unsafe { raw::deallocate_bytes(self.data); } return; }
+    fn clear(self: &mut TextBuffer) -> () {
+        self.length = 0;
+        let terminator: *mut u8 = self.data;
+        unsafe { *terminator = 0; }
+        return;
+    }
+    fn append(self: &mut TextBuffer, value: str) -> () { self.insert_at(self.length, value); return; }
+    fn matches_at(self: &TextBuffer, index: Size, query: &TextBuffer) -> bool {
+        if query.length == 0 || index + query.length > self.length { return false; }
+        let mut offset: Size = 0;
+        while offset < query.length {
+            if self.byte_at(index + offset) != query.byte_at(offset) { return false; }
+            offset += 1;
+        }
+        return true;
+    }
+    fn copy_range_from(self: &mut TextBuffer, source: &TextBuffer, start: Size, end: Size) -> () {
+        self.clear();
+        if end <= start || start >= source.length { return; }
+        let mut finish = end;
+        if finish > source.length { finish = source.length; }
+        let count = finish - start;
+        self.reserve(count + 1);
+        unsafe { core::copy(self.data, raw::element_at::<u8>(source.data, start) as (*const u8), count); }
+        self.length = count;
+        let terminator: *mut u8 = unsafe { raw::element_at::<u8>(self.data, self.length) };
+        unsafe { *terminator = 0; }
+        return;
+    }
+    fn remove_range(self: &mut TextBuffer, start: Size, end: Size) -> () {
+        if end <= start || start >= self.length { return; }
+        let mut finish = end;
+        if finish > self.length { finish = self.length; }
+        let count = finish - start;
+        let mut read = finish;
+        while read < self.length {
+            unsafe {
+                let source = raw::element_at::<u8>(self.data, read);
+                let destination = raw::element_at::<u8>(self.data, read - count);
+                *destination = *source;
+            }
+            read += 1;
+        }
+        self.length -= count;
+        let terminator: *mut u8 = unsafe { raw::element_at::<u8>(self.data, self.length) };
+        unsafe { *terminator = 0; }
+        return;
+    }
+}
+
+// Interactive single-line editor model. The text storage is owned by the
+// widget; SDL text input is translated into this type by handle_event().
+pub class TextEditor {
+    content: TextBuffer,
+    second_buffer: TextBuffer,
+    third_buffer: TextBuffer,
+    path_main: TextBuffer,
+    path_second: TextBuffer,
+    path_third: TextBuffer,
+    cursor: Size,
+    bounds: sdl2::Rect,
+    font: sdl2::Font,
+    active_buffer: i32,
+    buffer_count: i32,
+    focused: bool,
+    line_height: i32,
+    char_width: i32,
+    show_status: bool,
+    modified: bool,
+    dirty_main: bool,
+    dirty_second: bool,
+    dirty_third: bool,
+    cursor_main: Size,
+    cursor_second: Size,
+    cursor_third: Size,
+    command: TextBuffer,
+    message: TextBuffer,
+    command_active: bool,
+    prefix_x: bool,
+    open_command: bool,
+    meta_command: bool,
+    mark: Size,
+    mark_active: bool,
+    kill_ring: TextBuffer
+}
+
+impl TextEditor {
+    static fn new(x: i32, y: i32, width: i32, height: i32, font: sdl2::Font) -> Self {
+        return new TextEditor {
+            content: TextBuffer::new(),
+            second_buffer: TextBuffer::new(),
+            third_buffer: TextBuffer::new(),
+            path_main: TextBuffer::new(),
+            path_second: TextBuffer::new(),
+            path_third: TextBuffer::new(),
+            cursor: 0,
+            bounds: sdl2::rect(x, y, width, height),
+            font: font,
+            active_buffer: 0,
+            buffer_count: 0,
+            focused: true,
+            line_height: 22,
+            char_width: 10,
+            show_status: true,
+            modified: false,
+            dirty_main: false,
+            dirty_second: false,
+            dirty_third: false,
+            cursor_main: 0,
+            cursor_second: 0,
+            cursor_third: 0,
+            command: TextBuffer::new(),
+            message: TextBuffer::new(),
+            command_active: false,
+            prefix_x: false,
+            open_command: false,
+            meta_command: false,
+            mark: 0,
+            mark_active: false,
+            kill_ring: TextBuffer::new()
+        };
+    }
+
+    fn active(self: &TextEditor) -> i32 { return self.active_buffer; }
+    fn count(self: &TextEditor) -> i32 { return self.buffer_count; }
+    fn open(self: &mut TextEditor, path: str) -> i32 {
+        if self.buffer_count >= 3 { return -1; }
+        let index = self.buffer_count;
+        if index == 0 { self.path_main.append(path); }
+        if index == 1 { self.path_second.append(path); }
+        if index == 2 { self.path_third.append(path); }
+        let loaded = if index == 0 { self.content.load(path) }
+            else if index == 1 { self.second_buffer.load(path) }
+            else { self.third_buffer.load(path) };
+        self.buffer_count += 1;
+        self.active_buffer = index;
+        self.cursor = 0;
+        self.modified = false;
+        if !loaded { self.set_message("New file"); }
+        return index;
+    }
+    fn is_modified(self: &TextEditor) -> bool { return self.modified; }
+    fn active_name(self: &TextEditor) -> str {
+        if self.active_buffer == 1 { return self.path_second.as_str(); }
+        if self.active_buffer == 2 { return self.path_third.as_str(); }
+        return self.path_main.as_str();
+    }
+    fn store_state(self: &mut TextEditor) -> () {
+        if self.active_buffer == 1 { self.cursor_second = self.cursor; self.dirty_second = self.modified; return; }
+        if self.active_buffer == 2 { self.cursor_third = self.cursor; self.dirty_third = self.modified; return; }
+        self.cursor_main = self.cursor; self.dirty_main = self.modified; return;
+    }
+    fn restore_state(self: &mut TextEditor, index: i32) -> () {
+        if index == 1 { self.cursor = self.cursor_second; self.modified = self.dirty_second; return; }
+        if index == 2 { self.cursor = self.cursor_third; self.modified = self.dirty_third; return; }
+        self.cursor = self.cursor_main; self.modified = self.dirty_main; return;
+    }
+    fn select_buffer(self: &mut TextEditor, index: i32) -> () {
+        if index >= 0 && index < self.buffer_count {
+            self.store_state();
+            self.active_buffer = index;
+            self.restore_state(index);
+        }
+        return;
+    }
+    fn set_status(self: &mut TextEditor, enabled: bool) -> () { self.show_status = enabled; return; }
+    fn set_message(self: &mut TextEditor, value: str) -> () {
+        self.message.clear();
+        self.message.append(value);
+        return;
+    }
+    fn line_start(self: &TextEditor, position: Size) -> Size {
+        let mut result = position;
+        while result > 0 && self.active_byte_at(result - 1) != 10 { result -= 1; }
+        return result;
+    }
+    fn line_end(self: &TextEditor, position: Size) -> Size {
+        let mut result = position;
+        while result < self.active_len() && self.active_byte_at(result) != 10 { result += 1; }
+        return result;
+    }
+    fn move_line_start(self: &mut TextEditor) -> () { self.cursor = self.line_start(self.cursor); return; }
+    fn move_line_end(self: &mut TextEditor) -> () { self.cursor = self.line_end(self.cursor); return; }
+    fn find_forward(self: &mut TextEditor) -> bool {
+        let mut position = self.cursor;
+        while position < self.active_len() {
+            let found = if self.active_buffer == 0 { self.content.matches_at(position, &self.command) }
+                else if self.active_buffer == 1 { self.second_buffer.matches_at(position, &self.command) }
+                else { self.third_buffer.matches_at(position, &self.command) };
+            if found { self.cursor = position; return true; }
+            position += 1;
+        }
+        return false;
+    }
+    fn begin_search(self: &mut TextEditor) -> () {
+        self.command.clear();
+        self.command_active = true;
+        self.set_message("I-search:");
+        return;
+    }
+    fn begin_open(self: &mut TextEditor) -> () {
+        self.command.clear();
+        self.command_active = true;
+        self.open_command = true;
+        self.set_message("Find file: ");
+        return;
+    }
+    fn begin_meta_command(self: &mut TextEditor) -> () {
+        self.command.clear();
+        self.command_active = true;
+        self.meta_command = true;
+        self.set_message("M-x ");
+        return;
+    }
+    fn command_is(self: &TextEditor, value: str) -> bool {
+        let count = core::text_size(value);
+        if count != self.command.len() { return false; }
+        let mut index: Size = 0;
+        while index < count {
+            let expected = unsafe { *raw::element_at::<u8>(core::address(value) as (*mut u8), index) };
+            if self.command.byte_at(index) != expected { return false; }
+            index += 1;
+        }
+        return true;
+    }
+    fn execute_meta_command(self: &mut TextEditor) -> () {
+        if self.command_is("save-buffer") { self.save_buffer(); return; }
+        if self.command_is("find-file") { self.meta_command = false; self.begin_open(); return; }
+        if self.command_is("next-buffer") { self.cycle_buffer(); return; }
+        if self.command_is("beginning-of-buffer") { self.cursor = 0; self.set_message(""); return; }
+        if self.command_is("end-of-buffer") { self.cursor = self.active_len(); self.set_message(""); return; }
+        if self.command_is("kill-region") { self.kill_region(); return; }
+        if self.command_is("yank") { self.yank(); return; }
+        self.set_message("Unknown command");
+        return;
+    }
+    fn cancel_command(self: &mut TextEditor) -> () {
+        self.command.clear();
+        self.command_active = false;
+        self.prefix_x = false;
+        self.open_command = false;
+        self.meta_command = false;
+        self.set_message("");
+        return;
+    }
+    fn save_buffer(self: &mut TextEditor) -> () {
+        if self.buffer_count == 0 { self.set_message("No buffer"); return; }
+        let count = write_all(self.active_name(), self.active_text());
+        if count < 0 { self.set_message("Write failed"); return; }
+        self.modified = false;
+        self.store_state();
+        self.prefix_x = false;
+        self.set_message("Wrote file");
+        return;
+    }
+
+    fn active_len(self: &TextEditor) -> Size {
+        if self.active_buffer == 1 { return self.second_buffer.len(); }
+        if self.active_buffer == 2 { return self.third_buffer.len(); }
+        return self.content.len();
+    }
+
+    fn active_byte_at(self: &TextEditor, index: Size) -> u8 {
+        if self.active_buffer == 1 { return self.second_buffer.byte_at(index); }
+        if self.active_buffer == 2 { return self.third_buffer.byte_at(index); }
+        return self.content.byte_at(index);
+    }
+
+    fn active_text(self: &TextEditor) -> str {
+        if self.active_buffer == 1 { return self.second_buffer.as_str(); }
+        if self.active_buffer == 2 { return self.third_buffer.as_str(); }
+        return self.content.as_str();
+    }
+
+    fn insert_active(self: &mut TextEditor, index: Size, value: str) -> () {
+        if self.active_buffer == 1 { self.second_buffer.insert_at(index, value); return; }
+        if self.active_buffer == 2 { self.third_buffer.insert_at(index, value); return; }
+        self.content.insert_at(index, value);
+        return;
+    }
+
+    fn remove_active(self: &mut TextEditor, index: Size) -> () {
+        if self.active_buffer == 1 { self.second_buffer.remove_at(index); return; }
+        if self.active_buffer == 2 { self.third_buffer.remove_at(index); return; }
+        self.content.remove_at(index);
+        return;
+    }
+
+    fn copy_active_range(self: &mut TextEditor, start: Size, end: Size) -> () {
+        if self.active_buffer == 1 { self.kill_ring.copy_range_from(&self.second_buffer, start, end); return; }
+        if self.active_buffer == 2 { self.kill_ring.copy_range_from(&self.third_buffer, start, end); return; }
+        self.kill_ring.copy_range_from(&self.content, start, end);
+        return;
+    }
+
+    fn remove_active_range(self: &mut TextEditor, start: Size, end: Size) -> () {
+        if self.active_buffer == 1 { self.second_buffer.remove_range(start, end); return; }
+        if self.active_buffer == 2 { self.third_buffer.remove_range(start, end); return; }
+        self.content.remove_range(start, end);
+        return;
+    }
+
+    fn set_mark(self: &mut TextEditor) -> () {
+        self.mark = self.cursor;
+        self.mark_active = true;
+        self.set_message("Mark set");
+        return;
+    }
+
+    fn copy_region(self: &mut TextEditor) -> () {
+        if !self.mark_active { self.set_message("Mark is not set"); return; }
+        let mut start = self.mark;
+        let mut end = self.cursor;
+        if start > end { let swap = start; start = end; end = swap; }
+        self.copy_active_range(start, end);
+        self.set_message("Region copied");
+        return;
+    }
+
+    fn kill_region(self: &mut TextEditor) -> () {
+        if !self.mark_active { self.set_message("Mark is not set"); return; }
+        let mut start = self.mark;
+        let mut end = self.cursor;
+        if start > end { let swap = start; start = end; end = swap; }
+        self.copy_active_range(start, end);
+        self.remove_active_range(start, end);
+        self.cursor = start;
+        self.modified = true;
+        self.mark_active = false;
+        self.set_message("Region killed");
+        return;
+    }
+
+    fn kill_line(self: &mut TextEditor) -> () {
+        let mut end = self.line_end(self.cursor);
+        if end == self.cursor && end < self.active_len() { end += 1; }
+        self.copy_active_range(self.cursor, end);
+        self.remove_active_range(self.cursor, end);
+        self.modified = true;
+        self.set_message("Line killed");
+        return;
+    }
+
+    fn yank(self: &mut TextEditor) -> () {
+        if self.kill_ring.len() == 0 { self.set_message("Kill ring is empty"); return; }
+        let count = self.kill_ring.len();
+        self.insert_active(self.cursor, self.kill_ring.as_str());
+        self.cursor += count;
+        self.modified = true;
+        self.set_message("Yanked");
+        return;
+    }
+
+    fn move_word(self: &mut TextEditor) -> () {
+        while self.cursor < self.active_len() && self.active_byte_at(self.cursor) != 32 { self.cursor += 1; }
+        while self.cursor < self.active_len() && self.active_byte_at(self.cursor) == 32 { self.cursor += 1; }
+        return;
+    }
+
+    fn move_word_backward(self: &mut TextEditor) -> () {
+        while self.cursor > 0 && self.active_byte_at(self.cursor - 1) == 32 { self.cursor -= 1; }
+        while self.cursor > 0 && self.active_byte_at(self.cursor - 1) != 32 && self.active_byte_at(self.cursor - 1) != 10 { self.cursor -= 1; }
+        return;
+    }
+
+    fn cycle_buffer(self: &mut TextEditor) -> () {
+        if self.buffer_count < 2 { return; }
+        let mut target = self.active_buffer + 1;
+        if target >= self.buffer_count { target = 0; }
+        self.select_buffer(target);
+        self.set_message("Switched buffer");
+        return;
+    }
+
+    fn move_vertical(self: &mut TextEditor, direction: i32) -> () {
+        let mut line_start = self.cursor;
+        while line_start > 0 && self.active_byte_at(line_start - 1) != 10 { line_start -= 1; }
+        let column = self.cursor - line_start;
+        if direction < 0 {
+            if line_start == 0 { return; }
+            let mut previous_end = line_start - 1;
+            let mut previous_start = previous_end;
+            while previous_start > 0 && self.active_byte_at(previous_start - 1) != 10 { previous_start -= 1; }
+            let previous_width = previous_end - previous_start;
+            let mut target_column = previous_width;
+            if column < previous_width { target_column = column; }
+            self.cursor = previous_start + target_column;
+            return;
+        }
+        let mut current_end = self.cursor;
+        while current_end < self.active_len() && self.active_byte_at(current_end) != 10 { current_end += 1; }
+        if current_end >= self.active_len() { return; }
+        let next_start = current_end + 1;
+        let mut next_end = next_start;
+        while next_end < self.active_len() && self.active_byte_at(next_end) != 10 { next_end += 1; }
+        let next_width = next_end - next_start;
+        let mut target_column = next_width;
+        if column < next_width { target_column = column; }
+        self.cursor = next_start + target_column;
+        return;
+    }
+
+    fn handle_event(self: &mut TextEditor, event: u32, text: str, key: i32, modifier: i32) -> () {
+        if event == sdl2::EVENT_TEXT_INPUT {
+            if self.command_active {
+                self.command.append(text);
+                if self.open_command { self.set_message(self.command.as_str()); }
+                else if self.meta_command { self.set_message(self.command.as_str()); }
+                else if !self.find_forward() { self.set_message("I-search: not found"); }
+            } else if self.buffer_count > 0 { self.insert(text); }
+            else { self.set_message("C-x C-f to open a file"); }
+            return;
+        }
+        if event != sdl2::EVENT_KEY_DOWN { return; }
+        let ctrl = (modifier & sdl2::KMOD_CTRL) != 0;
+        let alt = (modifier & sdl2::KMOD_ALT) != 0;
+        if key == sdl2::KEY_ESCAPE { self.cancel_command(); return; }
+        if self.command_active {
+            if key == sdl2::KEY_RETURN {
+                if self.meta_command {
+                    self.command_active = false;
+                    self.meta_command = false;
+                    self.execute_meta_command();
+                    return;
+                } else if self.open_command && self.command.len() > 0 {
+                    let opened = self.open(self.command.as_str());
+                    if opened >= 0 { self.set_message("Opened buffer"); }
+                    else { self.set_message("Buffer limit reached"); }
+                } else { self.set_message(""); }
+                self.command_active = false;
+                self.open_command = false;
+                return;
+            }
+            if key == sdl2::KEY_BACKSPACE && self.command.len() > 0 {
+                self.command.remove_at(self.command.len() - 1);
+                if self.open_command { self.set_message(self.command.as_str()); }
+                else if self.meta_command { self.set_message(self.command.as_str()); }
+                else { self.find_forward(); }
+            }
+            return;
+        }
+        // Emacs prefix map: C-x C-s writes the current buffer.
+        if self.prefix_x {
+            if ctrl && key == sdl2::KEY_S { self.save_buffer(); return; }
+            if ctrl && key == sdl2::KEY_F { self.begin_open(); self.prefix_x = false; return; }
+            if key == sdl2::KEY_B { self.cycle_buffer(); self.prefix_x = false; return; }
+            self.prefix_x = false;
+        }
+        if ctrl && key == sdl2::KEY_X { self.prefix_x = true; self.set_message("C-x-"); return; }
+        if alt && key == sdl2::KEY_X { self.begin_meta_command(); return; }
+        if ctrl && key == sdl2::KEY_S { self.begin_search(); return; }
+        if self.buffer_count == 0 { self.set_message("C-x C-f to open a file"); return; }
+        if ctrl && key == sdl2::KEY_SPACE { self.set_mark(); return; }
+        if ctrl && key == sdl2::KEY_W { self.kill_region(); return; }
+        if alt && key == sdl2::KEY_W { self.copy_region(); return; }
+        if ctrl && key == sdl2::KEY_K { self.kill_line(); return; }
+        if ctrl && key == sdl2::KEY_Y { self.yank(); return; }
+        if ctrl && key == sdl2::KEY_D { self.remove_active(self.cursor); self.modified = true; return; }
+        if alt && key == sdl2::KEY_F { self.move_word(); return; }
+        if alt && key == sdl2::KEY_B { self.move_word_backward(); return; }
+        if ctrl && key == sdl2::KEY_A { self.move_line_start(); return; }
+        if ctrl && key == sdl2::KEY_E { self.move_line_end(); return; }
+        if ctrl && key == sdl2::KEY_F { if self.cursor < self.active_len() { self.cursor += 1; } return; }
+        if ctrl && key == sdl2::KEY_B { if self.cursor > 0 { self.cursor -= 1; } return; }
+        if ctrl && key == sdl2::KEY_N { self.move_vertical(1); return; }
+        if ctrl && key == sdl2::KEY_P { self.move_vertical(-1); return; }
+        if ctrl && key == sdl2::KEY_G { self.cancel_command(); return; }
+        if key == sdl2::KEY_BACKSPACE { self.erase(); return; }
+        if key == sdl2::KEY_DELETE { self.remove_active(self.cursor); self.modified = true; return; }
+        if key == sdl2::KEY_RETURN { self.insert("\n"); return; }
+        if key == sdl2::KEY_LEFT { if self.cursor > 0 { self.cursor -= 1; } return; }
+        if key == sdl2::KEY_RIGHT { if self.cursor < self.active_len() { self.cursor += 1; } return; }
+        if key == sdl2::KEY_UP { self.move_vertical(-1); return; }
+        if key == sdl2::KEY_DOWN { self.move_vertical(1); return; }
+        if key == sdl2::KEY_HOME { self.cursor = 0; return; }
+        if key == sdl2::KEY_END { self.cursor = self.active_len(); return; }
+        return;
+    }
+
+    fn cursor(self: &TextEditor) -> Size { return self.cursor; }
+
+    fn close(self: &mut TextEditor) -> () {
+        self.content.release();
+        self.second_buffer.release();
+        self.third_buffer.release();
+        self.path_main.release();
+        self.path_second.release();
+        self.path_third.release();
+        self.command.release();
+        self.message.release();
+        self.kill_ring.release();
+        self.font.close();
+        return;
+    }
+}
+
+impl Editable for TextEditor {
+    fn insert(self: &mut TextEditor, value: str) -> () {
+        // The current String ABI appends in-place. Cursor navigation is still
+        // tracked and the storage upgrade to mid-buffer insertion is isolated
+        // to this method.
+        let count = core::text_size(value);
+        self.insert_active(self.cursor, value);
+        self.cursor += count;
+        self.modified = true;
+        return;
+    }
+    fn erase(self: &mut TextEditor) -> () {
+        if self.cursor > 0 {
+            self.cursor -= 1;
+            self.remove_active(self.cursor);
+            self.modified = true;
+        }
+        return;
+    }
+}
+
+impl Widget for TextEditor {
+    fn draw(self: &TextEditor, renderer: &sdl2::Renderer) -> () {
+        renderer.set_draw_color(30, 34, 42, 255);
+        renderer.fill_rect(&self.bounds);
+        // SDL_ttf owns glyph shaping and rasterization. The editor only lays
+        // out the resulting texture and paints the modal cursor.
+        let mut index: Size = 0;
+        let mut x: i32 = self.bounds.x + 12;
+        let mut y: i32 = self.bounds.y + 12;
+        let mut caret_x: i32 = x;
+        let mut caret_y: i32 = y;
+        while index < self.active_len() {
+            let code = self.active_byte_at(index) as i32;
+            if index == self.cursor { caret_x = x; caret_y = y; }
+            if code == 10 {
+                x = self.bounds.x + 12;
+                y += self.line_height;
+                index += 1;
+                continue;
+            }
+            x += self.char_width;
+            index += 1;
+        }
+        if self.cursor >= self.active_len() { caret_x = x; caret_y = y; }
+
+        if self.mark_active && self.buffer_count > 0 {
+            let mut selection_start = self.mark;
+            let mut selection_end = self.cursor;
+            if selection_start > selection_end { let swap = selection_start; selection_start = selection_end; selection_end = swap; }
+            let mut selection_index: Size = 0;
+            let mut selection_x = self.bounds.x + 12;
+            let mut selection_y = self.bounds.y + 12;
+            renderer.set_draw_color(55, 82, 120, 210);
+            while selection_index < selection_end {
+                let selection_code = self.active_byte_at(selection_index);
+                if selection_code == 10 { selection_x = self.bounds.x + 12; selection_y += self.line_height; }
+                else {
+                    if selection_index >= selection_start {
+                        let selection_rect = sdl2::rect(selection_x, selection_y, self.char_width, self.line_height);
+                        renderer.fill_rect(&selection_rect);
+                    }
+                    selection_x += self.char_width;
+                }
+                selection_index += 1;
+            }
+        }
+
+        if self.active_len() > 0 && self.font.valid() {
+            let surface = self.font.render_wrapped(self.active_text(), self.bounds.width - 24, 220, 225, 235, 255);
+            let texture = sdl2::texture_from_surface(renderer, &surface);
+            let mut visible_height = surface.height();
+            if visible_height > self.bounds.height - 62 { visible_height = self.bounds.height - 62; }
+            let source = sdl2::rect(0, 0, surface.width(), visible_height);
+            let destination = sdl2::rect(self.bounds.x + 12, self.bounds.y + 12, surface.width(), visible_height);
+            renderer.copy(&texture, &source, &destination);
+            texture.close();
+            surface.close();
+        }
+
+        // Blink at a human-friendly cadence. It is intentionally driven by
+        // SDL's monotonic clock, never by an extra redraw loop.
+        let cursor_visible = (sdl2::ticks() / 500) % 2 == 0;
+        if cursor_visible && self.buffer_count > 0 {
+            renderer.set_draw_color(240, 190, 80, 255);
+            let insert_cursor = sdl2::rect(caret_x, caret_y - 2, 2, self.line_height);
+            renderer.fill_rect(&insert_cursor);
+        }
+
+        if self.show_status && self.font.valid() {
+            let status: str = if self.buffer_count == 0 { "EMACS  |  C-x C-f find file" }
+                else if self.modified { "EMACS *  |  C-x C-s save  C-s search" }
+                else { "EMACS    |  C-x C-s save  C-s search" };
+            let status_surface = self.font.render(status, 130, 190, 220, 255);
+            let status_texture = sdl2::texture_from_surface(renderer, &status_surface);
+            let status_source = sdl2::rect(0, 0, status_surface.width(), status_surface.height());
+            let status_destination = sdl2::rect(self.bounds.x + 12, self.bounds.y + self.bounds.height - 46, status_surface.width(), status_surface.height());
+            renderer.copy(&status_texture, &status_source, &status_destination);
+            status_texture.close();
+            status_surface.close();
+            if self.message.len() > 0 {
+                let message_surface = self.font.render(self.message.as_str(), 245, 205, 110, 255);
+                let message_texture = sdl2::texture_from_surface(renderer, &message_surface);
+                let message_source = sdl2::rect(0, 0, message_surface.width(), message_surface.height());
+                let message_destination = sdl2::rect(self.bounds.x + 12, self.bounds.y + self.bounds.height - 25, message_surface.width(), message_surface.height());
+                renderer.copy(&message_texture, &message_source, &message_destination);
+                message_texture.close();
+                message_surface.close();
+            }
+        }
+        return;
+    }
+}
+
+impl EventHandler for TextEditor {
+    fn handle(self: &TextEditor, event: u32) -> bool {
+        return event == sdl2::EVENT_KEY_DOWN || event == sdl2::EVENT_TEXT_INPUT;
+    }
+}

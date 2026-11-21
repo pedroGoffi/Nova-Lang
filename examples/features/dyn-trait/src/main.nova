@@ -1,0 +1,14 @@
+import std;
+
+// dyn Trait stores a trait object whose method can be selected at runtime.
+trait Measure { fn measure(self: &Self) -> i32; }
+struct Item { value: i32 }
+impl Measure for Item { fn measure(self: &Item) -> i32 { return self.value; } }
+
+fn inspect(value: &dyn Measure) -> i32 { return value.measure(); }
+
+fn main() -> i32 {
+    // A concrete Item is passed through the dynamic trait interface.
+    let item = new Item { value: 42 };
+    return inspect(&item) - 42;
+}

@@ -1,0 +1,51 @@
+import std;
+use std::io;
+
+// Each async function becomes a schedulable task handle.
+async fn read_left() -> i64 {
+    return 20;
+}
+
+async fn read_right() -> i64 {
+    return 22;
+}
+
+async fn combine(left: i64, right: i64) -> i64 {
+    return left + right;
+}
+
+fn announce_start() -> () {
+    io::stdout().write_line("pipeline: iniciando duas tarefas");
+    return;
+}
+
+fn announce_join() -> () {
+    io::stdout().write_line("pipeline: resultados recebidos");
+    return;
+}
+
+fn announce_complete() -> () {
+    io::stdout().write_line("pipeline: combinacao concluida");
+    return;
+}
+
+fn main() -> i32 {
+    // spawn schedules independent tasks; wait joins each task's result.
+    announce_start();
+
+    let left_task = read_left();
+    let right_task = read_right();
+    spawn left_task;
+    spawn right_task;
+
+    let left: i64 = left_task.wait();
+    let right: i64 = right_task.wait();
+    announce_join();
+
+    let combine_task = combine(left, right);
+    spawn combine_task;
+    let result: i64 = combine_task.wait();
+    announce_complete();
+
+    return result as i32 - 42;
+}

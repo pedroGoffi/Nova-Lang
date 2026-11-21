@@ -5,8 +5,10 @@
 //! becomes a handle-returning factory, a body function, and a compiler-synthesized
 //! FFI factory. The LLVM backend generates a trampoline for this FFI factory.
 //!
-//! This is intentionally a restricted Linux backend (only i64 ABI for coroutine
-//! parameters, yielded values and final results); it does NOT pretend to provide
+//! This is still a restricted bootstrap backend: handles are `u64`, yielded
+//! values use the runtime's `i64` transport ABI, while final results may use
+//! any scalar or pointer ABI type and are converted at the trampoline boundary.
+//! It does NOT yet provide
 //! Rust-style Future<T>, pinning, ownership or a general-purpose borrow checker.
 use crate::ast::{self, Expr, FunctionMode, Item, Stmt, TypeRef};
 
@@ -28,7 +30,7 @@ fn expression(value: &mut Expr, mode: &FunctionMode) -> Result<(), String> {
             }
             expression(inner, mode)?;
             *value = Expr::Call(
-                "std::coro::native_yield_value".into(),
+                "std::abi::native::coro::native_yield_value".into(),
                 vec![(**inner).clone()],
             );
         }
@@ -38,7 +40,7 @@ fn expression(value: &mut Expr, mode: &FunctionMode) -> Result<(), String> {
             }
             expression(inner, mode)?;
             *value = Expr::Call(
-                "std::task::native_await_value".into(),
+                "std::abi::native::task::native_await_value".into(),
                 vec![(**inner).clone()],
             );
         }
@@ -64,7 +66,7 @@ fn expression(value: &mut Expr, mode: &FunctionMode) -> Result<(), String> {
                 expression(v, mode)?;
             }
         }
-        Expr::MethodCall(obj, _, args) => {
+        Expr::MethodCall(obj, _, args, _) => {
             expression(obj, mode)?;
             for v in args {
                 expression(v, mode)?;
@@ -179,19 +181,20 @@ fn expand(items: Vec<Item>) -> Result<Vec<Item>, String> {
                         function.name
                     ));
                 }
-                if !matches!(&function.result,TypeRef::Named(n) if n=="i64") {
+                if !coroutine_result_supported(&function.result) {
                     return Err(format!(
-                        "{}: gen/coro/async return type must be i64 in Nova 0.8 bootstrap",
+                        "{}: gen/coro/async return type must be a scalar or pointer value in Nova 0.8 bootstrap",
                         function.name
                     ));
                 }
-                if function
-                    .params
-                    .iter()
-                    .any(|p| !matches!(&p.ty,TypeRef::Named(n) if n=="i64" || n=="u64"))
+                if function.params.iter().any(|p| {
+                    !matches!(&p.ty, TypeRef::Named(n) if matches!(n.as_str(),
+                        "bool" | "char" | "i8" | "i16" | "i32" | "i64" |
+                        "u8" | "u16" | "u32" | "u64" | "f32" | "f64"))
+                })
                 {
                     return Err(format!(
-                        "{}: coroutine parameters must be i64 or u64 in Nova 0.8 bootstrap",
+                        "{}: coroutine parameters must be scalar values in Nova 0.8 bootstrap",
                         function.name
                     ));
                 }
@@ -263,6 +266,19 @@ fn expand(items: Vec<Item>) -> Result<Vec<Item>, String> {
     }
     Ok(output)
 }
+
+fn coroutine_result_supported(ty: &TypeRef) -> bool {
+    match ty {
+        TypeRef::Named(name) => matches!(name.as_str(),
+            "()" | "bool" | "char" |
+            "i8" | "i16" | "i32" | "i64" |
+            "u8" | "u16" | "u32" | "u64" |
+            "isize" | "usize" | "f32" | "f64" |
+            "str" | "String"),
+        TypeRef::Pointer { .. } | TypeRef::Reference { .. } => true,
+        _ => false,
+    }
+}
 // The keyword lowering below uses stable runtime ABI symbols. Programs with
 // `std = { builtin = "std" }` already declare those symbols. A standalone Nova
 // file is also allowed to use coroutine keywords without importing std, so
@@ -277,29 +293,35 @@ fn runtime_intrinsic(
     &'static str,
 )> {
     match name {
-        "std::coro::native_yield_value" => {
+        "__nova_internal_byte_offset" => Some((
+            "__internal",
+            "__nova_internal_byte_offset",
+            &[("address", "u64"), ("bytes", "u64")],
+            "u64",
+        )),
+        "std::abi::native::coro::native_yield_value" => {
             Some(("coro", "native_yield_value", &[("value", "i64")], "i64"))
         }
-        "std::coro::native_resume" => Some((
+        "std::abi::native::coro::native_resume" => Some((
             "coro",
             "native_resume",
             &[("handle", "u64"), ("input", "i64")],
             "i64",
         )),
-        "std::coro::native_drop" => Some(("coro", "native_drop", &[("handle", "u64")], "()")),
-        "std::generator::native_next" => {
+        "std::abi::native::coro::native_drop" => Some(("coro", "native_drop", &[("handle", "u64")], "()")),
+        "std::abi::native::generator::native_next" => {
             Some(("generator", "native_next", &[("handle", "u64")], "i64"))
         }
-        "std::generator::native_done" => {
+        "std::abi::native::generator::native_done" => {
             Some(("generator", "native_done", &[("handle", "u64")], "bool"))
         }
-        "std::task::native_await_value" => {
+        "std::abi::native::task::native_await_value" => {
             Some(("task", "native_await_value", &[("handle", "u64")], "i64"))
         }
-        "std::task::native_block_on" => {
+        "std::abi::native::task::native_block_on" => {
             Some(("task", "native_block_on", &[("handle", "u64")], "i64"))
         }
-        "std::task::native_spawn" => Some(("task", "native_spawn", &[("handle", "u64")], "()")),
+        "std::abi::native::task::native_spawn" => Some(("task", "native_spawn", &[("handle", "u64")], "()")),
         _ => None,
     }
 }
@@ -325,7 +347,22 @@ fn calls_in_expr(e: &Expr, out: &mut std::collections::BTreeSet<String>) {
                 calls_in_expr(e, out);
             }
         }
-        Expr::MethodCall(receiver, _, args) => {
+        Expr::MethodCall(receiver, method_name, args, _) => {
+            // `dispose handle` is parsed as a method call before type
+            // lowering. Synthesize the scalar-handle ABI declaration so a
+            // standalone source can use the coroutine keyword without an
+            // explicit std import.
+            let intrinsic = match method_name.as_str() {
+                "next" => Some("std::abi::native::generator::native_next"),
+                "finished" => Some("std::abi::native::generator::native_done"),
+                "wait" => Some("std::abi::native::task::native_block_on"),
+                "schedule" => Some("std::abi::native::task::native_spawn"),
+                "drop" => Some("std::abi::native::coro::native_drop"),
+                _ => None,
+            };
+            if let Some(intrinsic) = intrinsic {
+                out.insert(intrinsic.into());
+            }
             calls_in_expr(receiver, out);
             for e in args {
                 calls_in_expr(e, out);
@@ -472,31 +509,43 @@ fn add_runtime_externs(items: &mut Vec<Item>) {
         let Some((module, symbol, params, result)) = runtime_intrinsic(name) else {
             continue;
         };
+        let extern_item = Item::Extern(ast::ExternFunction {
+            name: symbol.into(),
+            c_variadic: false,
+            attributes: vec![],
+            params: params
+                .iter()
+                .map(|(name, ty)| ast::Param {
+                    name: (*name).into(),
+                    ty: TypeRef::Named((*ty).into()),
+                    default: None,
+                    attributes: vec![],
+                })
+                .collect(),
+            result: TypeRef::Named(result.into()),
+        });
+        if module == "__internal" {
+            items.push(extern_item);
+            continue;
+        }
         by_module
             .entry(module.into())
             .or_default()
-            .push(Item::Extern(ast::ExternFunction {
-                name: symbol.into(),
-                c_variadic: false,
-                attributes: vec![],
-                params: params
-                    .iter()
-                    .map(|(name, ty)| ast::Param {
-                        name: (*name).into(),
-                        ty: TypeRef::Named((*ty).into()),
-                        default: None,
-                    })
-                    .collect(),
-                result: TypeRef::Named(result.into()),
-            }));
+            .push(extern_item);
     }
     if !by_module.is_empty() {
         items.push(Item::Namespace {
             name: "std".into(),
-            items: by_module
-                .into_iter()
-                .map(|(name, items)| Item::Namespace { name, items })
-                .collect(),
+            items: vec![Item::Namespace {
+                name: "abi".into(),
+                items: vec![Item::Namespace {
+                    name: "native".into(),
+                    items: by_module
+                        .into_iter()
+                        .map(|(name, items)| Item::Namespace { name, items })
+                        .collect(),
+                }],
+            }],
         });
     }
 }
@@ -519,21 +568,21 @@ mod tests {
         // declaration exposed by std and exported by the C runtime.
         let expected = [
             (
-                "std::coro::native_yield_value",
+                "std::abi::native::coro::native_yield_value",
                 "coro",
                 "native_yield_value",
             ),
-            ("std::coro::native_resume", "coro", "native_resume"),
-            ("std::coro::native_drop", "coro", "native_drop"),
-            ("std::generator::native_next", "generator", "native_next"),
-            ("std::generator::native_done", "generator", "native_done"),
+            ("std::abi::native::coro::native_resume", "coro", "native_resume"),
+            ("std::abi::native::coro::native_drop", "coro", "native_drop"),
+            ("std::abi::native::generator::native_next", "generator", "native_next"),
+            ("std::abi::native::generator::native_done", "generator", "native_done"),
             (
-                "std::task::native_await_value",
+                "std::abi::native::task::native_await_value",
                 "task",
                 "native_await_value",
             ),
-            ("std::task::native_block_on", "task", "native_block_on"),
-            ("std::task::native_spawn", "task", "native_spawn"),
+            ("std::abi::native::task::native_block_on", "task", "native_block_on"),
+            ("std::abi::native::task::native_spawn", "task", "native_spawn"),
         ];
         for (qualified, module, symbol) in expected {
             let (actual_module, actual_symbol, _, _) = runtime_intrinsic(qualified)
@@ -580,10 +629,10 @@ mod tests {
         let hir = crate::hir::lower(&lowered).expect("builtin coroutine ABI is typed");
         let mir = crate::mir::lower(&hir).expect("builtin coroutine ABI lowers to MIR");
         let llvm = crate::codegen::generate(&mir);
-        assert!(llvm.contains("@__nova_std__coro____yield_value"), "{llvm}");
-        assert!(llvm.contains("@__nova_std__generator____next"), "{llvm}");
-        assert!(llvm.contains("@__nova_std__generator____done"), "{llvm}");
-        assert!(llvm.contains("@__nova_std__coro____drop"), "{llvm}");
+        assert!(llvm.contains("@__nova_std__old__coro____yield_value"), "{llvm}");
+        assert!(llvm.contains("@__nova_std__old__generator____next"), "{llvm}");
+        assert!(llvm.contains("@__nova_std__old__generator____done"), "{llvm}");
+        assert!(llvm.contains("@__nova_std__old__coro____drop"), "{llvm}");
 
         let explicit = parse(
             r#"
@@ -600,7 +649,7 @@ mod tests {
         assert_eq!(
             decls
                 .iter()
-                .filter(|s| s.as_str() == "std::coro::native_yield_value")
+                .filter(|s| s.as_str() == "std::abi::native::coro::native_yield_value")
                 .count(),
             1
         );

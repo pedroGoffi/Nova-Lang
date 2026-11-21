@@ -71,5 +71,5 @@ fn selfhost_038_loader_is_written_in_nova_with_source_backed_ast() {
     assert!(project.contains("fn module_folder(path: u64)"));
     assert!(project.contains("fn entry_from_manifest(path: u64)"));
     assert!(project.contains("fn visit(graph: Graph"));
-    assert!(!project.contains("std::env::native_arg_at("));
+    assert!(!project.contains("std::abi::native::env::native_arg_at("));
 }

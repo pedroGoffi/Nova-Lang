@@ -1,0 +1,45 @@
+use std::collections::vec::Vec;
+use std::core::types::Size;
+use std::collections::traits::Collection;
+
+pub concept SetElement<T> = integer<T> || boolean<T>;
+
+pub class Set<T> { values: Vec<T> }
+
+impl<T> Set<T> {
+    static fn new() -> Self {
+        return new Set<T> { values: Vec::new() };
+    }
+    fn len(self: &Set<T>) -> Size { return self.values.len(); }
+    fn is_empty(self: &Set<T>) -> bool { return self.values.is_empty(); }
+    fn index_of(self: &Set<T>, value: T) -> i64 {
+        let mut index: i64 = 0;
+        while index < self.len() as i64 {
+            if self.values.get(index) == value { return index; }
+            index += 1;
+        }
+        return -1;
+    }
+    fn contains(self: &Set<T>, value: T) -> bool { return self.index_of(value) >= 0; }
+    fn insert(self: &Set<T>, value: T) -> bool {
+        if self.contains(value) { return false; }
+        self.values.push(value); return true;
+    }
+    fn remove(self: &Set<T>, value: T) -> bool {
+        let index: i64 = self.index_of(value);
+        if index < 0 { return false; }
+        self.values.swap_remove(index); return true;
+    }
+    fn take(self: &Set<T>, value: T) -> std::core::option::Option<T> {
+        let index: i64 = self.index_of(value);
+        if index < 0 { return None; }
+        return Some(self.values.swap_remove(index));
+    }
+    fn clear(self: &Set<T>) -> () { self.values.clear(); return; }
+    fn drop(self: Set<T>) -> () { self.values.drop(); return; }
+}
+
+impl<T> Collection for Set<T> {
+    fn len(self: &Set<T>) -> Size { return self.len(); }
+    fn is_empty(self: &Set<T>) -> bool { return self.is_empty(); }
+}

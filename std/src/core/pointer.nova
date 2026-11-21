@@ -1,0 +1,14 @@
+use std::memory::raw;
+use std::core::types::Size;
+
+// Pointer operations remain explicit and unsafe, but their names belong to
+// the language-facing core instead of the LLVM namespace.
+[[unsafe]] pub fn is_null<T>(pointer: *const T) -> bool {
+    return (pointer as Size) == 0;
+}
+[[unsafe]] pub fn address_of<T>(pointer: *const T) -> Size {
+    return pointer as Size;
+}
+[[unsafe]] pub fn offset<T>(pointer: *mut T, index: Size) -> *mut T {
+    return raw::element_at::<T>(pointer, index);
+}

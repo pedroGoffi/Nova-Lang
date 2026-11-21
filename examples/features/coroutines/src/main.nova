@@ -1,0 +1,14 @@
+import std;
+
+// gen creates a resumable generator that pauses at each yield.
+gen fn values() -> i64 {    
+    yield 42;
+    return 0;
+}
+
+fn main() -> i32 {
+    // Calling the generator creates it; next starts it until the first yield.
+    let generator = values();
+    let value: i64 = next generator;
+    return value as i32 - 42;
+}

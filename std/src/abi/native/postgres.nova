@@ -1,0 +1,32 @@
+// Private runtime interface. Do not call from application code.
+// Ownership, type constraints and behavior belong to std public modules.
+[[unsafe]] pub extern fn native_pg_connect(dsn: str) -> u64;
+[[unsafe]] pub extern fn native_pg_connected(handle: u64) -> bool;
+[[unsafe]] pub extern fn native_pg_error(handle: u64) -> u64;
+[[unsafe]] pub extern fn native_pg_close(handle: u64) -> ();
+[[unsafe]] pub extern fn native_pg_params_new() -> u64;
+[[unsafe]] pub extern fn native_pg_params_count(handle: u64) -> i32;
+[[unsafe]] pub extern fn native_pg_bind_text(handle: u64, value: str) -> bool;
+[[unsafe]] pub extern fn native_pg_bind_i64(handle: u64, value: i64) -> bool;
+[[unsafe]] pub extern fn native_pg_bind_bool(handle: u64, value: bool) -> bool;
+[[unsafe]] pub extern fn native_pg_bind_f64(handle: u64, value: f64) -> bool;
+[[unsafe]] pub extern fn native_pg_bind_null(handle: u64) -> bool;
+[[unsafe]] pub extern fn native_pg_params_free(handle: u64) -> ();
+[[unsafe]] pub extern fn native_pg_query(connection: u64, sql: str, params: u64) -> u64;
+[[unsafe]] pub extern fn native_pg_result_status(handle: u64) -> i32;
+[[unsafe]] pub extern fn native_pg_result_error(handle: u64) -> u64;
+[[unsafe]] pub extern fn native_pg_result_sqlstate(handle: u64) -> u64;
+[[unsafe]] pub extern fn native_pg_result_free(handle: u64) -> ();
+[[unsafe]] pub extern fn native_pg_affected(handle: u64) -> i64;
+[[unsafe]] pub extern fn native_pg_rows(handle: u64) -> i64;
+[[unsafe]] pub extern fn native_pg_columns(handle: u64) -> i32;
+[[unsafe]] pub extern fn native_pg_column_index(handle: u64, name: str) -> i32;
+[[unsafe]] pub extern fn native_pg_column_name(handle: u64, index: i32) -> u64;
+[[unsafe]] pub extern fn native_pg_is_null(handle: u64, row: i64, column: i32) -> bool;
+[[unsafe]] pub extern fn native_pg_cell_text(handle: u64, row: i64, column: i32) -> u64;
+[[unsafe]] pub extern fn native_pg_cell_i64_valid(handle: u64, row: i64, column: i32) -> bool;
+[[unsafe]] pub extern fn native_pg_cell_i64(handle: u64, row: i64, column: i32) -> i64;
+[[unsafe]] pub extern fn native_pg_cell_bool_valid(handle: u64, row: i64, column: i32) -> bool;
+[[unsafe]] pub extern fn native_pg_cell_bool(handle: u64, row: i64, column: i32) -> bool;
+[[unsafe]] pub extern fn native_pg_valid_identifier(name: str) -> bool;
+[[unsafe]] pub extern fn native_pg_transaction(handle: u64, operation: i32) -> bool;

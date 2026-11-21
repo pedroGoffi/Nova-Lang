@@ -1,0 +1,8 @@
+import std;
+
+// Functions declare parameters and a return type explicitly.
+fn square(value: i32) -> i32 { return value * value; }
+
+fn main() -> i32 {
+    return square(7) - 49;
+}

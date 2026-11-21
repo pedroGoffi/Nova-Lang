@@ -368,11 +368,11 @@ fn class_inline_defer_and_scope_unwind_lower_to_mir() {
 fn typed_builder_and_string_parse() {
     parses(
         "standard library builder",
-        include_str!("../std/src/builder.nova"),
+        include_str!("../std/src/old/builder.nova"),
     );
     parses(
         "standard library string",
-        include_str!("../std/src/string.nova"),
+        include_str!("../std/src/old/string.nova"),
     );
 }
 
@@ -550,6 +550,27 @@ fn inheriting_drop_is_safe_but_replacing_it_is_rejected() {
 }
 
 #[test]
+fn derived_class_constructor_initializes_base_without_repeating_base_fields() {
+    let source = r#"
+        class Base { base_value: i32 }
+        impl Base {
+            static fn new() -> Self { return new Base { base_value: 40 }; }
+        }
+        class Child : Base { own_value: i32 }
+        impl Child {
+            static fn new() -> Self { return new Child { own_value: 2 }; }
+        }
+        fn main() -> i32 {
+            let child: Child = new Child { own_value: 2 };
+            return child.base_value + child.own_value - 42;
+        }
+    "#;
+    let lowered = crate::surface::lower(&parse_source(source)).unwrap();
+    let typed = crate::hir::lower(&lowered).unwrap();
+    crate::mir::lower(&typed).unwrap();
+}
+
+#[test]
 fn override_keeps_virtual_contract_for_grandchildren() {
     let source = r#"
         class First { x:i32 }
@@ -634,9 +655,9 @@ fn pointer_mutability_is_part_of_generic_type_unification() {
 
 #[test]
 fn typed_std_result_option_helpers_parse() {
-    parses("std option", include_str!("../std/src/option.nova"));
-    parses("std result", include_str!("../std/src/result.nova"));
-    parses("std error", include_str!("../std/src/error.nova"));
+    parses("std option", include_str!("../std/src/old/option.nova"));
+    parses("std result", include_str!("../std/src/old/result.nova"));
+    parses("std error", include_str!("../std/src/old/error.nova"));
 }
 
 #[test]
@@ -1007,8 +1028,8 @@ fn clean_stdlib_size_of_is_abi_aligned() {
     let source = r#"
         struct Record { enabled: bool, callback: fn(i64)->i64, count: i64 }
         fn main() -> i32 {
-            let bytes: u64 = std::raw::size_of::<Record>();
-            let alignment: u64 = std::raw::align_of::<Record>();
+            let bytes: u64 = size_of::<Record>();
+            let alignment: u64 = align_of::<Record>();
             if bytes != 24 || alignment != 8 { return 1; }
             return 0;
         }
@@ -1040,6 +1061,41 @@ fn clean_stdlib_pointer_casts_require_unsafe() {
     let typed = crate::hir::lower(&lowered).expect("unsafe casts must typecheck");
     let ir = crate::mir::lower(&typed).expect("pointer casts must lower");
     crate::mir::verify(&ir).expect("pointer casts must verify");
+}
+
+#[test]
+fn unsafe_pointer_address_roundtrip_survives_surface_and_hir() {
+    // byte_offset is a compiler intrinsic and converts *mut u8 -> Size (u64) -> *mut u8.
+    // All three phases must agree on the explicit, unsafe ABI conversion.
+    let source = r#"
+        [[unsafe]] fn address_roundtrip(pointer: *mut u8) -> *mut u8 {
+            let address: u64 = pointer as u64;
+            return address as (*mut u8);
+        }
+        fn main() -> i32 {
+            let mut value: u8 = 7;
+            unsafe {
+                let pointer: *mut u8 = &mut value as (*mut u8);
+                let restored: *mut u8 = address_roundtrip(pointer);
+                if *restored != 7 { return 1; }
+            }
+            return 0;
+        }
+    "#;
+    let parsed = parse_source(source);
+    let lowered = crate::surface::lower(&parsed).expect("surface must accept explicit u64 pointer casts");
+    let typed = crate::hir::lower(&lowered).expect("unsafe pointer casts must typecheck");
+    let mir = crate::mir::lower(&typed).expect("unsafe pointer casts must lower to MIR");
+    crate::mir::verify(&mir).expect("pointer casts must preserve typed MIR");
+    let llvm = crate::codegen::generate(&mir);
+    assert!(llvm.contains("ptrtoint"), "{llvm}");
+    assert!(llvm.contains("inttoptr"), "{llvm}");
+
+    // A valid raw-pointer parameter does not authorize an unsafe cast by itself.
+    let rejected = parse_source("fn bad(pointer: *mut u8) -> u64 { return pointer as u64; }");
+    let lowered = crate::surface::lower(&rejected).expect("surface checks type shape, not safety context");
+    let error = crate::hir::lower(&lowered).expect_err("safe pointer-to-address cast must fail");
+    assert!(error.contains("unsafe"), "{error}");
 }
 
 #[test]
@@ -1144,9 +1200,9 @@ fn coroutine_keyword_next_remains_a_legal_struct_field_name() {
 #[test]
 fn typed_async_template_stdlib_is_parseable() {
     for (name, source) in [
-        ("std::task", include_str!("../std/src/task.nova")),
-        ("std::generator", include_str!("../std/src/generator.nova")),
-        ("std::coro", include_str!("../std/src/coro.nova")),
+        ("std::old::task", include_str!("../std/src/old/task.nova")),
+        ("std::old::generator", include_str!("../std/src/old/generator.nova")),
+        ("std::old::coro", include_str!("../std/src/old/coro.nova")),
     ] {
         parses(name, source);
     }
@@ -1245,4 +1301,134 @@ fn character_decoder_rejects_non_scalars_and_bad_escapes() {
     for invalid in ["''", "'ab'", r"'\u{D800}'", r"'\u{110000}'", r"'\q'", "'\n'"] {
         assert!(decode(invalid).is_err(), "unexpectedly accepted {invalid:?}");
     }
+}
+
+#[test]
+fn explicit_method_type_arguments_parse_and_lower() {
+    let source = r#"
+        class Test { value: i32 }
+        impl Test {
+            fn test<T>(self: &mut Self) -> str { return type_name::<T>(); }
+            fn value_or<T>(self: &mut Self, replacement: T) -> T { return replacement; }
+        }
+        fn main() -> i32 {
+            auto mut t = new Test { value: 0 };
+            auto name = t.test::<str>();
+            auto v = t.value_or::<i32>(7);
+            return v - 7;
+        }
+    "#;
+    let parsed = parse_source(source);
+    let lowered = crate::surface::lower(&parsed)
+        .expect("explicit method type arguments should specialize without inference");
+    let debug = format!("{lowered:?}");
+    assert!(debug.contains("Test__test__str"), "{debug}");
+    assert!(debug.contains("Test__value_or__i32"), "{debug}");
+}
+
+#[test]
+fn explicit_method_type_argument_arity_is_checked() {
+    let source = r#"
+        class Test { value: i32 }
+        impl Test { fn test<T>(self: &mut Self) -> i32 { return 0; } }
+        fn main() -> i32 {
+            auto mut t = new Test { value: 0 };
+            t.test::<str, i32>();
+            return 0;
+        }
+    "#;
+    let error = crate::surface::lower(&parse_source(source))
+        .expect_err("incorrect generic arity must be diagnosed");
+    assert!(error.contains("expects 1 explicit generic arguments"), "{error}");
+}
+
+#[test]
+fn method_generics_are_distinct_from_receiver_generics() {
+    let source = r#"
+        class Wrapper<T> { value: T }
+        impl<T> Wrapper<T> {
+            fn tag<U>(self: &mut Self) -> str { return type_name::<U>(); }
+        }
+        fn main() -> i32 {
+            auto mut object = new Wrapper<i32> { value: 1 };
+            auto label = object.tag::<str>();
+            return 0;
+        }
+    "#;
+    let lowered = crate::surface::lower(&parse_source(source))
+        .expect("generic impl and method arguments must be independent");
+    let functions = format!("{lowered:?}");
+    assert!(functions.contains("Wrapper__tag__i32__str"), "{functions}");
+}
+
+#[test]
+fn constrained_blanket_impl_is_resolved_lazily_for_concrete_receivers() {
+    let source = r#"
+        concept Arithmetic<T> = integer<T>;
+        impl<T: Arithmetic> T {
+            fn cast_to<To: Arithmetic>(self: Self) -> To { return self as To; }
+        }
+        fn main() -> i32 {
+            let value: u64 = 7;
+            let converted: i32 = value.cast_to::<i32>();
+            return converted;
+        }
+    "#;
+    let lowered = crate::surface::lower(&parse_source(source))
+        .expect("the constrained blanket impl should be selected at the call site");
+    let debug = format!("{lowered:?}");
+    assert!(debug.contains("T__cast_to__u64__i32"), "{debug}");
+}
+
+#[test]
+fn constrained_blanket_constructor_is_resolved_by_new_syntax() {
+    let source = r#"
+        concept Arithmetic<T> = integer<T>;
+        impl<T: Arithmetic> T {
+            static fn new(value: T) -> T { return value; }
+        }
+        fn main() -> i32 {
+            let value: i32 = new(7);
+            return value - 7;
+        }
+    "#;
+    let lowered = crate::surface::lower(&parse_source(source))
+        .expect("new should resolve a constrained blanket constructor lazily");
+    let debug = format!("{lowered:?}");
+    assert!(debug.contains("T__new__i32"), "{debug}");
+}
+
+#[test]
+fn unconstrained_blanket_impl_is_rejected() {
+    let source = r#"
+        impl<T> T { fn nope(self: Self) -> i32 { return 0; } }
+        fn main() -> i32 { return 0; }
+    "#;
+    let error = crate::surface::lower(&parse_source(source))
+        .expect_err("a blanket impl must declare a concept bound");
+    assert!(error.contains("requires a concept bound"), "{error}");
+}
+
+#[test]
+fn static_constructor_syntax_and_template_bounds_parse() {
+    let program=parse_source(r#"
+        concept Whole<T>=integer<T>;
+        struct P<T:Whole>{value:T}
+        impl<T> P<T>{
+            static fn new(value:T)->Self{return new P<T>{value:value};}
+            static fn empty()->P<T>{return new P<T>{value:0 as T};}
+            fn read(self:&P<T>)->T{return self.value;}
+        }
+        fn main()->i32{
+            let p=new P<i32>(42);
+            let q=P::empty::<i32>();
+            return p.read()-42;
+        }
+    "#);
+    assert!(program.items.iter().any(|item|matches!(item,crate::ast::Item::Struct(s)
+        if s.name=="P" && s.concept_bounds.len()==1)));
+    let methods=program.items.iter().find_map(|item|match item {
+        crate::ast::Item::Impl(block)=>Some(&block.methods), _=>None,
+    }).unwrap();
+    assert!(methods.iter().any(|m|m.name=="new" && m.attributes.iter().any(|a|a.name=="static")));
 }

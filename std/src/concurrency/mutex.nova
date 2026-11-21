@@ -1,0 +1,8 @@
+pub class Mutex<T> { value: T, locked: bool }
+impl<T> Mutex<T> {
+    static fn new(value: T) -> Self { return new Mutex<T> { value: value, locked: false }; }
+    fn is_locked(self: &Mutex<T>) -> bool { return self.locked; }
+    fn lock(self: &Mutex<T>) -> bool { if self.locked { return false; } self.locked = true; return true; }
+    fn unlock(self: &Mutex<T>) -> () { self.locked = false; return; }
+    fn get(self: &Mutex<T>) -> T { return self.value; }
+}

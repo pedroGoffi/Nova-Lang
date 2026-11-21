@@ -1,0 +1,35 @@
+# Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
+nova_http_tests 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/tests/fixtures/nova_http hash=e293ddd15a841dfe
+nova_http 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_http hash=8daca684d0957ad3
+NB 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/NB hash=f47cf29d9d102c4e
+std 0.20.0 builtin hash=7fd769607a47e27d
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/tests/fixtures/nova_http/src/main.nova hash=e293ddd15a841dfe
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_http/src/lib.nova hash=8daca684d0957ad3
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_http/src/bytes.nova hash=18d7fe849fd3cab3
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_http/src/header.nova hash=8d843f45f7d87b53
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_http/src/url.nova hash=2985d980dae25d19
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_http/src/status.nova hash=4f4ba975ccd6c431
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_http/src/request.nova hash=7ff7cd291b956d2f
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_http/src/response.nova hash=227179e4fd651951
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_http/src/wire.nova hash=7e7c53f798efd902
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_http/src/native.nova hash=39a16b61bdc7aecb
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_http/src/transport.nova hash=63631034973ff5af
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_http/src/mux.nova hash=45b14424de88a0c5
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_http/src/server.nova hash=fa9debb8b75d4c80
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_http/src/client.nova hash=f68190e0bd52981b
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_http/src/cookie.nova hash=3fa3ef47b77f3f4e
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_http/src/httptest.nova hash=01585512f3024dc9
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_http/src/file.nova hash=20a1d3eb0ebc86a9
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/NB/src/lib.nova hash=f47cf29d9d102c4e
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/NB/src/core.nova hash=c98c4787b6e80435
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/NB/src/di.nova hash=3137bcaff70ff605
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/NB/src/web.nova hash=60fb88a13016c764
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/NB/src/logging.nova hash=95d623a517169840
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/NB/src/config.nova hash=b3807797c5a58558
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/NB/src/app.nova hash=4de4e1f656d9c8e7
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/NB/src/beans.nova hash=a2964467367e0c2f
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/NB/src/http.nova hash=a9fd63205edd433d
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/NB/src/response.nova hash=68c0287ce3bd6c8e
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/NB/src/security.nova hash=fb4a2baf611cd48b
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/NB/src/health.nova hash=937493931e521137
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/NB/src/validation.nova hash=f3c666d832bcd876

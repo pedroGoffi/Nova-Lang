@@ -1,0 +1,2 @@
+use std::core::types::Millis;
+pub fn now_millis() -> Millis { return 0; }

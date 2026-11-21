@@ -1,0 +1,3 @@
+use std::text::string::String;
+pub concept JsonValue<T> = has_method<T,to_json>;
+pub fn quote(value: str) -> std::text::string::String { return String::from(value); }

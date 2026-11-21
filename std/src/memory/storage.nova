@@ -1,0 +1,95 @@
+use std::memory::raw;
+use std::core::types::Size;
+use std::memory::traits::MemoryBlock;
+use std::memory::traits::Resizable;
+use std::error::error::Error;
+use std::error::result::Result;
+
+// Base class for typed owning collections. Vec, String and future sequences
+// inherit the allocation and capacity state instead of duplicating it.
+pub class Storage<T> { data: *mut T, capacity: Size }
+
+impl<T> Storage<T> {
+    static fn new() -> Self {
+        unsafe {
+            return new Storage<T> {
+                data: raw::alloc_elements::<T>(0), capacity: 0
+            };
+        }
+    }
+    fn data_ptr(self: &Storage<T>) -> *mut T { return self.data; }
+    fn capacity(self: &Storage<T>) -> Size { return self.capacity; }
+    [[unsafe]] fn grow(self: &mut Storage<T>, requested: Size) -> () {
+        if requested <= self.capacity { return; }
+        let max: Size = -1 as Size;
+        let mut target_capacity: Size = self.capacity;
+        if target_capacity == 0 { target_capacity = 8; }
+        while target_capacity < requested {
+            if target_capacity > max / 2 { target_capacity = requested; break; }
+            target_capacity *= 2;
+        }
+        unsafe {
+            self.data = raw::reallocate_elements::<T>(self.data, self.capacity, target_capacity);
+        }
+        self.capacity = target_capacity;
+        return;
+    }
+}
+
+impl<T> MemoryBlock for Storage<T> {
+    fn data_ptr(self: &Storage<T>) -> *mut u8 { return self.data as (*mut u8); }
+    fn capacity(self: &Storage<T>) -> Size { return self.capacity; }
+}
+
+impl<T> Resizable for Storage<T> {
+    fn data_ptr(self: &Storage<T>) -> *mut u8 { return self.data as (*mut u8); }
+    fn capacity(self: &Storage<T>) -> Size { return self.capacity; }
+    fn reserve(self: &mut Storage<T>, requested: Size) -> Result<(),Error> {
+        unsafe { self.grow(requested); }
+        return Ok(());
+    }
+}
+
+// Reusable typed allocation metadata for Vec, String and arena types. It owns
+// slots, but not initialized values; the owning collection tracks initialized len.
+pub struct RawStorage<T> { data: *mut T, capacity: Size }
+
+pub fn new_storage<T>() -> RawStorage<T> {
+    unsafe {
+        return new RawStorage<T> {
+            data: raw::alloc_elements::<T>(0), capacity: 0
+        };
+    }
+}
+
+impl<T> RawStorage<T> {
+    [[unsafe]] fn data_ptr(self: &RawStorage<T>) -> *mut T { return self.data; }
+    fn capacity(self: &RawStorage<T>) -> Size { return self.capacity; }
+    [[unsafe]] fn reserve_raw(self: &mut RawStorage<T>, new_capacity: Size) -> () {
+        if new_capacity <= self.capacity { return; }
+        unsafe {
+            self.data = raw::reallocate_elements::<T>(
+                self.data, self.capacity, new_capacity);
+        }
+        self.capacity = new_capacity;
+        return;
+    }
+    fn drop(self: RawStorage<T>) -> () {
+        unsafe { raw::deallocate_bytes(self.data as (*mut u8)); }
+        return;
+    }
+}
+
+impl<T> MemoryBlock for RawStorage<T> {
+    fn data_ptr(self: &RawStorage<T>) -> *mut u8 { return self.data as (*mut u8); }
+    fn capacity(self: &RawStorage<T>) -> Size { return self.capacity; }
+}
+
+impl<T> Resizable for RawStorage<T> {
+    fn data_ptr(self: &RawStorage<T>) -> *mut u8 { return self.data as (*mut u8); }
+    fn capacity(self: &RawStorage<T>) -> Size { return self.capacity; }
+    fn reserve(self: &mut RawStorage<T>, requested: Size) -> Result<(),Error> {
+        unsafe { self.reserve_raw(requested); }
+        return Ok(());
+    }
+}

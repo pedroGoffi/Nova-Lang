@@ -1,0 +1,12 @@
+// High-level data structures. Allocation and ownership are inherited from
+// std::memory::storage::Storage.
+pub mod vec;
+pub mod list;
+pub mod map;
+pub mod set;
+pub mod deque;
+pub mod hash;
+pub mod tree;
+pub mod heap;
+pub mod iterator;
+pub mod traits;

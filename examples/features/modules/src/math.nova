@@ -1,0 +1,2 @@
+// Module functions are private by default; pub makes this symbol importable.
+pub fn answer() -> i32 { return 42; }

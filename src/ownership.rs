@@ -6,8 +6,9 @@
 //! * join points retain a value only when it exists on every predecessor.
 //! * moved owners have their destruction suppressed through MIR drop flags.
 //!
-//! Borrowing currently has lexical lifetime inference. Precise NLL and partial
-//! moves are intentionally rejected rather than incorrectly accepted.
+//! Borrowing currently has lexical lifetime inference. Precise NLL and struct
+//! field partial moves are intentionally rejected; fixed-array moves at
+//! constant indices use independent slot flags instead.
 use crate::{
     hir::{self, Expr, ExprKind, LocalId, PlaceProjection, Stmt},
     types::{TypeId, TypeKind, Types},
@@ -24,17 +25,42 @@ enum Availability {
 struct Loan {
     source: LocalId,
     exclusive: bool,
+    // The first struct field selected from the root. Tracking this projection
+    // lets `&mut self.player` coexist with `&self.level.map`, while retaining
+    // exclusivity for two borrows of the same field.
+    field: Option<usize>,
 }
 #[derive(Clone)]
 struct State {
     available: Vec<Availability>,
     loans: HashMap<LocalId, Loan>, // borrower local -> source local
     protected: HashSet<LocalId>,   // named locals read by deferred cleanups
+    // Fixed-array owner slots are tracked independently from the root. This
+    // permits `let item = values[i]` without disabling cleanup for siblings.
+    slots: HashMap<(LocalId, usize), Availability>,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum UseMode {
     Read,
     Consume,
+}
+
+fn merge_slots(state: &mut State, left: &State, right: &State) {
+    let keys: HashSet<(LocalId, usize)> = left
+        .slots
+        .keys()
+        .chain(right.slots.keys())
+        .copied()
+        .collect();
+    state.slots.clear();
+    for key in keys {
+        let left = left.slots.get(&key).copied().unwrap_or(Availability::Available);
+        let right = right.slots.get(&key).copied().unwrap_or(Availability::Available);
+        let merged = if left == right { left } else { Availability::MaybeMoved };
+        if merged != Availability::Available {
+            state.slots.insert(key, merged);
+        }
+    }
 }
 
 fn owns_value(types: &Types, ty: TypeId, explicit_drop: &HashSet<String>) -> bool {
@@ -50,7 +76,14 @@ fn owns_value(types: &Types, ty: TypeId, explicit_drop: &HashSet<String>) -> boo
                     return true;
                 }
                 let info = &types.structs[struct_id];
-                let owning = explicit_drop.contains(&info.name)
+                // `class` is identity-bearing and therefore move-only even
+                // when it does not currently define a destructor. A plain
+                // `struct` may remain implicitly Copy when all of its fields
+                // are Copyable; keeping this distinction aligned with the
+                // concept registry prevents class handles from being copied
+                // merely because their cleanup is provided externally.
+                let owning = info.is_class
+                    || explicit_drop.contains(&info.name)
                     || info
                         .fields
                         .iter()
@@ -77,6 +110,17 @@ struct Checker<'a> {
     explicit_drop: &'a HashSet<String>,
 }
 impl Checker<'_> {
+    fn loans_overlap(left: Loan, right: Loan) -> bool {
+        left.source == right.source && (left.field.is_none() || right.field.is_none() || left.field == right.field)
+    }
+
+    fn field_projection(place: &hir::Place) -> Option<usize> {
+        place.projections.iter().find_map(|projection| match projection {
+            PlaceProjection::Field(field) => Some(*field),
+            PlaceProjection::Deref | PlaceProjection::Index(_) => None,
+        })
+    }
+
     fn name(&self, local: LocalId) -> &str {
         &self.function.locals[local].name
     }
@@ -162,6 +206,7 @@ impl Checker<'_> {
                         for (position,(left,right)) in on_true.available.iter().zip(&on_false.available).enumerate() {
                             state.available[position] = if left==right { *left } else { Availability::MaybeMoved };
                         }
+                        merge_slots(state, &on_true, &on_false);
                         state.loans.extend(on_true.loans);
                         state.loans.extend(on_false.loans);
                     }
@@ -201,16 +246,18 @@ impl Checker<'_> {
                     // Conservatively lock the entire root (even if indices differ).
                     // This also prevents mutating/reallocating an array while an
                     // element reference remains live.
+                    let requested = Loan { source: root, exclusive: *mutable, field: Self::field_projection(place) };
                     if state.loans.values().any(|loan|
-                        loan.source == root && (*mutable || loan.exclusive)) {
+                        Self::loans_overlap(*loan, requested) && (*mutable || loan.exclusive)) {
                         return Err(format!("conflicting {}borrow of '{}'",
                             if *mutable { "mutable " } else { "shared " }, self.name(root)));
                     }
-                    Ok(Some(Loan { source: root, exclusive: *mutable }))
+                    Ok(Some(requested))
                 } else {
                     Ok(None)
                 }
             }
+            ExprKind::DynObjectRef { value, .. } => self.inspect(value, state, mode),
             ExprKind::Field(parent, _) => {
                 // Reading a field does not consume its whole parent; moving
                 // individual fields requires per-field drop flags (not yet legal).
@@ -240,12 +287,31 @@ impl Checker<'_> {
                 self.inspect(parent, state, UseMode::Read)?;
                 self.inspect(index, state, UseMode::Read)?;
                 if mode == UseMode::Consume && owned && !self.function.name.ends_with("__drop") {
-                    return Err(
-                        "moving an owning indexed element requires an owned iterator".into(),
-                    );
+                    let Some(array) = (match &parent.kind {
+                        ExprKind::Local(local) => Some(*local),
+                        _ => None,
+                    }) else {
+                        return Err("moving an owning indexed element requires a direct array local".into());
+                    };
+                    let Some(slot) = (match &index.kind {
+                        ExprKind::Int(value) if *value >= 0 => usize::try_from(*value).ok(),
+                        _ => None,
+                    }) else {
+                        return Err("moving an owning array element requires a constant index".into());
+                    };
+                    self.alive(state, array)?;
+                    self.ensure_not_borrowed(state, array, "move")?;
+                    match state.slots.get(&(array, slot)).copied().unwrap_or(Availability::Available) {
+                        Availability::Available => {}
+                        Availability::Moved => return Err(format!("use of moved array element '{}[{slot}]'", self.name(array))),
+                        Availability::MaybeMoved => return Err(format!("array element '{}[{slot}]' may have been moved", self.name(array))),
+                    }
+                    state.slots.insert((array, slot), Availability::Moved);
+                    expression.kind = ExprKind::MoveIndex(parent.clone(), index.clone());
                 }
                 Ok(None)
             }
+            ExprKind::MoveIndex(..) => Err("compiler bug: ownership pass was run twice".into()),
             ExprKind::Call(id, arguments) => {
                 let signature = self
                     .signatures
@@ -257,34 +323,56 @@ impl Checker<'_> {
                 {
                     return Err("compiler bug: typed HIR call arity mismatch".into());
                 }
+                let mut returned_loan = None;
                 for (index, argument) in arguments.iter_mut().enumerate() {
-                    // C varargs are already ABI-checked as scalars/pointers in
-                    // typed HIR. Extra arguments have no declared parameter.
-                    let argument_mode = if let Some(parameter) = signature.params.get(index) {
-                        let parameter_ty = signature.locals[*parameter].ty;
-                        if is_copy(self.types, parameter_ty, self.explicit_drop) {
-                            UseMode::Read
-                        } else {
-                            UseMode::Consume
-                        }
-                    } else {
+                    let parameter_ty = signature.params.get(index).map(|p| signature.locals[*p].ty);
+                    let mutable_reference = parameter_ty.is_some_and(|ty| matches!(
+                        self.types.kind(ty), TypeKind::Reference { mutable: true, .. }
+                    ));
+                    // Passing an existing mutable reference to a method creates a
+                    // temporary reborrow, not a move of the caller's capability.
+                    let argument_mode = if mutable_reference || parameter_ty.is_none_or(|ty|
+                        is_copy(self.types, ty, self.explicit_drop)) {
                         UseMode::Read
+                    } else {
+                        UseMode::Consume
                     };
                     let loan = self.inspect(argument, state, argument_mode)?;
+                    let loan = if mutable_reference {
+                        match &argument.kind {
+                            ExprKind::Local(local) => {
+                                // A reference parameter has an external referent;
+                                // locally borrowed references retain their source.
+                                loan.or(Some(Loan { source: *local, exclusive: true, field: None }))
+                            }
+                            _ => loan,
+                        }
+                    } else { loan };
                     if let Some(loan) = loan {
                         if temporary_loans.iter().any(|existing| {
-                            existing.source == loan.source && (existing.exclusive || loan.exclusive)
+                            Self::loans_overlap(*existing, loan) && (existing.exclusive || loan.exclusive)
                         }) {
                             return Err(format!(
                                 "conflicting borrows of '{}' in the same function call",
                                 self.name(loan.source)
                             ));
                         }
+                        if index == 0 && mutable_reference {
+                            returned_loan = Some(loan);
+                        }
                         temporary_loans.push(loan);
                     }
                 }
                 if matches!(self.types.kind(expression.ty), TypeKind::Reference { .. }) {
-                    return Err("borrowed return from a function needs explicit lifetime relationships (not supported in this release)".into());
+                    // Only a method returning its receiver's reference type can
+                    // propagate a loan. Arbitrary borrowed function results still
+                    // require explicit lifetime relationships.
+                    let receiver_ty = signature.params.first().map(|p| signature.locals[*p].ty);
+                    if !signature.name.contains("__") || receiver_ty != Some(expression.ty) {
+                        return Err("borrowed return from a function needs explicit lifetime relationships (not supported in this release)".into());
+                    }
+                    return returned_loan.map(Some).ok_or_else(||
+                        "cannot establish receiver lifetime for borrowed method result".into());
                 }
                 Ok(None)
             }
@@ -306,7 +394,7 @@ impl Checker<'_> {
                         },
                     )? {
                         if temporary_loans.iter().any(|previous| {
-                            previous.source == loan.source && (previous.exclusive || loan.exclusive)
+                            Self::loans_overlap(*previous, loan) && (previous.exclusive || loan.exclusive)
                         }) {
                             return Err(format!(
                                 "conflicting borrows of '{}' in indirect call",
@@ -332,10 +420,40 @@ impl Checker<'_> {
                 }
                 Ok(None)
             }
-            ExprKind::Unary(_, inner) | ExprKind::Deref(inner) | ExprKind::Cast(inner) => {
+            ExprKind::Deref(inner) => {
                 let borrow = self.inspect(inner, state, UseMode::Read)?;
                 if mode == UseMode::Consume && owned {
-                    return Err("cannot move a non-Copy value through a dereference or cast; move the owner".into());
+                    // HIR already requires an `unsafe` block for every raw
+                    // dereference. A mutable raw pointer represents an
+                    // explicitly unchecked storage capability: reading a T
+                    // transfers ownership from that initialized slot. This
+                    // is NOT permitted through an ordinary &T / &mut T.
+                    if !matches!(self.types.kind(inner.ty), TypeKind::Pointer {mutable:true,..}) {
+                        return Err("cannot move an owning value through a reference; use unsafe *mut T storage".into());
+                    }
+                }
+                Ok(borrow)
+            }
+            ExprKind::Cast(inner) => {
+                let borrow = self.inspect(inner, state, UseMode::Read)?;
+                if mode == UseMode::Consume && owned {
+                    return Err("cannot move a non-Copy value through a cast; move the owner".into());
+                }
+                // The reference is an intermediate in `&mut value as *mut T`.
+                // Raw pointers are unsafe capabilities, not borrow-checked
+                // references: do not register the temporary reference's loan
+                // against the new pointer local. Normal &T/&mut T values keep
+                // their reference lifetime checks.
+                if matches!(self.types.kind(expression.ty), TypeKind::Pointer { .. }) {
+                    Ok(None)
+                } else {
+                    Ok(borrow)
+                }
+            }
+            ExprKind::Unary(_, inner) => {
+                let borrow = self.inspect(inner, state, UseMode::Read)?;
+                if mode == UseMode::Consume && owned {
+                    return Err("cannot move a non-Copy value through a cast; move the owner".into());
                 }
                 Ok(borrow)
             }
@@ -364,7 +482,7 @@ impl Checker<'_> {
             if state
                 .loans
                 .values()
-                .any(|old| old.source == new_loan.source && (old.exclusive || new_loan.exclusive))
+                .any(|old| Self::loans_overlap(*old, new_loan) && (old.exclusive || new_loan.exclusive))
             {
                 return Err(format!(
                     "conflicting borrow of '{}'",
@@ -386,6 +504,7 @@ impl Checker<'_> {
                 Stmt::Let { local, init } => {
                     let loan = self.inspect(init, state, UseMode::Consume)?;
                     state.available[*local] = Availability::Available;
+                    state.slots.retain(|(root, _), _| *root != *local);
                     self.record_loan(state, *local, loan)?;
                     declared.push(*local);
                 }
@@ -406,6 +525,7 @@ impl Checker<'_> {
                     state.loans.remove(local);
                     let loan = self.inspect(value, state, UseMode::Consume)?;
                     state.available[*local] = Availability::Available;
+                    state.slots.retain(|(root, _), _| *root != *local);
                     self.record_loan(state, *local, loan)?;
                 }
                 Stmt::DerefSet { local, value } => {
@@ -486,6 +606,7 @@ impl Checker<'_> {
                                     Availability::MaybeMoved
                                 };
                             }
+                            merge_slots(state, &on_true, &on_false);
                             state.loans.extend(on_true.loans);
                             state.loans.extend(on_false.loans);
                         }
@@ -564,6 +685,19 @@ impl Checker<'_> {
                 ));
             }
         }
+        for ((root, slot), first) in &before.slots {
+            let last = after
+                .slots
+                .get(&(*root, *slot))
+                .copied()
+                .unwrap_or(Availability::Available);
+            if *first == Availability::Available && last != Availability::Available {
+                return Err(format!(
+                    "array element '{}[{slot}]' is consumed in a loop; reinitialize it before the next iteration",
+                    self.name(*root)
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -613,12 +747,17 @@ fn collect_locals(expr: &Expr, out: &mut HashSet<LocalId>) {
                 if let PlaceProjection::Index(index) = projection { collect_locals(index, out); }
             }
         }
+        ExprKind::DynObjectRef { value, .. } => collect_locals(value, out),
         ExprKind::Unary(_, item)
         | ExprKind::Deref(item)
         | ExprKind::Cast(item)
         | ExprKind::Field(item, _)
         | ExprKind::TakeMatchField(item, _) => collect_locals(item, out),
         ExprKind::Binary(left, _, right) | ExprKind::Index(left, right) => {
+            collect_locals(left, out);
+            collect_locals(right, out);
+        }
+        ExprKind::MoveIndex(left, right) => {
             collect_locals(left, out);
             collect_locals(right, out);
         }
@@ -637,6 +776,20 @@ fn collect_locals(expr: &Expr, out: &mut HashSet<LocalId>) {
     }
 }
 pub fn check(program: &mut hir::Program) -> Result<(), String> {
+    check_impl(program, None)
+}
+/// Collect one ownership/borrow error from each independent function.
+/// No MIR is produced if any function violates the ownership contract.
+pub fn check_all_errors(program: &mut hir::Program) -> Result<(), Vec<String>> {
+    let mut errors = Vec::new();
+    check_impl(program, Some(&mut errors)).map_err(|error| {
+        if errors.is_empty() { vec![error] } else { errors }
+    })
+}
+fn check_impl(
+    program: &mut hir::Program,
+    mut collected: Option<&mut Vec<String>>,
+) -> Result<(), String> {
     let explicit_drop: HashSet<String> = program
         .functions
         .iter()
@@ -658,20 +811,27 @@ pub fn check(program: &mut hir::Program) -> Result<(), String> {
             available: vec![Availability::Moved; function.locals.len()],
             loans: HashMap::new(),
             protected: HashSet::new(),
+            slots: HashMap::new(),
         };
         for parameter in &function.params {
             state.available[*parameter] = Availability::Available;
         }
-        checker
-            .visit_block(&mut body, &mut state)
-            .map_err(|error| {
-                format!(
-                    "{error}\n  = ownership: in function '{}'",
-                    checker.function.name
-                )
-            })?;
+        let result = checker.visit_block(&mut body, &mut state).map_err(|error| {
+            format!("{error}\n  = ownership: in function '{}'", checker.function.name)
+        });
         drop(checker);
         function.body = body;
+        if let Err(error) = result {
+            if let Some(errors) = collected.as_deref_mut() {
+                if errors.len() < 64 { errors.push(error); }
+                if errors.len() >= 64 { break; }
+            } else { return Err(error); }
+        }
+    }
+    if let Some(errors) = collected {
+        if !errors.is_empty() {
+            return Err(format!("{} ownership error(s)", errors.len()));
+        }
     }
     Ok(())
 }

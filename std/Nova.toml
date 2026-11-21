@@ -1,6 +1,6 @@
 [package]
 name = "std"
 version = "0.20.0"
-entry = "src/lib.nova"
+entry = "src/core/manifest.nova"
 
 [dependencies]

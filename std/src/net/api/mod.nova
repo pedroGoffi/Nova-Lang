@@ -1,0 +1,4 @@
+// User-facing networking APIs. Raw descriptors, sockaddr layouts and LLVM
+// calls stay behind net::tcp, net::udp and net::address.
+pub mod client;
+pub mod server;

@@ -2,14 +2,15 @@
 //! Operates on the source AST after macro expansion and effect checking. Only
 //! calls whose arguments are numeric constants are folded; other calls remain
 //! ordinary runtime functions. Unsupported operations are not silently executed.
-use crate::ast::{self, BinaryOp, Expr, Function, Item, Stmt, UnaryOp};
-use std::collections::HashMap;
+use crate::ast::{self, BinaryOp, Expr, Function, Item, Stmt, UnaryOp, TypeRef};
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Value {
     Int(i64),
     Bool(bool),
     Str(String),
+    Float(String),
 }
 impl Value {
     fn int(self) -> Result<i64, String> {
@@ -38,9 +39,35 @@ fn q(ns: &str, name: &str) -> String {
         format!("{ns}::{name}")
     }
 }
+
+// The scalar const evaluator only handles i64/bool/str. Nova-authored AST
+// transforms run in proc_macros::Engine, whose values include MetaType and
+// MetaDecl. Their source bodies are already expanded before consteval::fold;
+// asking the scalar evaluator to execute them would misdiagnose MetaType
+// parameters as nonconstant runtime locals (NOVA-CTFE016).
+fn procedural_meta_type(ty: &TypeRef, _ns: &str) -> bool {
+    let TypeRef::Named(name) = ty else { return false; };
+    let short = name.rsplit("::").next().unwrap_or(name);
+    matches!(short,
+        "MetaProgram" | "MetaType" | "MetaField" | "MetaFields" | "MetaMethods" |
+        "MetaMethod" | "MetaTypeRef" | "MetaExpr" | "MetaDecl" |
+        "MetaDecls" | "MetaArgs")
+}
+
+fn procedural_comptime(f: &Function, ns: &str) -> bool {
+    f.attributes.iter().any(|a| a.name == "comptime")
+        && (f.attributes.iter().any(|a| a.name == "meta_proc_intrinsic")
+            || ns.starts_with("std::introspection::meta")
+            || f.params.iter().any(|p| procedural_meta_type(&p.ty, ns))
+            || procedural_meta_type(&f.result, ns))
+}
 #[derive(Default)]
 struct Engine {
     functions: HashMap<String, (Function, String)>,
+    constants: HashMap<String, (ast::CompileTimeConst, String)>,
+    aliases: HashMap<String, (TypeRef, String)>,
+    constant_values: HashMap<String, Value>,
+    evaluating_constants: HashSet<String>,
     steps: usize,
     types: HashMap<String, ast::Struct>,
     enums: HashMap<String, ast::Enum>,
@@ -55,6 +82,12 @@ impl Engine {
             match item {
                 Item::Public(inner) => self.collect(std::slice::from_ref(inner.as_ref()), ns),
                 Item::Namespace { name, items } => self.collect(items, &q(ns, name)),
+                Item::CompileTimeConst(decl) => {
+                    self.constants.insert(q(ns,&decl.name),(decl.clone(),ns.into()));
+                }
+                Item::TypeAlias(alias) => {
+                    self.aliases.insert(q(ns,&alias.name),(alias.target.clone(),ns.into()));
+                }
                 Item::Struct(decl) => {
                     self.types.insert(q(ns, &decl.name),decl.clone());
                 }
@@ -65,7 +98,7 @@ impl Engine {
                     let key=q(ns,&f.name);
                     for attribute in &f.attributes {
                         if attribute.name=="meta_intrinsic" {
-                            if ns!="std::meta" || attribute.args.len()!=1 ||
+                            if !matches!(ns, "std::meta" | "std::introspection::meta") || attribute.args.len()!=1 ||
                                 !matches!(attribute.args[0].as_str(),"field_count"|"has_field"|"type_name"|"field_type"|"type_kind"|"variant_count"|"has_variant") {
                                 // Invalid declarations are rejected by verify_intrinsics.
                                 self.intrinsics.insert(key.clone(), "invalid".into());
@@ -84,6 +117,217 @@ impl Engine {
                 _ => {}
             }
         }
+    }
+    fn constant_key(&self, name: &str, ns: &str) -> Option<String> {
+        if name.contains("::") {
+            return self.constants.contains_key(name).then(||name.into());
+        }
+        let mut current=ns;
+        loop {
+            let candidate=q(current,name);
+            if self.constants.contains_key(&candidate) {return Some(candidate);}
+            if current.is_empty(){return None;}
+            current=current.rsplit_once("::").map(|(parent,_)|parent).unwrap_or("");
+        }
+    }
+    fn checked_type(&self, name: &str, ns: &str) -> Option<TypeRef> {
+        let mut ty=TypeRef::Named(name.into());
+        let mut current_ns=ns.to_owned();
+        for _ in 0..32 {
+            let TypeRef::Named(ref symbol)=ty else {return Some(ty);};
+            let target = if symbol.contains("::") {self.aliases.get(symbol).cloned()} else {
+                let mut found=None;
+                let mut here=current_ns.as_str();
+                loop {
+                    if let Some(alias)=self.aliases.get(&q(here,symbol)) {found=Some(alias.clone());break;}
+                    if here.is_empty(){break;}
+                    here=here.rsplit_once("::").map(|(p,_)|p).unwrap_or("");
+                }
+                found
+            };
+            let Some((new_ty,new_ns))=target else {return Some(ty);};
+            ty=new_ty; current_ns=new_ns;
+        }
+        None // recursive typedef
+    }
+    fn validate_constant(&self, key:&str, decl:&ast::CompileTimeConst, ns:&str, value:&Value) -> Result<(),String> {
+        let ty=match &decl.ty {
+            TypeRef::Named(name)=>self.checked_type(name,ns).ok_or_else(||format!("error[NOVA-CTFE021]: typedef cycle for '{key}'"))?,
+            _=>return Err(format!("error[NOVA-CTFE021]: compile-time constant '{key}' must be scalar")),
+        };
+        let TypeRef::Named(name)=ty else {return Err(format!("error[NOVA-CTFE021]: compile-time constant '{key}' requires scalar type"));};
+        let allowed = match (name.as_str(),value) {
+            ("bool",Value::Bool(_)) | ("str",Value::Str(_))=>true,
+            ("f32"|"f64",Value::Float(_))=>true,
+            ("i8",Value::Int(v))=> i8::try_from(*v).is_ok(),
+            ("i16",Value::Int(v))=> i16::try_from(*v).is_ok(),
+            ("i32",Value::Int(v))=> i32::try_from(*v).is_ok(),
+            ("i64"|"isize",Value::Int(_))=>true,
+            ("u8",Value::Int(v))=> u8::try_from(*v).is_ok(),
+            ("u16",Value::Int(v))=> u16::try_from(*v).is_ok(),
+            ("u32",Value::Int(v))=> u32::try_from(*v).is_ok(),
+            ("u64"|"usize",Value::Int(v))=>*v>=0,
+            _=>false,
+        };
+        if !allowed {
+            return Err(format!("error[NOVA-CTFE021]: '{key}' value {value:?} does not fit declared constant type {name}; only scalar bool, str and integers up to signed i64 are supported"));
+        }
+        Ok(())
+    }
+    fn constant_value(&mut self,key:&str) -> Result<Value,String> {
+        if let Some(value)=self.constant_values.get(key) {return Ok(value.clone());}
+        if !self.evaluating_constants.insert(key.into()) {
+            return Err(format!("error[NOVA-CTFE020]: cyclic compile-time constant '{key}'"));
+        }
+        let result=(|| {
+            let (decl,ns)=self.constants.get(key).ok_or_else(||format!("unknown constant '{key}'"))?.clone();
+            let value=self.expr(&decl.value,&ns,&HashMap::new(),0)?;
+            self.validate_constant(key,&decl,&ns,&value)?;
+            Ok::<Value,String>(value)
+        })();
+        self.evaluating_constants.remove(key);
+        let value=result?;
+        self.constant_values.insert(key.into(),value.clone());
+        Ok(value)
+    }
+    fn constant_literal(value: Value) -> Expr {
+        match value {
+            Value::Bool(v)=>Expr::Bool(v),
+            Value::Str(v)=>Expr::Str(format!("{v:?}")),
+            Value::Int(v) if v>=0=>Expr::Int(v.to_string()),
+            Value::Int(v)=>Expr::Unary(UnaryOp::Neg,Box::new(Expr::Int(v.unsigned_abs().to_string()))),
+            Value::Float(v)=>Expr::Float(v),
+        }
+    }
+    // Substitute immutable module-level constants while respecting each
+    // lexical scope. Never rewrite a local or a lambda argument with the same
+    // identifier. No global storage is produced by this operation.
+    fn inline_expr(&mut self, e:&mut Expr, ns:&str, locals:&HashSet<String>) -> Result<(),String> {
+        if let Expr::Var(name)=e {
+            if !locals.contains(name) || name.contains("::") {
+                if let Some(key)=self.constant_key(name,ns) {
+                    *e=Self::constant_literal(self.constant_value(&key)?);
+                }
+            }
+            return Ok(());
+        }
+        match e {
+            Expr::Call(_,args) | Expr::GenericCall(_,_,args)
+            | Expr::MacroCall(_,args) | Expr::Array(args) =>
+                for a in args {self.inline_expr(a,ns,locals)?;},
+            Expr::MethodCall(receiver,_,args,_) => {
+                self.inline_expr(receiver,ns,locals)?;
+                for a in args {self.inline_expr(a,ns,locals)?;}
+            }
+            Expr::CallIndirect(target,args) => {
+                self.inline_expr(target,ns,locals)?;
+                for a in args {self.inline_expr(a,ns,locals)?;}
+            }
+            Expr::Binary(a,_,b) | Expr::Index(a,b) => {
+                self.inline_expr(a,ns,locals)?;self.inline_expr(b,ns,locals)?;
+            }
+            Expr::Unary(_,v) | Expr::Deref(v) | Expr::Spread(v)
+            | Expr::Yield(v) | Expr::Await(v) | Expr::Field(v,_)
+            | Expr::AddressOf{value:v,..} | Expr::Cast(v,_) => self.inline_expr(v,ns,locals)?,
+            Expr::StructInit(_,fields) | Expr::GenericStructInit(_,_,fields) =>
+                for (_,v) in fields {self.inline_expr(v,ns,locals)?;},
+            Expr::If{condition,then_body,else_body} => {
+                self.inline_expr(condition,ns,locals)?;
+                self.inline_block(then_body,ns,locals)?;
+                self.inline_block(else_body,ns,locals)?;
+            }
+            Expr::Block(body)=>self.inline_block(body,ns,locals)?,
+            Expr::Lambda{params,body,..}=>{
+                let mut inner=locals.clone();
+                for p in params {inner.insert(p.name.clone());}
+                self.inline_block(body,ns,&inner)?;
+            }
+            _=>{}
+        }
+        Ok(())
+    }
+    fn inline_block(&mut self,body:&mut[Stmt],ns:&str,outer:&HashSet<String>) -> Result<(),String> {
+        let mut locals=outer.clone();
+        for stmt in body {
+            match stmt {
+                Stmt::Let{name,init,defer,..}=>{
+                    self.inline_expr(init,ns,&locals)?;
+                    locals.insert(name.clone());
+                    if let Some(defer)=defer {self.inline_expr(defer,ns,&locals)?;}
+                }
+                Stmt::Set{name,value} | Stmt::CompoundSet{name,value,..} =>{
+                    // A constant is never assignable, including a qualified
+                    // module constant. Reject before HIR for a clear message.
+                    if !locals.contains(name) {
+                        if let Some(key)=self.constant_key(name,ns) {
+                            return Err(format!("error[NOVA-CTFE022]: cannot assign to compile-time constant '{key}'"));
+                        }
+                    }
+                    self.inline_expr(value,ns,&locals)?;
+                }
+                Stmt::DerefSet{value,..} | Stmt::FieldSet{value,..} | Stmt::Defer(value)
+                | Stmt::Return(Some(value)) | Stmt::Expr(value) | Stmt::Tail(value) =>
+                    self.inline_expr(value,ns,&locals)?,
+                Stmt::If{condition,then_body,else_body}=>{
+                    self.inline_expr(condition,ns,&locals)?;
+                    self.inline_block(then_body,ns,&locals)?;
+                    if let Some(other)=else_body {self.inline_block(other,ns,&locals)?;}
+                }
+                Stmt::While{condition,body}=>{
+                    self.inline_expr(condition,ns,&locals)?;
+                    self.inline_block(body,ns,&locals)?;
+                }
+                Stmt::Loop(body) | Stmt::Unsafe(body)=>self.inline_block(body,ns,&locals)?,
+                Stmt::For{name,start,end,body}=>{
+                    self.inline_expr(start,ns,&locals)?;
+                    self.inline_expr(end,ns,&locals)?;
+                    let mut inner=locals.clone();inner.insert(name.clone());
+                    self.inline_block(body,ns,&inner)?;
+                }
+                Stmt::ForEach{name,iterable,body}=>{
+                    self.inline_expr(iterable,ns,&locals)?;
+                    let mut inner=locals.clone();inner.insert(name.clone());
+                    self.inline_block(body,ns,&inner)?;
+                }
+                Stmt::Match{value,arms}=>{
+                    self.inline_expr(value,ns,&locals)?;
+                    for arm in arms {
+                        let mut bindings=locals.clone();
+                        if let ast::Pattern::Variant{bindings: names,..}=&arm.pattern {
+                            for name in names {bindings.insert(name.clone());}
+                        }
+                        self.inline_block(&mut arm.body,ns,&bindings)?;
+                    }
+                }
+                _=>{}
+            }
+        }
+        Ok(())
+    }
+    fn inline_items(&mut self,items:&mut[Item],ns:&str) -> Result<(),String> {
+        for item in items {
+            match item {
+                Item::Public(inner)=>self.inline_items(std::slice::from_mut(inner.as_mut()),ns)?,
+                Item::Namespace{name,items}=>self.inline_items(items,&q(ns,name))?,
+                Item::Struct(decl) => {
+                    for field in &mut decl.fields {
+                        if let Some(default)=&mut field.default {
+                            self.inline_expr(default,ns,&HashSet::new())?;
+                        }
+                    }
+                }
+                Item::Function(f)=>{
+                    let args=f.params.iter().map(|p|p.name.clone()).collect();
+                    self.inline_block(&mut f.body,ns,&args)?;
+                }
+                Item::Impl(block)=>for f in &mut block.methods {
+                    let args=f.params.iter().map(|p|p.name.clone()).collect();
+                    self.inline_block(&mut f.body,ns,&args)?;
+                },
+                _=>{}
+            }
+        }
+        Ok(())
     }
     fn function(&self, name: &str, ns: &str) -> Option<(Function, String)> {
         if name.contains("::") {
@@ -240,7 +484,12 @@ impl Engine {
             Expr::Int(n)=>n.parse::<i64>().map(Value::Int).map_err(|_|format!("invalid const integer {n}")),
             Expr::Bool(b)=>Ok(Value::Bool(*b)),
             Expr::Str(s)=>Ok(Value::Str(s.trim_matches('"').to_owned())),
-            Expr::Var(name)=>vars.get(name).cloned().ok_or_else(||format!("non-constant variable '{name}'")),
+            Expr::Float(s)=>Ok(Value::Float(s.clone())),
+            Expr::Var(name)=> {
+                if let Some(value)=vars.get(name) {return Ok(value.clone());}
+                if let Some(key)=self.constant_key(name,ns) {return self.constant_value(&key);}
+                Err(format!("non-constant variable '{name}'"))
+            },
             Expr::Unary(op,inner)=>{
                 let val=self.expr(inner,ns,vars,depth)?;
                 match op {
@@ -301,7 +550,7 @@ impl Engine {
                 for arg in args {values.push(self.expr(arg,ns,vars,depth)?);}
                 self.reflection(name,types,values)
             },
-            _=>Err("const fn evaluator supports local integers, booleans, arithmetic, if/return and calls to const fn".into()),
+            _=>Err(format!("const fn evaluator supports local integers, booleans, arithmetic, if/return and calls to const fn; expression={expr:?}")),
         }
     }
     fn block(
@@ -365,6 +614,25 @@ impl Engine {
         }
         Ok(None)
     }
+    fn has_runtime_variable(expr:&Expr) -> bool {
+        match expr {
+            Expr::Var(_) => true,
+            Expr::Unary(_,value) | Expr::Deref(value) | Expr::Spread(value)
+            | Expr::Yield(value) | Expr::Await(value) | Expr::Cast(value,_)
+            | Expr::Field(value,_) | Expr::AddressOf{value,..} => Self::has_runtime_variable(value),
+            Expr::Binary(left,_,right) | Expr::Index(left,right) =>
+                Self::has_runtime_variable(left) || Self::has_runtime_variable(right),
+            Expr::Call(_,args) | Expr::GenericCall(_,_,args) | Expr::MacroCall(_,args)
+            | Expr::Array(args) => args.iter().any(Self::has_runtime_variable),
+            Expr::MethodCall(receiver,_,args,_) =>
+                Self::has_runtime_variable(receiver) || args.iter().any(Self::has_runtime_variable),
+            Expr::CallIndirect(receiver,args) =>
+                Self::has_runtime_variable(receiver) || args.iter().any(Self::has_runtime_variable),
+            Expr::StructInit(_,fields) | Expr::GenericStructInit(_,_,fields) =>
+                fields.iter().any(|(_,value)|Self::has_runtime_variable(value)),
+            _=>false,
+        }
+    }
     fn fold_expr(&mut self, expr: &mut Expr, ns: &str) -> Result<(), String> {
         match expr {
             Expr::If { condition, then_body, else_body } => {
@@ -381,7 +649,7 @@ impl Engine {
                     self.fold_expr(value, ns)?;
                 }
             }
-            Expr::MethodCall(receiver, _, args) => {
+            Expr::MethodCall(receiver, _, args, _) => {
                 self.fold_expr(receiver, ns)?;
                 for arg in args {
                     self.fold_expr(arg, ns)?;
@@ -425,17 +693,37 @@ impl Engine {
                     Value::Int(v) if v>=0=>Expr::Int(v.to_string()),
                     Value::Int(v)=>Expr::Unary(UnaryOp::Neg,Box::new(Expr::Int(v.unsigned_abs().to_string()))),
                     Value::Str(s)=>Expr::Str(format!("{s:?}")),
+                    Value::Float(s)=>Expr::Float(s),
                 };
             }
         }
         if let Expr::Call(name, args) = expr {
-            if let Some((function,_))=self.function(name,ns) {
+            if let Some((function, definition_ns)) = self.function(name, ns) {
+                if procedural_comptime(&function, &definition_ns) {
+                    return Ok(());
+                }
+            }
+            if let Some((function,definition_ns))=self.function(name,ns) {
+                // Already owned by the typed procedural AST evaluator, not
+                // the scalar const evaluator. Never execute MetaType/MetaDecl
+                // functions with scalar Value or require literal arguments.
+                if procedural_comptime(&function, &definition_ns) {
+                    return Ok(());
+                }
                 let mandatory=function.attributes.iter().any(|a|a.name=="comptime");
                 let locals=HashMap::new();
                 // A normal const fn may also execute at runtime when its
                 // arguments are nonconstant. `comptime fn` requires CTFE.
-                let values=args.iter().map(|arg|self.expr(arg,ns,&locals,0))
-                    .collect::<Result<Vec<_>,_>>();
+                // A local Var must not accidentally resolve to a module
+                // constant of the same name. Globally constant references
+                // were already substituted by inline_items, so any remaining
+                // variable makes this a runtime call (or a CTFE error).
+                let values=if args.iter().any(Self::has_runtime_variable) {
+                    Err("runtime local variable in compile-time call".into())
+                } else {
+                    args.iter().map(|arg|self.expr(arg,ns,&locals,0))
+                        .collect::<Result<Vec<_>,_>>()
+                };
                 if let Ok(values)=values {
                     self.steps=0;
                     let result=self.evaluate(name,ns,values,0)
@@ -445,6 +733,7 @@ impl Engine {
                         Value::Str(v)=>Expr::Str(format!("{v:?}")),
                         Value::Int(v) if v>=0=>Expr::Int(v.to_string()),
                         Value::Int(v)=>Expr::Unary(UnaryOp::Neg,Box::new(Expr::Int(v.unsigned_abs().to_string()))),
+                        Value::Float(v)=>Expr::Float(v),
                     };
                 } else if mandatory {
                     return Err(format!("error[NOVA-CTFE016]: comptime function '{name}' requires compile-time constant arguments"));
@@ -512,7 +801,22 @@ impl Engine {
             match item {
                 Item::Public(inner) => self.items(std::slice::from_mut(inner.as_mut()), ns)?,
                 Item::Namespace { name, items } => self.items(items, &q(ns, name))?,
-                Item::Function(f) => self.fold_stmts(&mut f.body, ns)?,
+                Item::Struct(decl) => {
+                    for field in &mut decl.fields {
+                        if let Some(default)=&mut field.default {
+                            self.fold_expr(default,ns)?;
+                        }
+                    }
+                }
+                Item::Function(f) => {
+                    // Procedural comptime functions are interpreted (and their
+                    // arguments supplied) by proc_macros::expand. Their bodies
+                    // are removed below, so scalar folding must not inspect
+                    // calls inside them at all.
+                    if !ns.starts_with("std::introspection") && !procedural_comptime(f, ns) {
+                        self.fold_stmts(&mut f.body, ns)?;
+                    }
+                }
                 Item::Impl(block) => {
                     for f in &mut block.methods {
                         self.fold_stmts(&mut f.body, ns)?;
@@ -528,8 +832,14 @@ pub fn fold(program: &ast::Program) -> Result<ast::Program, String> {
     let mut engine = Engine::default();
     engine.collect(&program.items, "");
     engine.verify_intrinsics()?;
+    // Resolve all constants (including unused ones) to diagnose cycles and
+    // illegal initializers deterministically at compile time.
+    let mut keys=engine.constants.keys().cloned().collect::<Vec<_>>();
+    keys.sort();
+    for key in keys {engine.steps=0;engine.constant_value(&key)?;}
     engine.assert_compile_time()?;
     let mut output = program.clone();
+    engine.inline_items(&mut output.items, "")?;
     engine.items(&mut output.items, "")?;
     // Contract checks and compile-time-only functions are never lowered to
     // runtime IR. In particular, CTFE-only comparisons over metadata strings
@@ -537,6 +847,7 @@ pub fn fold(program: &ast::Program) -> Result<ast::Program, String> {
     fn remove_compile_time_only(items:&mut Vec<Item>) {
         items.retain(|item| {
             let inner=match item {Item::Public(value)=>value.as_ref(),other=>other};
+            !matches!(inner, Item::CompileTimeConst(_)) &&
             !matches!(inner,Item::Function(f) if f.attributes.iter().any(|a|matches!(a.name.as_str(),"comptime"|"comptime_assert")))
         });
         for item in items {
@@ -559,6 +870,39 @@ mod tests {
         fold(&program)
     }
     #[test]
+    fn global_constants_fold_into_literals_and_leave_no_runtime_symbol() {
+        let result=source(r#"
+            comptime const BASE: i32 = -100;
+            const MASK: i32 = 1 | 64 | 512;
+            namespace nested { pub comptime const DERIVED: i32 = BASE + MASK; }
+            fn main()->i32 {return nested::DERIVED - 477;}
+        "#).unwrap();
+        assert!(!result.items.iter().any(|i|matches!(i,Item::CompileTimeConst(_))));
+        let Item::Function(main)=result.items.last().unwrap() else {panic!("missing main")};
+        assert!(!format!("{:?}",main.body).contains("DERIVED"));
+    }
+    #[test]
+    fn constants_respect_shadowing_and_type_ranges() {
+        let result=source("const VALUE: i32 = 42; fn main()->i32 { let VALUE:i32=8; return VALUE; }").unwrap();
+        let Item::Function(main)=result.items.last().unwrap() else {panic!()};
+        assert!(matches!(&main.body[1],Stmt::Return(Some(Expr::Var(v))) if v=="VALUE"));
+        let err=source("const BAD: u8 = 300; fn main()->i32{return 0;}").unwrap_err();
+        assert!(err.contains("NOVA-CTFE021"),"{err}");
+    }
+    #[test]
+    fn local_shadows_global_even_in_const_function_arguments() {
+        let result=source("const X:i32=10; const fn add(x:i32)->i32{return x+1;} fn main()->i32{let X:i32=3;return add(X);}").unwrap();
+        let Item::Function(main)=result.items.last().unwrap() else {panic!()};
+        assert!(matches!(&main.body[1],Stmt::Return(Some(Expr::Call(_,args))) if matches!(&args[0],Expr::Var(x) if x=="X")));
+    }
+    #[test]
+    fn constants_reject_cycles_and_mutation() {
+        let err=source("const A:i32=B; const B:i32=A; fn main()->i32{return 0;}").unwrap_err();
+        assert!(err.contains("NOVA-CTFE020"),"{err}");
+        let err=source("const A:i32=42; fn main()->i32{A=3;return 0;}").unwrap_err();
+        assert!(err.contains("NOVA-CTFE022"),"{err}");
+    }
+    #[test]
     fn factorial_is_folded_at_compile_time() {
         let result=source("const fn fact(n:i64)->i64 {if n<=1{return 1;}return n*fact(n-1);} fn main()->i32{return fact(5) as i32;}").unwrap();
         let function = result
@@ -571,6 +915,48 @@ mod tests {
             .unwrap();
         assert!(format!("{:?}", function.body).contains("120"));
     }
+    #[test]
+    fn procedural_ast_helpers_are_not_misread_as_scalar_ctfe() {
+        let result = source(r#"
+            namespace std { namespace meta {
+                struct MetaType {}
+                struct MetaDecl {}
+                #[comptime]
+                #[meta_proc_intrinsic(impl_for)]
+                pub fn impl_for(target: MetaType) -> MetaDecl { return 0; }
+                #[comptime]
+                pub fn generate_setters(target: MetaType) -> MetaDecl {
+                    return impl_for(target);
+                }
+            }}
+            #[comptime]
+            fn make_properties(target: std::meta::MetaType) -> std::meta::MetaDecl {
+                return std::meta::impl_for(target);
+            }
+            fn main() -> i64 { return 42; }
+        "#).unwrap();
+        assert!(result.items.iter().any(|item|matches!(item,
+            Item::Function(f) if f.name == "main")));
+        assert!(!result.items.iter().any(|item|matches!(item,
+            Item::Function(f) if f.name == "make_properties")));
+    }
+
+    #[test]
+    fn scalar_comptime_still_requires_constant_arguments() {
+        let err = source(r#"
+            #[comptime] fn square(value: i64) -> i64 { return value * value; }
+            fn main() -> i64 { let local: i64 = 3; return square(local); }
+        "#).unwrap_err();
+        assert!(err.contains("NOVA-CTFE016"), "{err}");
+
+        let ok = source(r#"
+            #[comptime] fn square(value: i64) -> i64 { return value * value; }
+            fn main() -> i64 { return square(3); }
+        "#).unwrap();
+        let Item::Function(main) = ok.items.last().unwrap() else { panic!("missing main") };
+        assert!(matches!(&main.body[0], Stmt::Return(Some(Expr::Int(value))) if value == "9"));
+    }
+
     #[test]
     fn recursion_is_bounded() {
         let error=source("const fn infinite(n:i64)->i64{return infinite(n);} fn main()->i32{return infinite(1) as i32;}").unwrap_err();

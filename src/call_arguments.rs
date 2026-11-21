@@ -16,7 +16,7 @@ struct Signature {
 
 #[derive(Default)]
 struct Binder {
-    functions: HashMap<String, Signature>,
+    functions: HashMap<String, Vec<Signature>>,
     methods: HashMap<String, Vec<Signature>>,
 }
 
@@ -89,28 +89,29 @@ impl Binder {
                 Item::Function(function) => {
                     let name = qualified(namespace, &function.name);
                     check_signature(&name, &function.params, function.variadic)?;
-                    if self
-                        .functions
-                        .insert(
-                            name.clone(),
-                            Signature {
-                                parameters: function.params.clone(),
-                                variadic: function.variadic,
-                            },
-                        )
-                        .is_some()
-                    {
-                        return Err(format!("function '{name}' declared more than once; overload resolution is not implemented"));
-                    }
+                    self.functions.entry(name).or_default().push(Signature {
+                        parameters: function.params.clone(),
+                        variadic: function.variadic,
+                    });
                 }
                 Item::Impl(block) => {
                     for method in &block.methods {
                         let name = qualified(namespace, &method.name);
                         check_signature(&name, &method.params, method.variadic)?;
-                        self.methods.entry(name).or_default().push(Signature {
+                        let signature=Signature {
                             parameters: method.params.clone(),
                             variadic: method.variadic,
-                        });
+                        };
+                        if method.attributes.iter().any(|attribute|attribute.name=="static") {
+                            let type_name=match &block.target {
+                                ast::TypeRef::Named(name)|ast::TypeRef::Applied(name,_)=>name,
+                                _=>return Err("static method owner must be a named type".into()),
+                            };
+                            let path=qualified(namespace,&format!("{type_name}::{}",method.name));
+                            self.functions.entry(path).or_default().push(signature);
+                        } else {
+                            self.methods.entry(name).or_default().push(signature);
+                        }
                     }
                 }
                 Item::Extern(external) => {
@@ -124,13 +125,10 @@ impl Binder {
                             "external function '{name}' cannot declare default arguments"
                         ));
                     }
-                    self.functions.insert(
-                        name,
-                        Signature {
+                    self.functions.entry(name).or_default().push(Signature {
                             parameters: external.params.clone(),
                             variadic: external.c_variadic,
-                        },
-                    );
+                        });
                 }
                 Item::Trait(definition) => {
                     for method in &definition.methods {
@@ -154,12 +152,17 @@ impl Binder {
 
     fn function(&self, name: &str, namespace: &str) -> Option<&Signature> {
         if name.contains("::") {
-            return self.functions.get(name);
+            return self
+                .functions
+                .get(name)
+                .and_then(|signatures| (signatures.len() == 1).then(|| &signatures[0]));
         }
         let mut current = namespace;
         loop {
-            if let Some(signature) = self.functions.get(&qualified(current, name)) {
-                return Some(signature);
+            if let Some(signatures) = self.functions.get(&qualified(current, name)) {
+                if signatures.len() == 1 {
+                    return signatures.first();
+                }
             }
             if current.is_empty() {
                 return None;
@@ -330,7 +333,7 @@ impl Binder {
                     self.expression(argument, namespace)?;
                 }
             }
-            Expr::MethodCall(receiver, name, values) => {
+            Expr::MethodCall(receiver, name, values, _) => {
                 self.expression(receiver, namespace)?;
                 let has_named = values
                     .iter()
@@ -350,6 +353,7 @@ impl Binder {
                     .iter()
                     .filter(|(qualified_name, _)| qualified_name.rsplit("::").next() == Some(name))
                     .flat_map(|(_, signatures)| signatures.iter())
+                    .filter(|signature|signature.parameters.first().is_some_and(|p|p.name=="self"))
                     .collect::<Vec<_>>();
                 if has_named {
                     // Preserve the existing namespace preference for named
@@ -599,10 +603,10 @@ mod tests {
         let Item::Function(main) = program.items.last().unwrap() else {
             panic!("expected main")
         };
-        let Stmt::Expr(Expr::MethodCall(_, _, map_args)) = &main.body[1] else {
+        let Stmt::Expr(Expr::MethodCall(_, _, map_args, _)) = &main.body[1] else {
             panic!("expected map.insert")
         };
-        let Stmt::Expr(Expr::MethodCall(_, _, set_args)) = &main.body[3] else {
+        let Stmt::Expr(Expr::MethodCall(_, _, set_args, _)) = &main.body[3] else {
             panic!("expected set.insert")
         };
         assert_eq!(map_args.len(), 2);
@@ -649,7 +653,7 @@ mod tests {
         let Item::Function(main) = program.items.last().unwrap() else {
             panic!("expected main")
         };
-        let Stmt::Return(Some(Expr::MethodCall(_, _, arguments))) = &main.body[1] else {
+        let Stmt::Return(Some(Expr::MethodCall(_, _, arguments, _))) = &main.body[1] else {
             panic!("expected method call")
         };
         assert!(matches!(&arguments[..], [Expr::Int(value)] if value=="3"));

@@ -1,0 +1,10 @@
+pub enum Level { Trace, Debug, Info, Warn, Error }
+pub class Logger { level: Level }
+
+impl Logger {
+    static fn new(level: Level) -> Self { return new Logger { level: level }; }
+    fn enabled(self: &Logger, level: Level) -> bool { return true; }
+    fn current(self: &Logger) -> Level { return self.level; }
+}
+
+pub fn logger(level: Level) -> Logger { return Logger::new(level); }

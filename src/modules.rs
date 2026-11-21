@@ -26,6 +26,10 @@ pub struct Loader {
     // Dependency paths that refer to an already-loaded package (including
     // the singleton built-in STD). These aliases never create duplicate AST.
     pub dependency_aliases: HashMap<String, String>,
+    /// Go-style roots used for package/module lookup.  The current file-backed
+    /// `mod` syntax remains local-first; these roots are also available to the
+    /// package loader for external imports.
+    pub search_paths: Vec<PathBuf>,
 }
 
 fn qualified(ns: &str, name: &str) -> String {
@@ -93,7 +97,7 @@ mod embedded_std_registry_tests {
     fn builtin_char_is_loaded_with_the_standard_library() {
         let mut loader = Loader::default();
         let _items = loader.embedded_std("std").expect("built-in standard library must load");
-        assert!(loader.module_paths.contains("std::char"), "missing std::char namespace");
+        assert!(loader.module_paths.contains("std::old::char"), "missing std::old::char namespace");
         assert!(loader.sources.iter().any(|source| source.path == "<builtin:std/src/char.nova>"),
             "char.nova must be included as its own source");
     }
@@ -300,10 +304,14 @@ impl Loader {
         for item in parsed.items {
             let (inner, public) = bare(&item);
             if let Item::Mod { name, .. } = inner {
-                let directory = module_path
-                    .rsplit_once('/')
-                    .map(|(dir, _)| format!("{dir}/"))
-                    .unwrap_or_default();
+                let directory = if module_path == "core/manifest.nova" {
+                    String::new()
+                } else {
+                    module_path
+                        .rsplit_once('/')
+                        .map(|(dir, _)| format!("{dir}/"))
+                        .unwrap_or_default()
+                };
                 let direct = format!("{directory}{name}.nova");
                 let nested = format!("{directory}{name}/mod.nova");
                 let candidates = [direct.as_str(), nested.as_str()];
@@ -342,7 +350,7 @@ impl Loader {
         Ok(result)
     }
     pub fn embedded_std(&mut self, namespace: &str) -> Result<Vec<Item>, String> {
-        self.embedded_module("lib.nova", namespace, &mut HashSet::new())
+        self.embedded_module("core/manifest.nova", namespace, &mut HashSet::new())
     }
 }
 
@@ -373,6 +381,7 @@ impl Index {
                 Item::Struct(s) => (s.name.as_str(), false),
                 Item::Enum(e) => (e.name.as_str(), false),
                 Item::TypeAlias(a) => (a.name.as_str(), false),
+                Item::CompileTimeConst(c) => (c.name.as_str(), false),
                 Item::Trait(t) => (t.name.as_str(), false),
                 Item::Concept(c) => (c.name.as_str(), false),
                 _ => continue,
@@ -436,6 +445,35 @@ impl Index {
                 break;
             }
             value = next;
+        }
+        // The Nova-only implementation was moved below `std::old` while the
+        // public migration is still in progress. Keep the old spelling as a
+        // resolver alias, but only when the exact legacy symbol exists. This
+        // preserves one nominal type identity and avoids loading the module a
+        // second time under the root namespace.
+        if let Some(rest) = value.strip_prefix("std::") {
+            // The runtime ABI was moved under `std::abi::native`. Keep the
+            // former `std::native` spelling as a resolver-only alias while
+            // packages migrate; it must never create a second symbol identity.
+            if let Some(rest) = rest.strip_prefix("native::") {
+                let abi = format!("std::abi::native::{rest}");
+                if self.symbols.contains_key(&abi) {
+                    return abi;
+                }
+            }
+            if !rest.starts_with("old::")
+                && !rest.starts_with("abi::")
+                && !rest.starts_with("meta::")
+            {
+                let legacy = format!("std::old::{rest}");
+                if self.symbols.contains_key(&legacy)
+                    || self.symbols.keys().any(|symbol| {
+                        symbol.starts_with(&format!("{legacy}::"))
+                    })
+                {
+                    return legacy;
+                }
+            }
         }
         value
     }
@@ -555,13 +593,26 @@ impl Index {
     fn ensure_visible(&self, target: &str, scope: &str, spelling: &str) -> Result<(), String> {
         // Only the shared built-in STD definition may access its sealed ABI,
         // even when application code spells the path using a transitive alias
-        // (e.g. `vendor::std::internal::map`).
+        // (e.g. `vendor::std::abi::native::task::native_spawn`).
         for root in &self.builtin_roots {
-            let prefix = format!("{root}::internal");
+            let prefix = format!("{root}::abi");
             if target == prefix || target.starts_with(&format!("{prefix}::")) {
+                // `std::old::*` is the public compatibility surface. Its
+                // implementation may resolve to `std::abi::*`, but callers
+                // must not be treated as direct ABI users merely because the
+                // linker canonicalized the wrapper target.
+                if spelling.starts_with("std::old::")
+                    // C library bindings are intentionally public FFI
+                    // declarations. They stay under `std::abi::native` so
+                    // the linker can preserve the platform ABI, but callers
+                    // are allowed to opt into them from an unsafe block.
+                    || spelling.starts_with("std::abi::native::libc::")
+                {
+                    continue;
+                }
                 if scope != root && !scope.starts_with(&format!("{root}::")) {
                     return Err(self.error(scope,spelling,"NOVA-M015",
-                        "the standard-library runtime layer is private; use std::map, std::vec, std::string or another safe wrapper"));
+                        "the standard-library runtime layer is private; use std::old::map, std::old::vec, std::old::string or another safe wrapper"));
                 }
             }
         }
@@ -575,66 +626,61 @@ impl Index {
         }
         Ok(())
     }
+    // Annotation imports are lexical, just like type/function imports. Do not
+    // rewrite compiler attributes (`#[comptime]`, `#[derive]`) unless explicitly
+    // imported; custom @decorators are resolved to their defining package.
+    fn annotation_names(&self, attrs:&mut [ast::Attribute], imports:&HashMap<String,String>) {
+        for attr in attrs {
+            if !attr.name.contains("::") {
+                if let Some(path)=imports.get(&attr.name) { attr.name=path.clone(); }
+            }
+        }
+    }
     fn process_items(&self, items: Vec<Item>, scope: &str) -> Result<Vec<Item>, String> {
         let mut imports = HashMap::new();
         for item in &items {
             let (actual, public) = bare(item);
-            if let Item::Use { path: name, at } = actual {
-                if public {
-                    return Err(self.error_at(
-                        scope,
-                        *at,
-                        name.len(),
-                        "NOVA-M009",
-                        "pub use re-exports are not supported yet; use pub fn or pub mod instead",
-                    ));
+            let Item::Use { path: name, at } = actual else { continue };
+            if public {
+                return Err(self.error_at(scope,*at,name.len(),"NOVA-M009",
+                    "pub use re-exports are not supported yet; use pub fn or pub mod instead"));
+            }
+            let mut chosen: Vec<(String,String)> = Vec::new();
+            if let Some(module_name) = name.strip_suffix("::*") {
+                let module=self.path(module_name,scope,&HashMap::new());
+                match self.symbols.get(&module) {
+                    Some(symbol) if symbol.module => self.ensure_visible(&module,scope,module_name)?,
+                    _ => return Err(self.error_at(scope,*at,name.len(),"NOVA-M011",
+                        &format!("glob import '{name}' does not name a visible module"))),
                 }
-                let alias = name.rsplit("::").next().unwrap_or(name);
-                if ["crate", "self", "super"].contains(&alias) {
-                    return Err(self.error_at(
-                        scope,
-                        *at,
-                        name.len(),
-                        "NOVA-M010",
-                        "use must end in a symbol name",
-                    ));
+                for (path, symbol) in &self.symbols {
+                    if symbol.owner == module && symbol.public && self.visible(path,scope) {
+                        chosen.push((path.rsplit("::").next().unwrap_or(path).to_owned(),path.clone()));
+                    }
                 }
-                let dest = self.path(name, scope, &HashMap::new());
+                chosen.sort();
+            } else {
+                let alias=name.rsplit("::").next().unwrap_or(name);
+                if ["crate","self","super"].contains(&alias) {
+                    return Err(self.error_at(scope,*at,name.len(),"NOVA-M010",
+                        "use must end in a symbol name"));
+                }
+                let dest=self.path(name,scope,&HashMap::new());
                 if !self.symbols.contains_key(&dest) {
-                    return Err(self.error_at(
-                        scope,
-                        *at,
-                        name.len(),
-                        "NOVA-M011",
-                        &format!("cannot resolve use '{name}' (resolved as '{dest}')"),
-                    ));
+                    return Err(self.error_at(scope,*at,name.len(),"NOVA-M011",
+                        &format!("cannot resolve use '{name}' (resolved as '{dest}')")));
                 }
-                if !self.visible(&dest, scope) {
-                    return Err(self.error_at(
-                        scope,
-                        *at,
-                        name.len(),
-                        "NOVA-M008",
-                        &self.privacy_message(&dest, scope),
-                    ));
+                self.ensure_visible(&dest,scope,name)?;
+                chosen.push((alias.to_owned(),dest));
+            }
+            for (alias,dest) in chosen {
+                if self.symbols.contains_key(&qualified(scope,&alias)) {
+                    return Err(self.error_at(scope,*at,name.len(),"NOVA-M013",
+                        &format!("import '{alias}' conflicts with a symbol defined in this module")));
                 }
-                if self.symbols.contains_key(&qualified(scope, alias)) {
-                    return Err(self.error_at(
-                        scope,
-                        *at,
-                        name.len(),
-                        "NOVA-M013",
-                        &format!("import '{alias}' conflicts with a symbol defined in this module"),
-                    ));
-                }
-                if imports.insert(alias.to_owned(), dest).is_some() {
-                    return Err(self.error_at(
-                        scope,
-                        *at,
-                        name.len(),
-                        "NOVA-M012",
-                        &format!("duplicate use alias '{alias}'"),
-                    ));
+                if imports.insert(alias.clone(),dest).is_some() {
+                    return Err(self.error_at(scope,*at,name.len(),"NOVA-M012",
+                        &format!("duplicate use alias '{alias}'")));
                 }
             }
         }
@@ -651,6 +697,7 @@ impl Index {
                 },
                 Item::Function(f) => {
                     let mut f = f.clone();
+                    self.annotation_names(&mut f.attributes,&imports);
                     for p in &mut f.params {
                         self.ty(&mut p.ty, scope, &imports)?;
                     }
@@ -702,8 +749,14 @@ impl Index {
                 }
                 Item::Struct(s) => {
                     let mut s = s.clone();
+                    self.annotation_names(&mut s.attributes,&imports);
+                    self.concept_bounds(&mut s.concept_bounds,scope,&imports)?;
                     for field in &mut s.fields {
+                        self.annotation_names(&mut field.attributes,&imports);
                         self.ty(&mut field.ty, scope, &imports)?;
+                        if let Some(default)=&mut field.default {
+                            self.expr(default,scope,&imports)?;
+                        }
                     }
                     if let Some(parent) = &mut s.parent {
                         self.ty(parent, scope, &imports)?;
@@ -712,6 +765,7 @@ impl Index {
                 }
                 Item::Enum(e) => {
                     let mut e = e.clone();
+                    self.concept_bounds(&mut e.concept_bounds,scope,&imports)?;
                     for v in &mut e.variants {
                         for t in &mut v.payload {
                             self.ty(t, scope, &imports)?;
@@ -723,6 +777,12 @@ impl Index {
                     let mut alias = alias.clone();
                     self.ty(&mut alias.target, scope, &imports)?;
                     Item::TypeAlias(alias)
+                }
+                Item::CompileTimeConst(decl) => {
+                    let mut decl = decl.clone();
+                    self.ty(&mut decl.ty, scope, &imports)?;
+                    self.expr(&mut decl.value, scope, &imports)?;
+                    Item::CompileTimeConst(decl)
                 }
                 Item::Trait(definition) => {
                     let mut definition = definition.clone();
@@ -765,6 +825,7 @@ impl Index {
                         self.ensure_visible(trait_name, scope, &original)?;
                     }
                     for method in &mut i.methods {
+                        self.annotation_names(&mut method.attributes,&imports);
                         for p in &mut method.params {
                             self.ty(&mut p.ty, scope, &imports)?;
                         }
@@ -802,6 +863,9 @@ impl Index {
                 "implements",
                 "has_field",
                 "has_method",
+                "has_static_method",
+                "copyable",
+                "storable",
             ]
             .contains(&bound.name.as_str())
             {
@@ -837,6 +901,13 @@ impl Index {
                     "implements",
                     "has_field",
                     "has_method",
+                    "has_static_method",
+                    "has_associated_type",
+                    "associated_type_is",
+                    "default_constructible",
+                    "destructible",
+                    "copyable",
+                    "storable",
                 ]
                 .contains(&name.as_str())
                 {
@@ -859,10 +930,17 @@ impl Index {
                 }
                 for rule in rules {
                     match rule {
+                        ast::Requirement::AssociatedType { .. } => {},
+                        ast::Requirement::Method { arguments, result, .. }
+                        | ast::Requirement::StaticMethod { arguments, result, .. } => {
+                            for argument in arguments {
+                                self.ty_in_scope(argument, scope, imports, type_parameters)?;
+                            }
+                            self.ty_in_scope(result, scope, imports, type_parameters)?;
+                        }
                         ast::Requirement::Field { result, .. }
-                        | ast::Requirement::Method { result, .. }
                         | ast::Requirement::Binary { result, .. } => {
-                            self.ty_in_scope(result, scope, imports, type_parameters)?
+                            self.ty_in_scope(result, scope, imports, type_parameters)?;
                         }
                     }
                 }
@@ -892,8 +970,8 @@ impl Index {
         match ty {
             TypeRef::Named(name) => {
                 // Builtin scalar names are types, not relative module paths.
-                // In particular, inside `std::char` a `char` annotation and
-                // a character literal must not become `std::char` (the module).
+                // In particular, inside `std::old::char` a `char` annotation and
+                // a character literal must not become `std::old::char` (the module).
                 // Generic parameters keep their own lexical priority.
                 if type_parameters.contains(name)
                     || crate::types::is_primitive_type_name(name)
@@ -1015,7 +1093,7 @@ impl Index {
                 }
             }
             Expr::AddressOf { value, .. } => self.expr(value, scope, imports)?,
-            Expr::MethodCall(value, _, args) => {
+            Expr::MethodCall(value, _, args, _) => {
                 self.expr(value, scope, imports)?;
                 for a in args {
                     self.expr(a, scope, imports)?;
@@ -1152,33 +1230,33 @@ mod builtin_instance_resolution_tests {
             .insert("frame::other_view".into(), "frame::web::view".into());
         index.builtin_roots.insert("std".into());
         index.symbols.insert(
-            "std::string::String".into(),
+            "std::old::string::String".into(),
             Symbol {
                 public: true,
-                owner: "std::string".into(),
+                owner: "std::old::string".into(),
                 module: false,
             },
         );
         index.symbols.insert(
-            "std::internal::map::native_create".into(),
+            "std::abi::native::task::native_spawn".into(),
             Symbol {
                 public: true,
-                owner: "std::internal::map".into(),
+                owner: "std::abi::native::task".into(),
                 module: false,
             },
         );
         let imports = HashMap::new();
         assert_eq!(
-            index.path("std::string::String", "frame::ui", &imports),
-            "std::string::String"
+            index.path("std::old::string::String", "frame::ui", &imports),
+            "std::old::string::String"
         );
         assert_eq!(
-            index.path("std::string::String", "frame::web::view::html", &imports),
-            "std::string::String"
+            index.path("std::old::string::String", "frame::web::view::html", &imports),
+            "std::old::string::String"
         );
         assert_eq!(
-            index.path("std::string::String::from_text", "frame::ui", &imports),
-            "std::string::String::from_text"
+            index.path("std::old::string::String::from_text", "frame::ui", &imports),
+            "std::old::string::String::from_text"
         );
         assert_eq!(
             index.path("frame::other_view::html::Html", "", &imports),
@@ -1186,9 +1264,9 @@ mod builtin_instance_resolution_tests {
         );
         assert!(index
             .ensure_visible(
-                &index.path("frame::std::internal::map::native_create", "", &imports),
+                &index.path("frame::std::abi::native::task::native_spawn", "", &imports),
                 "frame::ui",
-                "frame::std::internal::map::native_create"
+                "frame::std::abi::native::task::native_spawn"
             )
             .is_err());
     }
@@ -1197,25 +1275,25 @@ mod builtin_instance_resolution_tests {
     fn builtin_char_remains_primitive_even_with_same_named_module() {
         let mut index = Index::default();
         index.symbols.insert(
-            "std::char".into(),
+            "std::old::char".into(),
             Symbol { public: true, owner: "std".into(), module: true },
         );
         index.symbols.insert(
-            "std::char::is_ascii".into(),
-            Symbol { public: true, owner: "std::char".into(), module: false },
+            "std::old::char::is_ascii".into(),
+            Symbol { public: true, owner: "std::old::char".into(), module: false },
         );
         let imports = HashMap::new();
         // Module paths are still valid in expression positions.
-        assert_eq!(index.path("char::is_ascii", "std", &imports), "std::char::is_ascii");
+        assert_eq!(index.path("char::is_ascii", "std", &imports), "std::old::char::is_ascii");
         // But the primitive type must never be rewritten to a module path.
         let mut ty = TypeRef::Named("char".into());
-        index.ty(&mut ty, "std::char", &imports).unwrap();
+        index.ty(&mut ty, "std::old::char", &imports).unwrap();
         assert!(matches!(ty, TypeRef::Named(ref n) if n == "char"));
         let mut arg_ty = TypeRef::Pointer {
             mutable: false,
             inner: Box::new(TypeRef::Named("char".into())),
         };
-        index.ty(&mut arg_ty, "std::char", &imports).unwrap();
+        index.ty(&mut arg_ty, "std::old::char", &imports).unwrap();
         assert!(matches!(arg_ty, TypeRef::Pointer { inner, .. }
             if matches!(*inner, TypeRef::Named(ref n) if n == "char")));
         // The same syntax also appears as a target in character literals.
@@ -1223,12 +1301,12 @@ mod builtin_instance_resolution_tests {
             Box::new(Expr::Str("'\\u{007F}'".into())),
             TypeRef::Named("char".into()),
         );
-        index.expr(&mut literal, "std::char", &imports).unwrap();
+        index.expr(&mut literal, "std::old::char", &imports).unwrap();
         assert!(matches!(literal, Expr::Cast(_, TypeRef::Named(ref n)) if n == "char"));
         // Explicit paths keep the independently named module accessible.
-        let mut qualified_type = TypeRef::Named("std::char".into());
-        index.ty(&mut qualified_type, "std::char", &imports).unwrap();
-        assert!(matches!(qualified_type, TypeRef::Named(ref n) if n == "std::char"));
+        let mut qualified_type = TypeRef::Named("std::old::char".into());
+        index.ty(&mut qualified_type, "std::old::char", &imports).unwrap();
+        assert!(matches!(qualified_type, TypeRef::Named(ref n) if n == "std::old::char"));
     }
 
     #[test]
@@ -1236,21 +1314,21 @@ mod builtin_instance_resolution_tests {
         let index = Index::default();
         for name in ["()", "bool", "char", "str", "i8", "u16", "i64", "u64", "f32", "f64", "isize", "usize"] {
             let mut ty = TypeRef::Named(name.into());
-            index.ty(&mut ty, "std::char", &HashMap::new()).unwrap();
+            index.ty(&mut ty, "std::old::char", &HashMap::new()).unwrap();
             assert!(matches!(&ty, TypeRef::Named(n) if n == name), "{name} became {ty:?}");
         }
-        assert!(!crate::types::is_primitive_type_name("std::char"));
-        assert!(!crate::types::is_primitive_type_name("String"));
+        assert!(!crate::types::is_primitive_type_name("std::old::char"));
+        assert!(crate::types::is_primitive_type_name("String"));
     }
 
     #[test]
-    fn nested_std_resolves_its_own_internal_runtime() {
+    fn nested_std_resolves_its_own_abi_runtime() {
         let mut index = Index::default();
         index.builtin_roots.insert("std".into());
         index.builtin_roots.insert("nexo::std".into());
         for name in [
-            "std::internal::map::native_create",
-            "nexo::std::internal::map::native_create",
+            "std::abi::native::task::native_spawn",
+            "nexo::std::abi::native::task::native_spawn",
         ] {
             index.symbols.insert(
                 name.into(),
@@ -1262,20 +1340,20 @@ mod builtin_instance_resolution_tests {
             );
         }
         let resolved = index.path(
-            "std::internal::map::native_create",
-            "nexo::std::map",
+            "std::abi::native::task::native_spawn",
+            "nexo::std::old::map",
             &HashMap::new(),
         );
-        assert_eq!(resolved, "nexo::std::internal::map::native_create");
+        assert_eq!(resolved, "nexo::std::abi::native::task::native_spawn");
         assert!(index
             .ensure_visible(
                 &resolved,
-                "nexo::std::map",
-                "std::internal::map::native_create"
+                "nexo::std::old::map",
+                "std::abi::native::task::native_spawn"
             )
             .is_ok());
         assert!(index
-            .ensure_visible(&resolved, "nexo::app", "std::internal::map::native_create")
+            .ensure_visible(&resolved, "nexo::app", "std::abi::native::task::native_spawn")
             .is_err());
     }
 }

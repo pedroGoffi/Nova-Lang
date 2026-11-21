@@ -1,2 +1,0 @@
-#[meta_protocol(custom_pipeline, apply)] trait Transform {}
-fn main() -> i32 { return 0; }

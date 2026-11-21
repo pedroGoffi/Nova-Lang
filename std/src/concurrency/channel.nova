@@ -1,0 +1,15 @@
+use std::collections::vec::Vec;
+use std::core::option::Option;
+use std::error::error::Error;
+use std::error::result::Result;
+pub class Channel<T> { values: Vec<T>, closed: bool }
+impl<T> Channel<T> {
+    static fn new() -> Self { return new Channel<T> { values: Vec::new(), closed: false }; }
+    fn send(self: &Channel<T>, value: T) -> Result<(),Error> {
+        if self.closed { return Err(Error::new(-1, "channel is closed")); }
+        self.values.push(value);
+        return Ok(());
+    }
+    fn receive(self: &Channel<T>) -> Option<T> { return self.values.try_pop(); }
+    fn close(self: &Channel<T>) -> () { self.closed = true; return; }
+}

@@ -357,7 +357,8 @@ pub fn lint(hir: &crate::hir::Program) -> usize {
                 }
             }
             ExprKind::Unary(_, x) | ExprKind::Field(x, _) | ExprKind::TakeMatchField(x, _) | ExprKind::Deref(x) => expr(x, used),
-            ExprKind::Binary(a, _, b) | ExprKind::Index(a, b) => {
+            ExprKind::DynObjectRef { value, .. } => expr(value, used),
+            ExprKind::Binary(a, _, b) | ExprKind::Index(a, b) | ExprKind::MoveIndex(a, b) => {
                 expr(a, used);
                 expr(b, used);
             }

@@ -1,0 +1,12 @@
+use std::abi::llvm::process_exit;
+use std::abi::llvm::write_bytes;
+use std::core::address;
+use std::core::text_size;
+
+pub fn fail(message: str) -> () {
+    unsafe {
+        write_bytes(2, address(message), text_size(message));
+        process_exit(101);
+    }
+    return;
+}

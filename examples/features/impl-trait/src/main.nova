@@ -1,0 +1,15 @@
+import std;
+
+// impl Trait hides the concrete return type while exposing its behavior.
+trait Render { fn render(self: &Self) -> i32; }
+struct Greeting { value: i32 }
+impl Render for Greeting { fn render(self: &Greeting) -> i32 { return self.value; } }
+
+fn make_greeting() -> impl Render {
+    return new Greeting { value: 42 };
+}
+
+fn main() -> i32 {
+    let greeting = make_greeting();
+    return greeting.render() - 42;
+}

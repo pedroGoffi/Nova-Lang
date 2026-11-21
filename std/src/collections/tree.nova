@@ -1,0 +1,6 @@
+pub class TreeNode<T> { value: T, left: *mut TreeNode<T>, right: *mut TreeNode<T> }
+pub class Tree<T> { root: *mut TreeNode<T> }
+impl<T> Tree<T> {
+    static fn new() -> Self { return new Tree<T> { root: 0 as (*mut TreeNode<T>) }; }
+    fn is_empty(self: &Tree<T>) -> bool { return (self.root as u64) == 0; }
+}

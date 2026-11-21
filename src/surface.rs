@@ -31,14 +31,42 @@ struct Scope {
     namespace: String,
     subst: HashMap<String, TypeRef>,
     returns: TypeRef,
+    constructor_base: Option<TypeRef>,
 }
 
 pub fn lower(input: &ast::Program) -> Result<ast::Program, String> {
+    lower_with_helpers(input, crate::compile_helpers::HelperMode::Macro)
+}
+pub fn lower_with_helpers(
+    input: &ast::Program,
+    helper_mode: crate::compile_helpers::HelperMode,
+) -> Result<ast::Program, String> {
+    lower_impl(input, helper_mode, None)
+}
+/// Collect errors from independent concrete instantiations before stopping.
+/// We cannot safely continue to HIR after failed type materialization.
+pub fn lower_with_helpers_all_errors(
+    input: &ast::Program,
+    helper_mode: crate::compile_helpers::HelperMode,
+) -> Result<ast::Program, Vec<String>> {
+    let mut errors = Vec::new();
+    lower_impl(input, helper_mode, Some(&mut errors)).map_err(|error| {
+        if errors.is_empty() { vec![error] } else { errors }
+    })
+}
+fn lower_impl(
+    input: &ast::Program,
+    helper_mode: crate::compile_helpers::HelperMode,
+    mut collected: Option<&mut Vec<String>>,
+) -> Result<ast::Program, String> {
     let mut engine = Engine::default();
-    let expanded = crate::proc_macros::expand(input)?;
+    let helpers = crate::compile_helpers::lower(input, helper_mode);
+    let expanded = crate::proc_macros::expand(&helpers)?;
     let expanded = crate::macros::expand(&expanded)?;
+    let expanded = crate::ergonomic_lowering::lower(&expanded)?;
     let expanded = crate::concurrency::lower_and_check(&expanded)?;
     let expanded = crate::call_arguments::lower(&expanded)?;
+    let expanded = crate::out_parameters::lower(&expanded)?;
     // Derive aliases live in .nova metadata and expand to supported derives
     // before type materialization. The transformation is deterministic and
     // cannot bypass the existing derive/ownership validation.
@@ -46,6 +74,10 @@ pub fn lower(input: &ast::Program) -> Result<ast::Program, String> {
     crate::meta::validate(&expanded)?;
     crate::effects::validate(&expanded)?;
     let expanded = crate::consteval::fold(&expanded)?;
+    // Materialize dyn-trait forwarding functions while trait declarations are
+    // still present; type_features lowers/removes those declarations later.
+    let mut expanded = expanded;
+    materialize_dyn_methods(&mut expanded.items, "");
     engine.concepts = crate::concepts::Registry::collect(&expanded)?;
     crate::meta::Registry::collect(&expanded)?.check_derive_contracts(&expanded,&engine.concepts)?;
     let expanded = crate::type_features::lower(&expanded)?;
@@ -80,11 +112,28 @@ pub fn lower(input: &ast::Program) -> Result<ast::Program, String> {
         })
         .cloned()
         .collect::<Vec<_>>();
+    // Stable order makes diagnostics reproducible across compiler invocations.
+    let mut concrete_types = concrete_types;
+    let mut concrete = concrete;
+    if collected.is_some() {
+        concrete_types.sort();
+        concrete.sort();
+    }
     for name in concrete_types {
-        engine.instantiate_type(&name, &[])?;
+        if let Err(error) = engine.instantiate_type(&name, &[]) {
+            if let Some(errors) = collected.as_deref_mut() {
+                errors.push(format!("type '{name}': {error}"));
+                if errors.len() >= 64 { break; }
+            } else { return Err(error); }
+        }
     }
     for name in concrete {
-        engine.instantiate_function(&name, &[], None)?;
+        if collected.as_ref().is_some_and(|errors| errors.len() >= 64) { break; }
+        if let Err(error) = engine.instantiate_function(&name, &[], None) {
+            if let Some(errors) = collected.as_deref_mut() {
+                errors.push(error);
+            } else { return Err(error); }
+        }
     }
     for (ns, path) in &engine.imports {
         let q = join(ns, path);
@@ -101,12 +150,61 @@ pub fn lower(input: &ast::Program) -> Result<ast::Program, String> {
                 .chain(engine.enums.keys())
                 .any(|name| name.starts_with(&format!("{path}::")));
         if !found {
-            return Err(format!("import '{path}' cannot be resolved"));
+            let error = format!("import '{path}' cannot be resolved");
+            if let Some(errors) = collected.as_deref_mut() {
+                if errors.len() < 64 { errors.push(error); }
+            } else { return Err(error); }
         }
     }
-    Ok(ast::Program {
-        items: engine.items,
-    })
+    if let Some(errors) = collected {
+        if !errors.is_empty() {
+            // Never lower an incomplete or invalid program into HIR/LLVM.
+            return Err(format!("{} independent surface error(s)", errors.len()));
+        }
+    }
+    // Surface lowering owns pointer arithmetic lowering, so coroutine
+    // desugaring cannot discover this intrinsic early enough to synthesize
+    // its declaration. Keep the compiler-only ABI contract explicit in the
+    // typed input even when the current program does not use it; codegen
+    // recognizes the symbol and emits inline GEP instead of an external call.
+        let compiler_intrinsics = [
+            ("__nova_internal_byte_offset", vec![("address", "u64"), ("bytes", "u64")], "u64"),
+            ("__nova_internal_copy_bytes", vec![("destination", "u64"), ("source", "u64"), ("count", "u64")], "()"),
+            ("__nova_internal_move_bytes", vec![("destination", "u64"), ("source", "u64"), ("count", "u64")], "()"),
+            ("__nova_internal_set_bytes", vec![("destination", "u64"), ("value", "u8"), ("count", "u64")], "()"),
+            ("__nova_internal_heap_allocate", vec![("alignment", "u64"), ("size", "u64")], "u64"),
+            ("__nova_internal_heap_free", vec![("address", "u64")], "()"),
+            ("__nova_internal_load_byte", vec![("address", "u64")], "u8"),
+            ("__nova_internal_text_length", vec![("text", "str")], "u64"),
+            ("__nova_internal_text_address", vec![("text", "str")], "u64"),
+            ("__nova_internal_borrow_text", vec![("address", "u64")], "str"),
+            ("__nova_internal_sqrt_f64", vec![("value", "f64")], "f64"),
+            ("__nova_internal_abs_f64", vec![("value", "f64")], "f64"),
+            ("__nova_internal_floor_f64", vec![("value", "f64")], "f64"),
+            ("__nova_internal_ceil_f64", vec![("value", "f64")], "f64"),
+        ];
+        for (name, params, result) in compiler_intrinsics {
+            if engine.items.iter().any(|item| {
+                matches!(item, Item::Extern(function) if function.name == name)
+            }) {
+                continue;
+            }
+            engine.items.push(Item::Extern(ast::ExternFunction {
+                name: name.into(),
+                c_variadic: false,
+                // These declarations are compiler-private symbols. Public
+                // safety boundaries are expressed by Nova wrappers.
+                attributes: vec![],
+                params: params.into_iter().map(|(name, ty)| ast::Param {
+                    name: name.into(),
+                    ty: TypeRef::Named(ty.into()),
+                    default: None,
+                    attributes: vec![],
+                }).collect(),
+                result: TypeRef::Named(result.into()),
+            }));
+        }
+    Ok(ast::Program { items: engine.items })
 }
 
 #[derive(Default)]
@@ -135,11 +233,73 @@ fn join(ns: &str, name: &str) -> String {
         format!("{ns}::{name}")
     }
 }
+fn replace_self_with_dyn(ty: &TypeRef, trait_name: &str) -> TypeRef {
+    match ty {
+        TypeRef::Named(name) if name == "Self" => TypeRef::Named(format!("dyn {trait_name}")),
+        TypeRef::Applied(name, args) => TypeRef::Applied(
+            name.clone(), args.iter().map(|arg| replace_self_with_dyn(arg, trait_name)).collect()),
+        TypeRef::Array(inner, len) => TypeRef::Array(Box::new(replace_self_with_dyn(inner, trait_name)), *len),
+        TypeRef::Pointer { mutable, inner } => TypeRef::Pointer { mutable: *mutable, inner: Box::new(replace_self_with_dyn(inner, trait_name)) },
+        TypeRef::Reference { mutable, inner } => TypeRef::Reference { mutable: *mutable, inner: Box::new(replace_self_with_dyn(inner, trait_name)) },
+        TypeRef::Function { params, result } => TypeRef::Function {
+            params: params.iter().map(|param| replace_self_with_dyn(param, trait_name)).collect(),
+            result: Box::new(replace_self_with_dyn(result, trait_name)),
+        },
+        _ => ty.clone(),
+    }
+}
+fn dyn_methods_for_trait(trait_decl: &ast::Trait, namespace: &str) -> Vec<Item> {
+    let trait_name = join(namespace, &trait_decl.name);
+    let trait_key = ident(&trait_name);
+    trait_decl.methods.iter().enumerate().map(|(slot, method)| {
+        let name = format!("__nova_dyn__{trait_key}__{slot}__{}", method.name);
+        let params = method.params.iter().map(|param| ast::Param {
+            name: param.name.clone(),
+            ty: replace_self_with_dyn(&param.ty, &trait_name),
+            default: None,
+            attributes: vec![],
+        }).collect();
+        let result = replace_self_with_dyn(&method.result, &trait_name);
+        Item::Function(ast::Function {
+            mode: ast::FunctionMode::Normal,
+            name,
+            generics: vec![],
+            concept_bounds: vec![],
+            params,
+            variadic: false,
+            result: result.clone(),
+            body: if result == TypeRef::Named("()".into()) { vec![Stmt::Return(None)] } else { vec![Stmt::Return(Some(Expr::Zero(result)))] },
+            is_virtual: false,
+            is_override: false,
+            attributes: vec![],
+        })
+    }).collect()
+}
+fn materialize_dyn_methods(items: &mut Vec<Item>, namespace: &str) {
+    let mut generated = Vec::new();
+    for item in items.iter_mut() {
+        match item {
+            Item::Namespace { name, items } => materialize_dyn_methods(items, &join(namespace, name)),
+            Item::Public(inner) => if let Item::Trait(trait_decl) = inner.as_ref() {
+                generated.extend(dyn_methods_for_trait(trait_decl, namespace));
+            },
+            Item::Trait(trait_decl) => generated.extend(dyn_methods_for_trait(trait_decl, namespace)),
+            _ => {}
+        }
+    }
+    items.extend(generated);
+}
 /// Only real lvalues may be implicitly borrowed for a method receiver.
 /// A method on a computed temporary still needs explicit ownership semantics.
 fn addressable_receiver(expr: &Expr) -> bool {
     match expr {
         Expr::Var(_) => true,
+        // Access through a borrowed receiver is still an lvalue. Field
+        // lowering rewrites `self.field` with `self: &T` into
+        // `Field(Deref(Var("self")), "field")` before method auto-borrowing.
+        // Keep the requirement recursive so computed temporary owners are
+        // not implicitly borrowed.
+        Expr::Deref(owner) => addressable_receiver(owner),
         Expr::Field(owner, _) | Expr::Index(owner, _) => addressable_receiver(owner),
         _ => false,
     }
@@ -147,9 +307,21 @@ fn addressable_receiver(expr: &Expr) -> bool {
 fn ident(name: &str) -> String {
     name.replace("::", "__")
 }
+fn dyn_trait_name(name: &str) -> Option<&str> {
+    name.strip_prefix("dyn ")
+}
+fn impl_trait_name(name: &str) -> Option<&str> {
+    name.strip_prefix("impl ")
+}
 fn type_suffix(t: &TypeRef) -> String {
     match t {
-        TypeRef::Named(name) => ident(name),
+        // `()` is a valid Nova type but not a valid unquoted LLVM identifier.
+        // Keep the readable spelling in diagnostics; use an ABI-safe type key
+        // for concrete generic names such as Result<(), JsonError>.
+        TypeRef::Named(name) if name == "()" => "unit".into(),
+        TypeRef::Named(name) => dyn_trait_name(name)
+            .map(|trait_name| format!("dyn_{}", ident(trait_name)))
+            .unwrap_or_else(|| ident(name)),
         TypeRef::Applied(name, args) => format!(
             "{}_{}",
             ident(name),
@@ -199,7 +371,9 @@ fn substitute(ty: &TypeRef, map: &HashMap<String, TypeRef>) -> TypeRef {
 // structured types internally; never require the user to interpret Debug output.
 fn display_type(ty: &TypeRef) -> String {
     match ty {
-        TypeRef::Named(name) => name.replace("__", "::"),
+        TypeRef::Named(name) => dyn_trait_name(name)
+            .map(|trait_name| format!("dyn {}", trait_name.replace("__", "::")))
+            .unwrap_or_else(|| name.replace("__", "::")),
         TypeRef::Applied(name, args) => format!(
             "{}<{}>",
             name.replace("__", "::"),
@@ -236,8 +410,21 @@ fn type_mismatch(expected: &TypeRef, actual: &TypeRef) -> String {
     )
 }
 
-// Structural type unification used by generic-call inference. Never silently
-// accept an incompatible array length, pointer mutability or concrete type.
+/// An exclusive borrow may be viewed as shared for the duration of its use.
+/// This never upgrades a shared borrow or moves the borrowed owner.
+fn implicit_shared_reborrow(actual: &TypeRef, expected: &TypeRef) -> bool {
+    matches!(
+        (actual, expected),
+        (
+            TypeRef::Reference { mutable: true, inner: from },
+            TypeRef::Reference { mutable: false, inner: to },
+        ) if from == to
+    )
+}
+
+// Structural type unification for generic calls. The sole reference
+// mutability adjustment is the safe &mut T -> &T permission downgrade.
+// Array lengths, raw pointer mutability, and concrete types stay invariant.
 fn type_variables(
     actual: &TypeRef,
     pattern: &TypeRef,
@@ -315,7 +502,9 @@ fn type_variables(
             TypeRef::Reference {
                 mutable: got,
                 inner: a,
-            } if mutable == got => type_variables(a, p, generics, map),
+            } if mutable == got || (!*mutable && *got) => {
+                type_variables(a, p, generics, map)
+            }
             _ => Err(format!(
                 "reference type mismatch: {}",
                 type_mismatch(pattern, actual)
@@ -347,7 +536,14 @@ fn castable(from: &TypeRef, to: &TypeRef) -> bool {
         || (to == &TypeRef::Named("char".into()) && is_integer(from))
         || (matches!(from, TypeRef::Function { .. }) && to == &TypeRef::Named("u64".into()))
         || (from == &TypeRef::Named("u64".into()) && matches!(to, TypeRef::Function { .. }))
+        // Explicit pointer/address round-trips are supported by typed HIR and
+        // LLVM on the 64-bit ABI. HIR still requires an unsafe context for
+        // either direction; surface lowering only validates cast shape.
+        || (matches!(from, TypeRef::Pointer { .. }) && to == &TypeRef::Named("u64".into()))
+        || (from == &TypeRef::Named("u64".into()) && matches!(to, TypeRef::Pointer { .. }))
         || (matches!(from, TypeRef::Pointer { .. }) && matches!(to, TypeRef::Pointer { .. }))
+        // The cast is always checked for referent type and unsafe context by HIR.
+        || (matches!(from, TypeRef::Reference { .. }) && matches!(to, TypeRef::Pointer { .. }))
 }
 // Lossless implicit scalar conversion. Explicit `as` remains available for
 // narrowing and potentially lossy conversions. No integer -> unsigned cast is
@@ -474,7 +670,7 @@ fn inherit_expr(e: &mut Expr, map: &HashMap<String, TypeRef>) {
             *result = substitute(result, map);
             inherit_stmts(body, map);
         }
-        Expr::MethodCall(base, _, args) => {
+        Expr::MethodCall(base, _, args, _) => {
             inherit_expr(base, map);
             for a in args {
                 inherit_expr(a, map);
@@ -584,6 +780,127 @@ fn inherit_stmts(stmts: &mut [Stmt], map: &HashMap<String, TypeRef>) {
 }
 
 impl Engine {
+    fn register_generated_impl(
+        &mut self,
+        target: TypeRef,
+        trait_name: &str,
+        methods: Vec<ast::Function>,
+    ) -> Result<(), String> {
+        let block = Item::Impl(ast::Impl {
+            generics: vec![],
+            trait_name: Some(trait_name.into()),
+            target,
+            associated_types: vec![],
+            methods,
+        });
+        self.collect(std::slice::from_ref(&block), "")?;
+        self.items.push(block);
+        Ok(())
+    }
+
+    fn accepts_dyn_trait(&self, actual: &TypeRef, expected: &TypeRef, namespace: &str) -> bool {
+        let Some(trait_name) = (match expected {
+            TypeRef::Named(name) => dyn_trait_name(name),
+            TypeRef::Reference { inner, .. } => match inner.as_ref() {
+                TypeRef::Named(name) => dyn_trait_name(name),
+                _ => None,
+            },
+            _ => None,
+        }) else { return false; };
+        let concrete = match (expected, actual) {
+            (TypeRef::Named(_), ty) => ty,
+            (TypeRef::Reference { .. }, TypeRef::Reference { inner, .. }) => inner.as_ref(),
+            _ => return false,
+        };
+        let concrete = match concrete {
+            TypeRef::Reference { inner, .. } | TypeRef::Pointer { inner, .. } => inner.as_ref(),
+            other => other,
+        };
+        if dyn_trait_name(display_type(concrete).as_str()).is_some() { return false; }
+        self.concepts.implements_trait(concrete, trait_name, namespace)
+            || self.items.iter().any(|item| {
+                let Item::Impl(implementation) = item else { return false; };
+                implementation.trait_name.as_deref() == Some(trait_name)
+                    && implementation.target == *concrete
+            })
+    }
+    fn overload_key(&self, name: &str) -> String {
+        if !self.funcs.contains_key(name) {
+            return name.into();
+        }
+        let mut index = 1;
+        loop {
+            let candidate = format!("{name}__overload_{index}");
+            if !self.funcs.contains_key(&candidate) {
+                return candidate;
+            }
+            index += 1;
+        }
+    }
+    fn function_keys(&self, name: &str) -> Vec<String> {
+        let prefix = format!("{name}__overload_");
+        let mut keys = self
+            .funcs
+            .keys()
+            .filter(|key| key.as_str() == name || key.starts_with(&prefix))
+            .cloned()
+            .collect::<Vec<_>>();
+        keys.sort();
+        keys
+    }
+    fn overload_base<'a>(&self, key: &'a str) -> &'a str {
+        key.split_once("__overload_")
+            .map(|(base, _)| base)
+            .unwrap_or(key)
+    }
+    fn argument_hint(argument: &ast::Expr) -> Option<TypeRef> {
+        match argument {
+            ast::Expr::Int(raw) => {
+                let value = raw.parse::<i64>().ok()?;
+                Some(TypeRef::Named(if value > i32::MAX as i64 { "i64" } else { "i32" }.into()))
+            }
+            ast::Expr::Float(_) => Some(TypeRef::Named("f64".into())),
+            ast::Expr::Bool(_) => Some(TypeRef::Named("bool".into())),
+            ast::Expr::Str(_) => Some(TypeRef::Named("str".into())),
+            ast::Expr::Cast(_, target) => Some(target.clone()),
+            ast::Expr::StructInit(name, _) => Some(TypeRef::Named(name.clone())),
+            ast::Expr::GenericStructInit(name, types, _) => Some(TypeRef::Applied(name.clone(), types.clone())),
+            _ => None,
+        }
+    }
+
+    fn overload_score(parameter: &TypeRef, argument: Option<&TypeRef>) -> usize {
+        let Some(argument) = argument else { return 1 };
+        if parameter == argument { return 4; }
+        let numeric = |ty: &TypeRef| matches!(ty,
+            TypeRef::Named(name) if matches!(name.as_str(),
+                "i8"|"i16"|"i32"|"i64"|"i128"|"u8"|"u16"|"u32"|"u64"|"u128"|"f32"|"f64"));
+        if numeric(parameter) && numeric(argument) { 2 } else { 0 }
+    }
+
+    fn select_overload(&self, name: &str, arguments: &[ast::Expr]) -> Option<String> {
+        let mut matches = self
+            .function_keys(name)
+            .into_iter()
+            .filter(|key| {
+                let function = &self.funcs[key].decl;
+                let fixed = function.params.len() - usize::from(function.variadic);
+                (function.variadic && arguments.len() >= fixed) ||
+                    (!function.variadic && arguments.len() == fixed)
+            })
+            .map(|key| {
+                let function = &self.funcs[&key].decl;
+                let fixed = function.params.len() - usize::from(function.variadic);
+                let score = arguments.iter().enumerate().map(|(index, argument)| {
+                    let parameter = &function.params[if index < fixed { index } else { fixed }].ty;
+                    Self::overload_score(parameter, Self::argument_hint(argument).as_ref())
+                }).sum::<usize>();
+                (score, key)
+            })
+            .collect::<Vec<_>>();
+        matches.sort_by(|left, right| right.cmp(left));
+        matches.into_iter().next().map(|(_, key)| key)
+    }
     // Validate and materialize inheritance in topological order. Inherited
     // methods are re-specialized with the derived `self` type rather than
     // copying a base value (which could otherwise double-drop owned fields).
@@ -736,7 +1053,25 @@ impl Engine {
                     .zip(args.iter().cloned())
                     .collect::<HashMap<_, _>>();
                 parent_method.name = format!("__super__{method}");
-                parent_method.params[0].ty = derived_ty.clone();
+                // Rebind only the receiver's owner type. The previous code
+                // replaced `&mut Base` with plain `Derived`, silently losing
+                // mutability while materializing inherited methods. Preserve
+                // the receiver ABI/borrow shape so framework behaviours can
+                // mutate state from a derived class just like a Unity
+                // Component or MonoBehaviour.
+                if let Some(receiver) = parent_method.params.get_mut(0) {
+                    receiver.ty = match &receiver.ty {
+                        TypeRef::Reference { mutable, .. } => TypeRef::Reference {
+                            mutable: *mutable,
+                            inner: Box::new(derived_ty.clone()),
+                        },
+                        TypeRef::Pointer { mutable, .. } => TypeRef::Pointer {
+                            mutable: *mutable,
+                            inner: Box::new(derived_ty.clone()),
+                        },
+                        _ => derived_ty.clone(),
+                    };
+                }
                 for p in parent_method.params.iter_mut().skip(1) {
                     p.ty = substitute(&p.ty, &bindings);
                 }
@@ -807,7 +1142,19 @@ impl Engine {
                 // Inheritance of an instance method specializes parent template
                 // variables to the derived class's generic arguments.
                 let mut method_decl = ancestor.decl.clone();
-                method_decl.params[0].ty = derived_ty.clone();
+                if let Some(receiver) = method_decl.params.get_mut(0) {
+                    receiver.ty = match &receiver.ty {
+                        TypeRef::Reference { mutable, .. } => TypeRef::Reference {
+                            mutable: *mutable,
+                            inner: Box::new(derived_ty.clone()),
+                        },
+                        TypeRef::Pointer { mutable, .. } => TypeRef::Pointer {
+                            mutable: *mutable,
+                            inner: Box::new(derived_ty.clone()),
+                        },
+                        _ => derived_ty.clone(),
+                    };
+                }
                 for p in method_decl.params.iter_mut().skip(1) {
                     p.ty = substitute(&p.ty, &bindings);
                 }
@@ -912,20 +1259,15 @@ impl Engine {
                     {
                         return Err(format!("duplicate parameter name in '{name}'"));
                     }
-                    if self
-                        .funcs
-                        .insert(
-                            name.clone(),
+                    let key = self.overload_key(&name);
+                    self.funcs.insert(
+                            key,
                             FuncDef {
                                 decl: f.clone(),
                                 namespace: ns.into(),
                                 impl_generics: vec![],
                             },
-                        )
-                        .is_some()
-                    {
-                        return Err(format!("duplicate function '{name}'"));
-                    }
+                        );
                 }
                 Item::Impl(block) => {
                     check_params(&block.generics)?;
@@ -933,6 +1275,25 @@ impl Engine {
                         TypeRef::Named(n) | TypeRef::Applied(n, _) => n,
                         _ => return Err("impl target must be a named type".into()),
                     };
+                    // A blanket impl whose target is itself a type parameter is
+                    // resolved lazily from a call site (for example
+                    // `impl<T: Arithmetic> T`).  It must carry a constraint;
+                    // otherwise it would be an unconstrained extension of
+                    // every type and would make method lookup ambiguous.
+                    if block.trait_name.is_none()
+                        && block.generics.iter().any(|generic| generic == target_name)
+                        && block.methods.iter().any(|method| {
+                            !method.concept_bounds.iter().any(|bound| {
+                                bound.args.iter().any(|argument| {
+                                    contains_type_var(argument, target_name)
+                                })
+                            })
+                        })
+                    {
+                        return Err(format!(
+                            "blanket impl target '{target_name}' requires a concept bound"
+                        ));
+                    }
                     let qualified = self.qualify(target_name, ns);
                     for method in &block.methods {
                         ast::function_is_unsafe(
@@ -965,29 +1326,29 @@ impl Engine {
                             ));
                         }
                         let name = format!("{qualified}::{}", method.name);
-                        if self
-                            .funcs
-                            .insert(
-                                name.clone(),
+                        let key = self.overload_key(&name);
+                        self.funcs.insert(
+                                key,
                                 FuncDef {
                                     decl: method.clone(),
                                     namespace: ns.into(),
                                     impl_generics: block.generics.clone(),
                                 },
-                            )
-                            .is_some()
-                        {
-                            return Err(format!("duplicate method '{name}'"));
-                        }
-                        if method.params.first().is_none() {
-                            return Err(format!(
-                                "method '{name}' requires explicit self: Type parameter"
-                            ));
-                        }
-                        if method.params[0].name != "self" {
-                            return Err(format!(
-                                "method '{name}' must declare self: Type as first parameter"
-                            ));
+                            );
+                        let static_marker=method.attributes.iter().any(|a|a.name=="static");
+                        if static_marker {
+                            if method.params.iter().any(|p|p.name=="self") {
+                                return Err(format!("error[NOVA-CTOR001]: static method '{name}' must not declare a self parameter"));
+                            }
+                            if method.is_virtual || method.is_override {
+                                return Err(format!("error[NOVA-CTOR002]: static method '{name}' cannot be virtual or override"));
+                            }
+                            if method.name=="new" && method.result!=block.target
+                                && method.result!=TypeRef::Named("Self".into()) {
+                                return Err(format!("error[NOVA-CTOR003]: constructor '{name}' must return the enclosing type {}", display_type(&block.target)));
+                            }
+                        } else if method.params.first().map(|p|p.name.as_str())!=Some("self") {
+                            return Err(format!("error[NOVA-CTOR004]: method '{name}' must declare self as the first parameter or be marked `static fn`"));
                         }
                     }
                 }
@@ -1038,6 +1399,14 @@ impl Engine {
                 Item::ConceptAssert(_) => {
                     return Err("internal error: static_assert was not evaluated".into())
                 }
+                Item::CompileTimeConst(decl) => {
+                    // consteval::fold must inline and remove module constants
+                    // before the surface pass materializes declarations.
+                    return Err(format!(
+                        "internal error: compile-time constant '{}' was not evaluated",
+                        decl.name
+                    ));
+                }
                 Item::Public(inner) => self.collect(std::slice::from_ref(inner.as_ref()), ns)?,
                 Item::Mod { name, .. } => {
                     return Err(format!("unresolved module '{name}' (use package loader)"))
@@ -1050,19 +1419,235 @@ impl Engine {
         Ok(())
     }
     fn qualify(&self, name: &str, ns: &str) -> String {
-        if name.contains("::") || ns.is_empty() {
-            name.into()
-        } else {
-            let near = join(ns, name);
-            if self.structs.contains_key(&near)
-                || self.enums.contains_key(&near)
-                || self.funcs.contains_key(&near)
-                || self.externs.contains_key(&near)
+        let normalized = name.replace("__", "::");
+        if normalized != name
+            && (self.structs.contains_key(&normalized)
+                || self.enums.contains_key(&normalized)
+                || self.funcs.contains_key(&normalized)
+                || self.externs.contains_key(&normalized))
+        {
+            return normalized;
+        }
+        if ns.is_empty() {
+            return name.into();
+        }
+        // A fully-qualified symbol (e.g. std::old::string::from_text) takes
+        // precedence over a relative spelling. A static method such as
+        // RouteTemplate::valid, however, can itself contain `::` while
+        // still being relative to the current module (NB::web).
+        if name.contains("::")
+            && (self.structs.contains_key(name)
+                || self.enums.contains_key(name)
+                || self.funcs.contains_key(name)
+                || self.externs.contains_key(name))
+        {
+            return name.into();
+        }
+        let mut scope = ns;
+        while !scope.is_empty() {
+            let candidate = join(scope, name);
+            if self.structs.contains_key(&candidate)
+                || self.enums.contains_key(&candidate)
+                || self.funcs.contains_key(&candidate)
+                || self.externs.contains_key(&candidate)
             {
-                near
-            } else {
-                name.into()
+                return candidate;
             }
+            scope = scope.rsplit_once("::").map(|(parent, _)| parent).unwrap_or("");
+        }
+        // During the stdlib namespace migration, accept the historical public
+        // spelling without creating a second declaration or type identity.
+        // ABI, metadata and already-canonical old paths remain untouched.
+        if let Some(rest) = name.strip_prefix("std::") {
+            if !rest.starts_with("old::")
+                && !rest.starts_with("abi::")
+                && !rest.starts_with("meta::")
+            {
+                let legacy = format!("std::old::{rest}");
+                if self.funcs.contains_key(&legacy)
+                    || self.externs.contains_key(&legacy)
+                    || self.structs.contains_key(&legacy)
+                    || self.enums.contains_key(&legacy)
+                {
+                    return legacy;
+                }
+            }
+        }
+        name.into()
+    }
+    // Resolve `T::method(...)` after function monomorphization has bound T to
+    // a concrete type. Ordinary path qualification cannot find a declaration
+    // named literally `T::method`, and a mangled concrete type such as
+    // `std__old__string__String` is not itself a source-language namespace.
+    //
+    // The owner is matched against the instantiated type's actual template
+    // arguments, rather than guessing by splitting its mangled symbol. This
+    // also supports static methods declared in `impl Owner<U>` blocks.
+    fn generic_static_call(
+        &mut self,
+        name: &str,
+        scope: &Scope,
+        explicit_args: usize,
+    ) -> Result<Option<(String, Vec<TypeRef>)>, String> {
+        let Some((parameter, method)) = name.split_once("::") else {
+            return Ok(None);
+        };
+        let Some(bound) = scope.subst.get(parameter) else {
+            return Ok(None);
+        };
+        let resolved = self.resolved_type(bound, &scope.namespace, &scope.subst)?;
+        let TypeRef::Named(concrete) = resolved else {
+            return Err(format!(
+                "static call '{name}' requires a named concrete type, got {}",
+                display_type(&resolved)
+            ));
+        };
+        let owner_args = self.instance_args.get(&concrete).cloned().unwrap_or_default();
+        let mut candidates = self.funcs.iter().filter_map(|(full, definition)| {
+            let (owner, _) = self.overload_base(full).rsplit_once("::")?;
+            if definition.decl.name != method
+                || !definition.decl.attributes.iter().any(|a| a.name == "static")
+                || definition.impl_generics.len() != owner_args.len()
+            {
+                return None;
+            }
+            let fixed = definition.decl.params.len() - usize::from(definition.decl.variadic);
+            if (!definition.decl.variadic && explicit_args != fixed)
+                || (definition.decl.variadic && explicit_args < fixed)
+            {
+                return None;
+            }
+            let instance = if owner_args.is_empty() {
+                ident(owner)
+            } else {
+                format!(
+                    "{}__{}",
+                    ident(owner),
+                    owner_args.iter().map(type_suffix).collect::<Vec<_>>().join("__")
+                )
+            };
+            (instance == concrete).then(|| full.clone())
+        }).collect::<Vec<_>>();
+        candidates.sort();
+        match candidates.as_slice() {
+            [selected] => Ok(Some((selected.clone(), owner_args))),
+            [] => Err(format!(
+                "type '{}' has no static method '{}' (from generic call '{}')",
+                display_type(&TypeRef::Named(concrete)), method, name
+            )),
+            _ => Err(format!(
+                "ambiguous static method '{}': {}",
+                name, candidates.join(", ")
+            )),
+        }
+    }
+    /// Resolve a static constructor supplied by a constrained blanket impl,
+    /// such as `impl<T: Arithmetic> T { static fn new(...) -> T { ... } }`.
+    /// This is deliberately limited to `new`: ordinary static dispatch must
+    /// remain tied to a concrete owner and must not become open extension
+    /// dispatch accidentally.
+    fn blanket_constructor_call(
+        &self,
+        name: &str,
+        explicit_args: usize,
+    ) -> Result<Option<(String, Vec<TypeRef>)>, String> {
+        let Some((concrete, method)) = name.rsplit_once("::") else {
+            return Ok(None);
+        };
+        if method != "new" {
+            return Ok(None);
+        }
+        let mut candidates = self
+            .funcs
+            .iter()
+            .filter_map(|(full, definition)| {
+            let (owner, _) = self.overload_base(full).rsplit_once("::")?;
+            if definition.decl.name != "new"
+                    || !definition
+                        .decl
+                        .attributes
+                        .iter()
+                        .any(|attribute| attribute.name == "static")
+                    || definition.impl_generics.iter().all(|generic| generic != owner)
+                {
+                    return None;
+                }
+                let fixed = definition.decl.params.len() - usize::from(definition.decl.variadic);
+                if (!definition.decl.variadic && explicit_args != fixed)
+                    || (definition.decl.variadic && explicit_args < fixed)
+                {
+                    return None;
+                }
+                Some((full.clone(), owner.to_string()))
+            })
+            .filter(|(_, owner)| owner != concrete)
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| left.0.cmp(&right.0));
+        match candidates.as_slice() {
+            [] => Ok(None),
+            [(selected, _)] => Ok(Some((
+                selected.clone(),
+                vec![TypeRef::Named(concrete.to_string())],
+            ))),
+            _ => Err(format!(
+                "ambiguous blanket constructor '{}': {}",
+                name,
+                candidates
+                    .iter()
+                    .map(|(candidate, _)| candidate.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        }
+    }
+    fn concrete_constructor_call(
+        &self,
+        concrete: &str,
+        explicit_args: usize,
+    ) -> Result<Option<String>, String> {
+        let owner_args = self.instance_args.get(concrete).cloned().unwrap_or_default();
+        let mut candidates = self
+            .funcs
+            .iter()
+            .filter_map(|(full, definition)| {
+                let (owner, _) = self.overload_base(full).rsplit_once("::")?;
+                if definition.decl.name != "new"
+                    || !definition
+                        .decl
+                        .attributes
+                        .iter()
+                        .any(|attribute| attribute.name == "static")
+                    || definition.impl_generics.len() != owner_args.len()
+                {
+                    return None;
+                }
+                let fixed = definition.decl.params.len() - usize::from(definition.decl.variadic);
+                if (!definition.decl.variadic && explicit_args != fixed)
+                    || (definition.decl.variadic && explicit_args < fixed)
+                {
+                    return None;
+                }
+                let instance = if owner_args.is_empty() {
+                    ident(owner)
+                } else {
+                    format!(
+                        "{}__{}",
+                        ident(owner),
+                        owner_args.iter().map(type_suffix).collect::<Vec<_>>().join("__")
+                    )
+                };
+                (instance == concrete).then(|| full.clone())
+            })
+            .collect::<Vec<_>>();
+        candidates.sort();
+        match candidates.as_slice() {
+            [] => Ok(None),
+            [selected] => Ok(Some(selected.clone())),
+            _ => Err(format!(
+                "ambiguous constructor for '{}': {}",
+                concrete,
+                candidates.join(", ")
+            )),
         }
     }
     fn resolved_type(
@@ -1078,6 +1663,8 @@ impl Engine {
                     self.instantiate_type(&q, &[])
                 } else if self.structs.contains_key(&n) || self.enums.contains_key(&n) {
                     self.instantiate_type(&n, &[])
+                } else if impl_trait_name(&n).is_some() {
+                    return Err("'impl Trait' is only valid as a function return type".into());
                 } else {
                     Ok(TypeRef::Named(n))
                 }
@@ -1119,10 +1706,10 @@ impl Engine {
         // including explicitly instantiated globals/fields, are validated.
         if matches!(
             name,
-            "std::task::Task"
-                | "std::task::Future"
-                | "std::generator::Generator"
-                | "std::coro::Coroutine"
+            "std::old::task::Task"
+                | "std::old::task::Future"
+                | "std::old::generator::Generator"
+                | "std::old::coro::Coroutine"
         ) {
             if args.len() != 1 || !matches!(&args[0], TypeRef::Named(t) if t == "i64" || t == "u64")
             {
@@ -1146,10 +1733,11 @@ impl Engine {
         if self.type_cache.contains_key(&concrete) {
             return Ok(TypeRef::Named(concrete));
         }
-        let (fields, params, attributes, ns, is_enum) = if let Some(s) = self.structs.get(name) {
+        let (fields, params, bounds, attributes, ns, is_enum) = if let Some(s) = self.structs.get(name) {
             (
                 s.decl.fields.clone(),
                 s.decl.generics.clone(),
+                s.decl.concept_bounds.clone(),
                 s.decl.attributes.clone(),
                 s.namespace.clone(),
                 false,
@@ -1158,12 +1746,26 @@ impl Engine {
             (
                 vec![],
                 e.decl.generics.clone(),
+                e.decl.concept_bounds.clone(),
                 e.decl.attributes.clone(),
                 e.namespace.clone(),
                 true,
             )
         } else {
-            return Err(format!("unknown generic type '{name}'"));
+            let mut nearby = self
+                .structs
+                .keys()
+                .filter(|candidate| candidate.ends_with(name) || candidate.contains(name))
+                .cloned()
+                .collect::<Vec<_>>();
+            nearby.sort();
+            nearby.truncate(5);
+            let hint = if nearby.is_empty() {
+                String::new()
+            } else {
+                format!("; known candidates: {}", nearby.join(", "))
+            };
+            return Err(format!("unknown generic type '{name}'{hint}"));
         };
         if params.len() != args.len() {
             return Err(format!(
@@ -1176,6 +1778,7 @@ impl Engine {
             .into_iter()
             .zip(args.iter().cloned())
             .collect::<HashMap<_, _>>();
+        self.concepts.check(&bounds,&ns,&subst,&format!("type {name}"))?;
         validate_attrs(&attributes, is_enum)?;
         self.type_cache
             .insert(concrete.clone(), TypeRef::Named(concrete.clone()));
@@ -1186,6 +1789,8 @@ impl Engine {
             concrete_fields.push(ast::Field {
                 name: "__nova_tag".into(),
                 ty: TypeRef::Named("i32".into()),
+                default:None,
+                attributes:vec![],
             });
             let mut metas = vec![];
             for (variant_tag, v) in variants.into_iter().enumerate() {
@@ -1199,6 +1804,8 @@ impl Engine {
                     concrete_fields.push(ast::Field {
                         name: field.clone(),
                         ty: ty.clone(),
+                        default:None,
+                        attributes:vec![],
                     });
                     payload.push((field, ty));
                 }
@@ -1237,6 +1844,11 @@ impl Engine {
                 concrete_fields.push(ast::Field {
                     name: field.name,
                     ty: self.resolved_type(&field.ty, &ns, &subst)?,
+                    default:field.default.map(|mut expr| {
+                        inherit_expr(&mut expr,&subst);
+                        expr
+                    }),
+                    attributes:field.attributes,
                 });
             }
         }
@@ -1279,6 +1891,7 @@ impl Engine {
         self.items.push(Item::Struct(ast::Struct {
             name: concrete.clone(),
             generics: vec![],
+            concept_bounds: vec![],
             fields: concrete_fields.clone(),
             attributes: if emits.is_empty() {
                 vec![]
@@ -1339,6 +1952,7 @@ impl Engine {
                     name: "value".into(),
                     ty: name_ty.clone(),
                     default: None,
+                    attributes: vec![],
                 }],
                 variadic: false,
                 result: name_ty.clone(),
@@ -1347,6 +1961,46 @@ impl Engine {
                 is_override: false,
                 attributes: vec![],
             }));
+            let cloned_fields = concrete_fields
+                .iter()
+                .map(|field| {
+                    (
+                        field.name.clone(),
+                        Expr::Field(
+                            Box::new(Expr::Deref(Box::new(Expr::Var("self".into())))),
+                            field.name.clone(),
+                        ),
+                    )
+                })
+                .collect();
+            self.register_generated_impl(
+                name_ty.clone(),
+                "Clone",
+                vec![ast::Function {
+                    mode: ast::FunctionMode::Normal,
+                    name: "clone".into(),
+                    generics: vec![],
+                    concept_bounds: vec![],
+                    params: vec![ast::Param {
+                        name: "self".into(),
+                        ty: TypeRef::Reference {
+                            mutable: false,
+                            inner: Box::new(name_ty.clone()),
+                        },
+                        default: None,
+                        attributes: vec![],
+                    }],
+                    variadic: false,
+                    result: name_ty.clone(),
+                    body: vec![Stmt::Return(Some(Expr::StructInit(
+                        concrete.clone(),
+                        cloned_fields,
+                    )))],
+                    is_virtual: false,
+                    is_override: false,
+                    attributes: vec![],
+                }],
+            )?;
         }
         if attributes
             .iter()
@@ -1361,6 +2015,7 @@ impl Engine {
                     name: "value".into(),
                     ty: name_ty.clone(),
                     default: None,
+                    attributes: vec![],
                 }],
                 variadic: false,
                 result: TypeRef::Named("i32".into()),
@@ -1372,6 +2027,34 @@ impl Engine {
                 is_override: false,
                 attributes: vec![],
             }));
+            self.register_generated_impl(
+                name_ty.clone(),
+                "Debug",
+                vec![ast::Function {
+                    mode: ast::FunctionMode::Normal,
+                    name: "debug_string".into(),
+                    generics: vec![],
+                    concept_bounds: vec![],
+                    params: vec![ast::Param {
+                        name: "self".into(),
+                        ty: TypeRef::Reference {
+                            mutable: false,
+                            inner: Box::new(name_ty.clone()),
+                        },
+                        default: None,
+                        attributes: vec![],
+                    }],
+                    variadic: false,
+                    result: TypeRef::Named("str".into()),
+                    body: vec![Stmt::Return(Some(Expr::Call(
+                        format!("{concrete}_to_json"),
+                        vec![Expr::Deref(Box::new(Expr::Var("self".into())))],
+                    )))],
+                    is_virtual: false,
+                    is_override: false,
+                    attributes: vec![],
+                }],
+            )?;
         }
         // A monomorphized owner must bring its destructor into the concrete
         // function table even if the user never calls `.drop()` explicitly.
@@ -1420,7 +2103,7 @@ impl Engine {
                 }
                 Ok(Expr::Array(a))
             }
-            _ => Err(format!("type '{ty:?}' has no safe default value")),
+            _ => Err(format!("type '{}' has no safe default value", display_type(ty))),
         }
     }
     fn instantiate_function(
@@ -1500,7 +2183,17 @@ impl Engine {
                     error
                 }
             })?;
-        let result = self.resolved_type(&template.decl.result, &template.namespace, &subst)?;
+        let opaque_trait = match &template.decl.result {
+            TypeRef::Named(name) => impl_trait_name(name).map(str::to_owned),
+            _ => None,
+        };
+        let mut result = if opaque_trait.is_some() {
+            // Infer the hidden concrete type after parameters are registered.
+            // This placeholder never reaches HIR or LLVM.
+            TypeRef::Named("()".into())
+        } else {
+            self.resolved_type(&template.decl.result, &template.namespace, &subst)?
+        };
         if !self.func_cache.insert(key.clone()) {
             return Ok((key, result));
         }
@@ -1510,7 +2203,20 @@ impl Engine {
             namespace: template.namespace.clone(),
             subst: subst.clone(),
             returns: result.clone(),
+            constructor_base: None,
         };
+        if template.decl.name == "new" {
+            if let Some((owner, _)) = name.rsplit_once("::") {
+                if let Some(structure) = self.structs.get(owner) {
+                    if let Some(parent) = &structure.decl.parent {
+                        let parent = substitute(parent, &scope.subst);
+                        scope.constructor_base = Some(
+                            self.resolved_type(&parent, &template.namespace, &scope.subst)?,
+                        );
+                    }
+                }
+            }
+        }
         for (i, p) in template.decl.params.iter().enumerate() {
             let mut ty = self.resolved_type(&p.ty, &template.namespace, &subst)?;
             if template.decl.variadic && i + 1 == template.decl.params.len() {
@@ -1523,11 +2229,27 @@ impl Engine {
                 name: p.name.clone(),
                 ty,
                 default: None,
+                attributes: vec![],
             });
         }
+        let mut function_body = template.decl.body.clone();
+        if let Some(trait_name) = opaque_trait {
+            let candidate = function_body.iter().rev().find_map(|statement| match statement {
+                Stmt::Return(Some(value)) => Some(value),
+                Stmt::Tail(value) => Some(value),
+                _ => None,
+            }).ok_or_else(|| format!("function '{name}' returning impl {trait_name} must return a value"))?;
+            let (_, inferred) = self.expression(candidate, &scope, None)?;
+            let dyn_trait = TypeRef::Named(format!("dyn {trait_name}"));
+            if !self.accepts_dyn_trait(&inferred, &dyn_trait, &template.namespace) {
+                return Err(format!("type {} does not implement trait '{}' required by impl Trait", display_type(&inferred), trait_name));
+            }
+            result = inferred;
+            scope.returns = result.clone();
+        }
+
         // Preserve the real monomorphization/call-lowering chain for diagnostics.
         // These frames are compile-time context, not a runtime stack trace.
-        let mut function_body = template.decl.body.clone();
         if let Some(Stmt::Tail(value)) = function_body.last().cloned() {
             function_body.pop();
             if result == TypeRef::Named("()".into()) {
@@ -1572,7 +2294,7 @@ impl Engine {
                     let (init, got) = self.expression(init, scope, expected.as_ref())?;
                     if let Some(ref t) = expected {
                         if t != &got {
-                            return Err(format!("local '{name}' expected {t:?}, found {got:?}"));
+                            return Err(format!("local '{name}' expected {}, found {}", display_type(t), display_type(&got)));
                         }
                     }
                     if scope.vars.contains_key(name) {
@@ -1592,10 +2314,16 @@ impl Engine {
                     });
                 }
                 Stmt::Set { name, value } => {
+                    if name == "__nova_let_else_must_diverge__" {
+                        return Err("let-else requires its else branch to exit with return, break or continue".into());
+                    }
+                    let actual_name = name
+                        .strip_prefix(crate::ast::REPLACE_PREFIX)
+                        .unwrap_or(name);
                     let expected = scope
                         .vars
-                        .get(name)
-                        .ok_or_else(|| format!("unknown local '{name}'"))?
+                        .get(actual_name)
+                        .ok_or_else(|| format!("unknown local '{actual_name}'"))?
                         .clone();
                     let (value, _) = self.expression(value, scope, Some(&expected))?;
                     output.push(Stmt::Set {
@@ -1665,12 +2393,27 @@ impl Engine {
                         .concrete_fields
                         .get(name)
                         .ok_or_else(|| format!("'{name}' has no fields"))?;
-                    let expected = fields
-                        .iter()
-                        .find(|f| f.name == *field)
-                        .ok_or_else(|| format!("'{name}' has no field '{field}'"))?
-                        .ty
-                        .clone();
+                    let found=fields.iter().find(|f|f.name==*field).map(|f|f.ty.clone());
+                    if found.is_none() {
+                        // Computed-property setters are normal Nova instance
+                        // methods. Their &mut Self requirement is enforced by
+                        // the existing borrow checker; no hidden storage.
+                        let rhs=if let Some(binary)=op {
+                            Expr::Binary(
+                                Box::new(Expr::Field(Box::new(Expr::Var(root.clone())),field.clone())),
+                                *binary,Box::new(value.clone()))
+                        } else {value.clone()};
+                        let setter=Expr::MethodCall(Box::new(Expr::Var(root.clone())),
+                            format!("set_{field}"),vec![rhs],vec![]);
+                        let (call,result)=self.expression(&setter,scope,None)
+                            .map_err(|error|format!("'{name}' has no mutable property '{field}': {error}"))?;
+                        if result!=TypeRef::Named("()".into()) {
+                            return Err(format!("property setter '{name}::set_{field}' must return ()"));
+                        }
+                        output.push(Stmt::Expr(call));
+                        continue;
+                    }
+                    let expected=found.unwrap();
                     let rhs = if let Some(binary) = op {
                         Expr::Binary(
                             Box::new(Expr::Field(
@@ -1703,7 +2446,7 @@ impl Engine {
                         *op, Box::new(value.clone()));
                     let (value, result_type) = self.expression(&combined, scope, Some(&expected))?;
                     if result_type != expected {
-                        return Err(format!("compound operator on '{name}' returns {result_type:?}, expected {expected:?}"));
+                        return Err(format!("compound operator on '{name}' returns {}, expected {}", display_type(&result_type), display_type(&expected)));
                     }
                     output.push(Stmt::Set { name:name.clone(), value });
                 }
@@ -1766,7 +2509,7 @@ impl Engine {
                     }
                     let (end, upper_ty) = self.expression(end, scope, Some(&ty))?;
                     if ty != upper_ty {
-                        return Err(format!("for range bounds must have equal types; variable '{name}' starts as {ty:?}, but ends as {upper_ty:?}"));
+                        return Err(format!("for range bounds must have equal types; variable '{name}' starts as {}, but ends as {}", display_type(&ty), display_type(&upper_ty)));
                     }
                     let mut child = scope.clone();
                     if child.vars.contains_key(name) {
@@ -1863,6 +2606,12 @@ impl Engine {
                                 let mut prefix = vec![];
                                 for (binding, (field, ty)) in bindings.iter().zip(fields) {
                                     child.vars.insert(binding.clone(), ty.clone());
+                                    // `Ok(())` / `Some(())` has no materialized payload.
+                                    // The binding is substituted with Expr::Unit below;
+                                    // emitting a unit-typed HIR local is invalid.
+                                    if *ty == TypeRef::Named("()".into()) {
+                                        continue;
+                                    }
                                     prefix.push(Stmt::Let {
                                         name: binding.clone(),
                                         mutable: false,
@@ -1963,6 +2712,7 @@ impl Engine {
             TypeRef::Pointer { .. } | TypeRef::Reference { .. } | TypeRef::Function { .. } => {
                 Ok((8, 8))
             }
+            TypeRef::Named(name) if dyn_trait_name(name).is_some() => Ok((16, 8)),
             TypeRef::Named(name) => match name.as_str() {
                 "bool" | "i8" | "u8" => Ok((1, 1)),
                 "i16" | "u16" => Ok((2, 2)),
@@ -2010,7 +2760,15 @@ impl Engine {
     ) -> Result<(Expr, TypeRef), String> {
         let (value, actual) = self.expression_inner(e, scope, expected)?;
         if let Some(want) = expected {
-            if &actual != want && implicit_numeric_widen(&actual, want) {
+            if self.accepts_dyn_trait(&actual, want, &scope.namespace) {
+                // Trait-object coercion is represented at the surface boundary;
+                // the backend will attach the data/vtable pair during dynamic
+                // dispatch lowering.
+                return Ok((value, want.clone()));
+            }
+            if &actual != want &&
+                (implicit_numeric_widen(&actual, want) || implicit_shared_reborrow(&actual, want))
+            {
                 return Ok((Expr::Cast(Box::new(value), want.clone()), want.clone()));
             }
         }
@@ -2118,8 +2876,15 @@ impl Engine {
                     .iter()
                     .map(|p| self.resolved_type(&p.ty, &func.namespace, &scope.subst))
                     .collect::<Result<Vec<_>, _>>()?;
-                let result =
-                    self.resolved_type(&func.decl.result, &func.namespace, &scope.subst)?;
+                let result = if let TypeRef::Named(declared) = &func.decl.result {
+                    if impl_trait_name(declared).is_some() {
+                        self.instantiate_function(&q, &[], None)?.1
+                    } else {
+                        self.resolved_type(&func.decl.result, &func.namespace, &scope.subst)?
+                    }
+                } else {
+                    self.resolved_type(&func.decl.result, &func.namespace, &scope.subst)?
+                };
                 self.instantiate_function(&q, &[], None)?;
                 Ok((
                     Expr::FunctionRef(ident(&q)),
@@ -2150,6 +2915,9 @@ impl Engine {
             }
             Expr::Var(n) => {
                 if let Some(ty) = scope.vars.get(n) {
+                    if *ty == TypeRef::Named("()".into()) {
+                        return Ok((Expr::Unit, ty.clone()));
+                    }
                     return Ok((e.clone(), ty.clone()));
                 }
                 if self.funcs.contains_key(&self.qualify(n, &scope.namespace))
@@ -2198,7 +2966,7 @@ impl Engine {
                 let target = self.resolved_type(target, &scope.namespace, &scope.subst)?;
                 let (value, from) = self.expression(value, scope, None)?;
                 if !castable(&from, &target) {
-                    return Err(format!("cannot cast {from:?} to {target:?}; numeric or explicit function-handle casts only"));
+                    return Err(format!("cannot cast {} to {}; numeric or explicit function-handle casts only", display_type(&from), display_type(&target)));
                 }
                 Ok((Expr::Cast(Box::new(value), target.clone()), target))
             }
@@ -2276,10 +3044,10 @@ impl Engine {
                                         )))
                             });
                             if !candidate {
-                                return Err(format!("operator {op:?} on '{receiver_type}' requires a matching '{method}' method (typically via std::ops trait)"));
+                                return Err(format!("operator {op:?} on '{receiver_type}' requires a matching '{method}' method (typically via std::old::ops trait)"));
                             }
                             return self.expression(
-                                &Expr::MethodCall(Box::new(a), method.into(), vec![b]),
+                                &Expr::MethodCall(Box::new(a), method.into(), vec![b], vec![]),
                                 scope,
                                 expected,
                             );
@@ -2309,7 +3077,7 @@ impl Engine {
                     && numeric_info(&ta).is_some()
                     && numeric_info(&tb).is_some()
                 {
-                    let to=promote_numeric(&ta,&tb).ok_or_else(||format!("no lossless implicit numeric conversion between {ta:?} and {tb:?}; use 'as'"))?;
+                    let to=promote_numeric(&ta,&tb).ok_or_else(||format!("no lossless implicit numeric conversion between {} and {}; use 'as'", display_type(&ta), display_type(&tb)))?;
                     if ta != to {
                         a = Expr::Cast(Box::new(a), to.clone());
                     }
@@ -2326,13 +3094,193 @@ impl Engine {
                 Ok((Expr::Binary(Box::new(a), *op, Box::new(b)), result))
             }
             Expr::Call(name, original_args) => {
-                // `format!` returns an owned std::string::String. A chain of
-                // handle-returning native append operations evaluates each
-                // argument exactly once, left-to-right, then installs the
-                // finished handle into the ordinary RAII String owner.
+                if name == "__nova_internal_unsafe_expr" {
+                    if original_args.len() != 1 {
+                        return Err("unsafe expression requires one block".into());
+                    }
+                    let (body, ty) = self.expression(&original_args[0], scope, expected)?;
+                    return Ok((Expr::Call(name.clone(), vec![body]), ty));
+                }
+                if name == "super" {
+                    let Some(parent) = &scope.constructor_base else {
+                        return Err("super() is only available inside a derived constructor".into());
+                    };
+                    let TypeRef::Named(parent_name) = parent else {
+                        return Err("super() requires a concrete base class".into());
+                    };
+                    let constructor = format!("{parent_name}::new");
+                    if !self.funcs.contains_key(&constructor) {
+                        return Err(format!(
+                            "base class '{parent_name}' has no constructor for super()"
+                        ));
+                    }
+                    return self.expression(
+                        &Expr::Call(constructor, original_args.clone()),
+                        scope,
+                        expected,
+                    );
+                }
+                let internal_math = match name.as_str() {
+                    "sqrt" => Some("__nova_internal_sqrt_f64"),
+                    "abs" => Some("__nova_internal_abs_f64"),
+                    "floor" => Some("__nova_internal_floor_f64"),
+                    "ceil" => Some("__nova_internal_ceil_f64"),
+                    _ => None,
+                };
+                if let Some(internal) = internal_math {
+                    if original_args.len() != 1 {
+                        return Err(format!("{name} expects one f64 argument"));
+                    }
+                    let (value, ty) = self.expression(
+                        &original_args[0],
+                        scope,
+                        Some(&TypeRef::Named("f64".into())),
+                    )?;
+                    if ty != TypeRef::Named("f64".into()) {
+                        return Err(format!("{name} expects an f64 argument"));
+                    }
+                    return Ok((Expr::Call(internal.into(), vec![value]), TypeRef::Named("f64".into())));
+                }
+                if name == "byte_offset" {
+                    if original_args.len() != 2 {
+                        return Err("byte_offset expects a pointer and a byte distance".into());
+                    }
+                    let pointer_ty = TypeRef::Pointer {
+                        mutable: true,
+                        inner: Box::new(TypeRef::Named("u8".into())),
+                    };
+                    let (pointer, actual_pointer) =
+                        self.expression(&original_args[0], scope, Some(&pointer_ty))?;
+                    if !matches!(actual_pointer, TypeRef::Pointer { .. }) {
+                        return Err("byte_offset expects a pointer as its first argument".into());
+                    }
+                    let (distance, _) = self.expression(
+                        &original_args[1],
+                        scope,
+                        Some(&TypeRef::Named("u64".into())),
+                    )?;
+                    let internal = Expr::Call(
+                        "__nova_internal_byte_offset".into(),
+                        vec![Expr::Cast(Box::new(pointer), TypeRef::Named("u64".into())), distance],
+                    );
+                    return Ok((
+                        Expr::Cast(Box::new(internal), pointer_ty),
+                        TypeRef::Pointer {
+                            mutable: true,
+                            inner: Box::new(TypeRef::Named("u8".into())),
+                        },
+                    ));
+                }
+                if name == "__nova_target_new" {
+                    let Some(expected) = expected else {
+                        return Err("cannot infer the type for `new(...)`; assign it to a typed variable or field, for example `let value: Counter = new(7);`".into());
+                    };
+                    let target = self.resolved_type(expected, &scope.namespace, &scope.subst)?;
+                    let TypeRef::Named(concrete) = &target else {
+                        return Err("`new(...)` needs a concrete named target type; add an explicit variable or field type".into());
+                    };
+                    let constructor = format!("{concrete}::new");
+                    let selected = if self.funcs.contains_key(&constructor) {
+                        constructor
+                    } else if let Some(selected) = self.concrete_constructor_call(concrete, original_args.len())? {
+                        selected
+                    } else {
+                        self.blanket_constructor_call(&constructor, original_args.len())?
+                            .map(|(name, _)| name)
+                            .ok_or_else(|| format!("type '{}' has no constructor 'new'", display_type(&target)))?
+                    };
+                    return self.expression(
+                        &Expr::Call(selected, original_args.clone()),
+                        scope,
+                        Some(&target),
+                    );
+                }
+                // Compiler-private operations are injected after surface
+                // collection so they cannot be shadowed by a Nova module.
+                // Lower their arguments here and let HIR validate the final
+                // intrinsic ABI against the injected declarations.
+                if name.starts_with("__nova_internal_") {
+                    let mut args = Vec::with_capacity(original_args.len());
+                    for argument in original_args {
+                        args.push(self.expression(argument, scope, None)?.0);
+                    }
+                    let result = match name.as_str() {
+                        "__nova_internal_copy_bytes"
+                        | "__nova_internal_move_bytes"
+                        | "__nova_internal_set_bytes"
+                        | "__nova_internal_heap_free" => TypeRef::Named("()".into()),
+                        "__nova_internal_load_byte" => TypeRef::Named("u8".into()),
+                        "__nova_internal_text_length"
+                        | "__nova_internal_text_address"
+                        | "__nova_internal_heap_allocate"
+                        | "__nova_internal_byte_offset" => TypeRef::Named("u64".into()),
+                        "__nova_internal_borrow_text" => TypeRef::Named("str".into()),
+                        "__nova_internal_sqrt_f64"
+                        | "__nova_internal_abs_f64"
+                        | "__nova_internal_floor_f64"
+                        | "__nova_internal_ceil_f64" => TypeRef::Named("f64".into()),
+                        _ => return Err(format!("unknown compiler intrinsic '{name}'")),
+                    };
+                    return Ok((Expr::Call(name.clone(), args), result));
+                }
+                // One public print<T> surface. The source declaration lives in
+                // std::old::io; all type-specific decisions happen here, at compile
+                // time. The result is an ordinary Nova function call, never an
+                // indirect C formatter or a tagged runtime value.
+                let resolved_print = self.qualify(name,&scope.namespace);
+                if resolved_print == "std::old::io::print" || resolved_print == "std::old::io::eprint" {
+                    if original_args.len() != 1 {
+                        return Err("error[NOVA-FMT008]: print<T> requires exactly one argument".into());
+                    }
+                    let (_,ty) = self.expression(&original_args[0],scope,None)?;
+                    let value = original_args[0].clone();
+                    let descriptor = Expr::Call(if resolved_print.ends_with("::eprint") {
+                        "std::io::stderr_descriptor".into()
+                    } else {
+                        "std::old::io::stdout_descriptor".into()
+                    },vec![]);
+                    let (callee,arguments): (&str,Vec<Expr>) = match &ty {
+                        TypeRef::Named(kind) if kind == "str" => (
+                            "std::old::io::write_fd",vec![descriptor,value],
+                        ),
+                        TypeRef::Named(kind) if kind == "bool" => (
+                            "std::old::io::write_bool",vec![descriptor,value],
+                        ),
+                        TypeRef::Named(kind) if matches!(kind.as_str(),"i8"|"i16"|"i32"|"i64"|"isize") => (
+                            "std::old::io::write_integer",vec![descriptor,Expr::Cast(Box::new(value),TypeRef::Named("i64".into()))],
+                        ),
+                        TypeRef::Named(kind) if matches!(kind.as_str(),"u8"|"u16"|"u32"|"u64"|"usize") => (
+                            "std::old::io::write_unsigned",vec![descriptor,Expr::Cast(Box::new(value),TypeRef::Named("u64".into()))],
+                        ),
+                        TypeRef::Named(kind) if matches!(kind.as_str(),"f32"|"f64") => (
+                            "std::old::io::write_float",vec![descriptor,Expr::Cast(Box::new(value),TypeRef::Named("f64".into())),Expr::Int("-1".into())],
+                        ),
+                        TypeRef::Named(kind) if kind.ends_with("std__old__string__String") && !matches!(&value,Expr::Var(_)) => (
+                            "std::old::io::write_owned",vec![descriptor,value],
+                        ),
+                        TypeRef::Named(_) => {
+                            if matches!(&value,Expr::Var(_)) {
+                                let (_,view_ty) = self.expression(&Expr::MethodCall(
+                                    Box::new(value.clone()),"to_string".into(),vec![],vec![]),
+                                    scope,Some(&TypeRef::Named("str".into()))
+                                ).map_err(|err|format!("error[NOVA-FMT006]: {} must implement to_string() -> str; {err}",display_type(&ty)))?;
+                                if view_ty != TypeRef::Named("str".into()) {
+                                    return Err("error[NOVA-FMT006]: to_string must return str".into());
+                                }
+                                ("std::old::io::write_fd",vec![descriptor,Expr::MethodCall(Box::new(value),"to_string".into(),vec![],vec![])])
+                            } else {
+                                ("std::old::io::write_stringable",vec![descriptor,value])
+                            }
+                        }
+                        _ => return Err(format!("error[NOVA-FMT006]: {} cannot be printed with print<T>",display_type(&ty))),
+                    };
+                    return self.expression(&Expr::Call(callee.into(),arguments),scope,expected);
+                }
+                // Compiler-only formatting: each step returns an owned Nova
+                // String. No C builder, no generational handle and no runtime
+                // dispatch. Each input expression is evaluated once.
                 if name == crate::format_macros::BUILD {
-                    let mut handle =
-                        Expr::Call("std::string::native_string_create_empty".into(), vec![]);
+                    let mut string = Expr::Call("std::text::string::new_string".into(), vec![]);
                     for part in original_args {
                         let Expr::Call(marker, data) = part else {
                             return Err("error[NOVA-FMT005]: malformed format AST part".into());
@@ -2341,110 +3289,66 @@ impl Engine {
                             if data.len() != 1 || !matches!(&data[0], Expr::Str(_)) {
                                 return Err("error[NOVA-FMT005]: malformed format literal".into());
                             }
-                            handle = Expr::Call(
-                                "std::string::native_format_append_text".into(),
-                                vec![handle, data[0].clone()],
-                            );
+                            string = Expr::Call("std::text::string::format_add_text".into(),vec![string,data[0].clone()]);
                             continue;
                         }
                         if marker != crate::format_macros::VALUE_PART || data.len() != 3 {
                             return Err("error[NOVA-FMT005]: malformed format argument".into());
                         }
                         let Expr::Int(precision_text) = &data[1] else {
-                            return Err(
-                                "error[NOVA-FMT005]: format precision must be static".into()
-                            );
+                            return Err("error[NOVA-FMT005]: format precision must be static".into());
                         };
-                        let precision: i32 = precision_text
-                            .parse()
-                            .map_err(|_| "error[NOVA-FMT005]: invalid format precision")?;
+                        let precision: i32 = precision_text.parse().map_err(|_| "error[NOVA-FMT005]: invalid float precision")?;
                         let Expr::Bool(debug) = &data[2] else {
                             return Err("error[NOVA-FMT005]: debug mode must be static".into());
                         };
-                        let (_, ty) = self.expression(&data[0], scope, None)?;
+                        let (_,ty) = self.expression(&data[0],scope,None)?;
                         let TypeRef::Named(kind) = &ty else {
-                            return Err(format!(
-                                "error[NOVA-FMT006]: type {} is not formattable",
-                                display_type(&ty)
-                            ));
+                            return Err(format!("error[NOVA-FMT006]: {} is not formattable",display_type(&ty)));
                         };
                         if precision >= 0 && kind != "f32" && kind != "f64" {
-                            return Err(format!("error[NOVA-FMT004]: decimal precision applies only to floating values, not {}", display_type(&ty)));
+                            return Err(format!("error[NOVA-FMT004]: precision is only valid for floats, not {}",display_type(&ty)));
                         }
                         let value = data[0].clone();
-                        let (suffix, forwarded) = match kind.as_str() {
-                            "str" => (if *debug { "debug_str" } else { "text" }, vec![value]),
-                            "bool" => ("bool", vec![value]),
-                            "i8" | "i16" | "i32" | "i64" | "isize" => (
-                                "i64",
-                                vec![Expr::Cast(Box::new(value), TypeRef::Named("i64".into()))],
+                        let (function,mut forwarded): (&str,Vec<Expr>) = match kind.as_str() {
+                            "str" if *debug => ("std::text::string::format_add_text",vec![value]),
+                            "str" => ("std::text::string::format_add_text",vec![value]),
+                            "bool" => ("std::old::string::format_add_bool",vec![value]),
+                            "i8"|"i16"|"i32"|"i64"|"isize" => (
+                                "std::old::string::format_add_i64",
+                                vec![Expr::Cast(Box::new(value),TypeRef::Named("i64".into()))],
                             ),
-                            "u8" | "u16" | "u32" | "u64" | "usize" => (
-                                "u64",
-                                vec![Expr::Cast(Box::new(value), TypeRef::Named("u64".into()))],
+                            "u8"|"u16"|"u32"|"u64"|"usize" => (
+                                "std::old::string::format_add_u64",
+                                vec![Expr::Cast(Box::new(value),TypeRef::Named("u64".into()))],
                             ),
-                            "f32" | "f64" => (
-                                "f64",
-                                vec![
-                                    Expr::Cast(Box::new(value), TypeRef::Named("f64".into())),
-                                    Expr::Int(precision.to_string()),
-                                ],
+                            "f32"|"f64" => (
+                                "std::old::string::format_add_float",
+                                vec![Expr::Cast(Box::new(value),TypeRef::Named("f64".into())),Expr::Int(precision.to_string())],
                             ),
                             _ => {
-                                let is_string = kind == "std__string__String";
-                                // A temporary owned String cannot be implicitly borrowed
-                                // by `.to_string()`. Consume the temporary in a named
-                                // STD parameter instead; its RAII drop runs *after* the
-                                // borrowed text has been appended to the destination.
-                                if is_string && !matches!(&value, Expr::Var(_)) {
-                                    let function = if *debug {
-                                        "std::string::format_append_owned_debug"
-                                    } else {
-                                        "std::string::format_append_owned_text"
-                                    };
-                                    handle = Expr::Call(function.into(), vec![handle, value]);
-                                    continue;
-                                }
-                                let method = if *debug && !is_string {
-                                    "to_debug_string"
+                                let is_string = kind.ends_with("std__text__string__String");
+                                if is_string && !matches!(&value,Expr::Var(_)) {
+                                    (if *debug {"std::old::string::format_add_owned_debug"} else {"std::old::string::format_add_owned"},vec![value])
                                 } else {
-                                    "to_string"
-                                };
-                                let (_, result) = self.expression(
-                                    &Expr::MethodCall(Box::new(value.clone()), method.into(), vec![]),
-                                    scope,
-                                    Some(&TypeRef::Named("str".into())),
-                                ).map_err(|error|format!("error[NOVA-FMT006]: type {} cannot be formatted; implement `{method}() -> str`\n  = {error}", display_type(&ty)))?;
-                                if result != TypeRef::Named("str".into()) {
-                                    return Err(format!(
-                                        "error[NOVA-FMT006]: `{method}()` must return str, got {}",
-                                        display_type(&result)
-                                    ));
+                                    let method = if *debug && !is_string {"to_debug_string"} else {"to_string"};
+                                    let (_,result) = self.expression(
+                                        &Expr::MethodCall(Box::new(value.clone()),method.into(),vec![],vec![]),
+                                        scope,Some(&TypeRef::Named("str".into()))
+                                    ).map_err(|error|format!("error[NOVA-FMT006]: implement `{method}() -> str` for {}; {error}",display_type(&ty)))?;
+                                    if result != TypeRef::Named("str".into()) {
+                                        return Err("error[NOVA-FMT006]: formatting method must return str".into());
+                                    }
+                                    ("std::text::string::format_add_text",
+                                        vec![Expr::MethodCall(Box::new(value),method.into(),vec![],vec![])])
                                 }
-                                (
-                                    if *debug && is_string {
-                                        "debug_str"
-                                    } else {
-                                        "text"
-                                    },
-                                    vec![Expr::MethodCall(Box::new(value), method.into(), vec![])],
-                                )
                             }
                         };
-                        let mut args = vec![handle];
-                        args.extend(forwarded);
-                        handle =
-                            Expr::Call(format!("std::string::native_format_append_{suffix}"), args);
+                        let mut args=vec![string];
+                        args.append(&mut forwarded);
+                        string=Expr::Call(function.into(),args);
                     }
-                    let owned = Expr::StructInit(
-                        "std::string::String".into(),
-                        vec![("handle".into(), handle)],
-                    );
-                    return self.expression(&owned, scope, expected).map_err(|error| {
-                        if error.contains("unknown function") || error.contains("unknown struct") {
-                            format!("error[NOVA-FMT007]: `format!` requires the built-in STD (declare std in Nova.toml)\n  = {error}")
-                        } else { error }
-                    });
+                    return self.expression(&string,scope,expected);
                 }
                 // Format output is expanded in the macro AST pass, but only
                 // the surface checker knows the concrete type of each value.
@@ -2452,121 +3356,50 @@ impl Engine {
                 // runtime dynamic type tags, or duplicated evaluations.
                 if name == crate::format_macros::WRITE_VALUE {
                     if original_args.len() != 4 {
-                        return Err("error[NOVA-FMT005]: malformed internal format write".into());
+                        return Err("error[NOVA-FMT005]: malformed format write".into());
                     }
                     let Expr::Int(precision_text) = &original_args[1] else {
-                        return Err(
-                            "error[NOVA-FMT005]: format precision must be a compile-time integer"
-                                .into(),
-                        );
+                        return Err("error[NOVA-FMT005]: precision must be static".into());
                     };
-                    let precision: i32 = precision_text
-                        .parse()
-                        .map_err(|_| "error[NOVA-FMT005]: invalid format precision")?;
+                    let precision: i32 = precision_text.parse().map_err(|_|"error[NOVA-FMT005]: invalid precision")?;
                     let Expr::Bool(debug) = &original_args[2] else {
-                        return Err("error[NOVA-FMT005]: debug mode must be static".into());
+                        return Err("error[NOVA-FMT005]: debug flag must be static".into());
                     };
                     let Expr::Bool(stderr) = &original_args[3] else {
                         return Err("error[NOVA-FMT005]: output stream must be static".into());
                     };
-                    let (_, ty) = self.expression(&original_args[0], scope, None)?;
-                    // Use the source AST when building the final call: a typed
-                    // AST returned above may contain already-monomorphized
-                    // names which are not valid inputs to a second lowering.
-                    // This rechecks types at compile time, but still emits
-                    // exactly one runtime evaluation of the argument.
-                    let value = original_args[0].clone();
-                    let TypeRef::Named(kind) = &ty else {
-                        return Err(format!("error[NOVA-FMT006]: type {} is not printable; use a type with `to_string() -> str`", display_type(&ty)));
+                    let value=original_args[0].clone();
+                    let (_,ty)=self.expression(&value,scope,None)?;
+                    let TypeRef::Named(kind)=&ty else {
+                        return Err(format!("error[NOVA-FMT006]: cannot format {}",display_type(&ty)));
                     };
-                    if precision >= 0 && kind != "f32" && kind != "f64" {
-                        return Err(format!("error[NOVA-FMT004]: decimal precision applies only to floating values, not {}", display_type(&ty)));
+                    if precision>=0 && kind!="f32" && kind!="f64" {
+                        return Err(format!("error[NOVA-FMT004]: precision applies only to floats, not {}",display_type(&ty)));
                     }
-                    let suffix = if *stderr { "eprint" } else { "print" };
-                    let (callee, forwarded) = match kind.as_str() {
-                        "str" => (
-                            format!(
-                                "std::io::native_{suffix}{}",
-                                if *debug { "_debug_str" } else { "" }
-                            ),
-                            vec![value],
-                        ),
-                        "bool" => (format!("std::io::native_{suffix}_bool"), vec![value]),
-                        "i8" | "i16" | "i32" | "i64" | "isize" => (
-                            format!("std::io::native_{suffix}_i64"),
-                            vec![Expr::Cast(Box::new(value), TypeRef::Named("i64".into()))],
-                        ),
-                        "u8" | "u16" | "u32" | "u64" | "usize" => (
-                            format!("std::io::native_{suffix}_u64"),
-                            vec![Expr::Cast(Box::new(value), TypeRef::Named("u64".into()))],
-                        ),
-                        "f32" | "f64" => (
-                            format!("std::io::native_{suffix}_f64"),
-                            vec![
-                                Expr::Cast(Box::new(value), TypeRef::Named("f64".into())),
-                                Expr::Int(precision.to_string()),
-                            ],
-                        ),
-                        _ => {
-                            // For records, respect the user's own method
-                            // contract; normal method resolution validates its
-                            // signature and the returned borrowed `str`.
-                            // The standard owned String exposes `to_string`
-                            // as a borrowed str. Debug quoting still uses
-                            // the native escaped-str printer, rather than
-                            // requiring a redundant String::to_debug_string.
-                            let is_owned_string = kind == "std__string__String";
-                            // Keep named String values borrowed (never move the
-                            // caller's owner). An rvalue String needs a named
-                            // receiver during conversion, so hand ownership to
-                            // a STD helper whose parameter owns the temporary.
-                            if is_owned_string && !matches!(&value, Expr::Var(_)) {
-                                let helper = match (*stderr, *debug) {
-                                    (false, false) => "std::io::print_owned_string",
-                                    (false, true) => "std::io::print_owned_string_debug",
-                                    (true, false) => "std::io::eprint_owned_string",
-                                    (true, true) => "std::io::eprint_owned_string_debug",
-                                };
-                                return self.expression(
-                                    &Expr::Call(helper.into(), vec![value]),
-                                    scope,
-                                    expected,
-                                );
-                            }
-                            let method = if *debug && !is_owned_string {
-                                "to_debug_string"
-                            } else {
-                                "to_string"
-                            };
-                            let (formatted, result) = self.expression(
-                                &Expr::MethodCall(Box::new(value), method.into(), vec![]),
-                                scope,
-                                Some(&TypeRef::Named("str".into())),
-                            ).map_err(|error|format!("error[NOVA-FMT006]: type {} cannot be formatted with `{{{}}}`; implement `{method}() -> str`\n  = {error}",display_type(&ty),if *debug{":?"}else{""}))?;
-                            if result != TypeRef::Named("str".into()) {
-                                return Err(format!(
-                                    "error[NOVA-FMT006]: `{method}()` must return str, got {}",
-                                    display_type(&result)
-                                ));
-                            }
-                            (
-                                format!(
-                                    "std::io::native_{suffix}{}",
-                                    if *debug && is_owned_string {
-                                        "_debug_str"
-                                    } else {
-                                        ""
-                                    }
-                                ),
-                                vec![formatted],
-                            )
+                    let output=if *stderr {"std::old::io::eprint"} else {"std::old::io::print"};
+                    if precision < 0 && (!*debug || (kind!="str" && !kind.ends_with("std__old__string__String"))) {
+                        if *debug && !matches!(kind.as_str(),"bool"|"i8"|"i16"|"i32"|"i64"|"isize"|"u8"|"u16"|"u32"|"u64"|"usize"|"f32"|"f64") {
+                            return self.expression(&Expr::Call(output.into(),vec![Expr::MethodCall(Box::new(value),"to_debug_string".into(),vec![],vec![])]),scope,expected);
                         }
-                    };
-                    return self.expression(&Expr::Call(callee,forwarded),scope,expected).map_err(|error| {
-                        if error.contains("unknown function") {
-                            format!("error[NOVA-FMT007]: print macros require the built-in STD (add `std = {{ builtin = \"std\" }}` to Nova.toml)\n  = {error}")
-                        } else {error}
-                    });
+                        return self.expression(&Expr::Call(output.into(),vec![value]),scope,expected);
+                    }
+                    let descriptor=Expr::Call(if *stderr {"std::io::stderr_descriptor".into()} else {"std::old::io::stdout_descriptor".into()},vec![]);
+                    if precision>=0 {
+                        return self.expression(&Expr::Call("std::old::io::write_float".into(),vec![
+                            descriptor,Expr::Cast(Box::new(value),TypeRef::Named("f64".into())),Expr::Int(precision.to_string()),
+                        ]),scope,expected);
+                    }
+                    if kind=="str" {
+                        return self.expression(&Expr::Call("std::old::io::write_debug".into(),vec![descriptor,value]),scope,expected);
+                    }
+                    if kind.ends_with("std__old__string__String") {
+                        if !matches!(&value,Expr::Var(_)) {
+                            return self.expression(&Expr::Call("std::old::io::write_owned_debug".into(),vec![descriptor,value]),scope,expected);
+                        }
+                        return self.expression(&Expr::Call("std::old::io::write_debug".into(),vec![descriptor,
+                            Expr::MethodCall(Box::new(value),"as_str".into(),vec![],vec![])]),scope,expected);
+                    }
+                    return self.expression(&Expr::Call(output.into(),vec![value]),scope,expected);
                 }
                 let args = self.expand_call_args(original_args, scope)?;
                 // Coroutine keywords are lowered to legacy runtime calls before
@@ -2576,27 +3409,27 @@ impl Engine {
                 // `next generator -> T` without changing the stage-0 runtime.
                 if args.len() == 1 {
                     let method = match name.as_str() {
-                        "std::task::native_await_value" => {
-                            Some(("std__task__Task__", "std__task__Future__", "await_result"))
+                        "std::abi::native::task::native_await_value" => {
+                            Some(("std__old__task__Task__", "std__old__task__Future__", "await_result"))
                         }
-                        "std::task::native_block_on" => {
-                            Some(("std__task__Task__", "std__task__Future__", "wait"))
+                        "std::abi::native::task::native_block_on" => {
+                            Some(("std__old__task__Task__", "std__old__task__Future__", "wait"))
                         }
-                        "std::task::native_spawn" => {
-                            Some(("std__task__Task__", "std__task__Future__", "schedule"))
+                        "std::abi::native::task::native_spawn" => {
+                            Some(("std__old__task__Task__", "std__old__task__Future__", "schedule"))
                         }
-                        "std::generator::native_next" => Some((
-                            "std__generator__Generator__",
-                            "std__generator__Generator__",
+                        "std::abi::native::generator::native_next" => Some((
+                            "std__old__generator__Generator__",
+                            "std__old__generator__Generator__",
                             "next",
                         )),
-                        "std::generator::native_done" => Some((
-                            "std__generator__Generator__",
-                            "std__generator__Generator__",
+                        "std::abi::native::generator::native_done" => Some((
+                            "std__old__generator__Generator__",
+                            "std__old__generator__Generator__",
                             "finished",
                         )),
-                        "std::coro::native_drop" => {
-                            Some(("std__task__Task__", "std__task__Future__", "drop"))
+                        "std::abi::native::coro::native_drop" => {
+                            Some(("std__old__task__Task__", "std__old__task__Future__", "drop"))
                         }
                         _ => None,
                     };
@@ -2609,6 +3442,7 @@ impl Engine {
                                     Box::new(args[0].clone()),
                                     method_name.into(),
                                     vec![],
+                                    vec![],
                                 ),
                                 scope,
                                 expected,
@@ -2617,19 +3451,19 @@ impl Engine {
                     }
                     if matches!(
                         name.as_str(),
-                        "std::generator::native_done" | "std::coro::native_drop"
+                        "std::abi::native::generator::native_done" | "std::abi::native::coro::native_drop"
                     ) {
                         let (_, type_ref) = self.expression(&args[0], scope, None)?;
                         if let TypeRef::Named(owner) = type_ref {
                             let dispatch = match name.as_str() {
-                                "std::generator::native_done"
-                                    if owner.starts_with("std__coro__Coroutine__") =>
+                                "std::abi::native::generator::native_done"
+                                    if owner.starts_with("std__old__coro__Coroutine__") =>
                                 {
                                     Some("completed")
                                 }
-                                "std::coro::native_drop"
-                                    if owner.starts_with("std__generator__Generator__")
-                                        || owner.starts_with("std__coro__Coroutine__") =>
+                                "std::abi::native::coro::native_drop"
+                                    if owner.starts_with("std__old__generator__Generator__")
+                                        || owner.starts_with("std__old__coro__Coroutine__") =>
                                 {
                                     Some("drop")
                                 }
@@ -2641,6 +3475,7 @@ impl Engine {
                                         Box::new(args[0].clone()),
                                         method.into(),
                                         vec![],
+                                        vec![],
                                     ),
                                     scope,
                                     expected,
@@ -2649,15 +3484,16 @@ impl Engine {
                         }
                     }
                 }
-                if args.len() == 2 && name == "std::coro::native_resume" {
+                if args.len() == 2 && name == "std::abi::native::coro::native_resume" {
                     let (_, type_ref) = self.expression(&args[0], scope, None)?;
-                    if matches!(&type_ref,TypeRef::Named(owner) if owner.starts_with("std__coro__Coroutine__"))
+                    if matches!(&type_ref,TypeRef::Named(owner) if owner.starts_with("std__old__coro__Coroutine__"))
                     {
                         return self.expression(
                             &Expr::MethodCall(
                                 Box::new(args[0].clone()),
                                 "resume".into(),
                                 vec![args[1].clone()],
+                                vec![],
                             ),
                             scope,
                             expected,
@@ -2680,6 +3516,7 @@ impl Engine {
                                 Box::new(Expr::Var(name.clone())),
                                 "call".into(),
                                 args,
+                                vec![],
                             ),
                             scope,
                             expected,
@@ -2725,7 +3562,22 @@ impl Engine {
                 {
                     return self.variant(name, &args, scope, expected);
                 }
-                let q = self.qualify(name, &scope.namespace);
+                // Generic associated calls use the bound *type*, not the
+                // literal parameter name (e.g. T::from_json -> User::from_json).
+                let (q, owner_args) = match self.generic_static_call(name, scope, args.len())? {
+                    Some(bound) => bound,
+                    None => {
+                        let direct = self.qualify(name, &scope.namespace);
+                        if self.funcs.contains_key(&direct) || self.externs.contains_key(&direct) {
+                            (direct, Vec::new())
+                        } else {
+                            match self.blanket_constructor_call(name, args.len())? {
+                                Some(blanket) => blanket,
+                                None => (direct, Vec::new()),
+                            }
+                        }
+                    }
+                };
                 if self.externs.contains_key(&q) {
                     let sig = self.externs[&q].clone();
                     if (sig.c_variadic && args.len() < sig.params.len())
@@ -2808,11 +3660,10 @@ impl Engine {
                         ));
                     }
                 }
-                let template = self
-                    .funcs
-                    .get(&q)
-                    .ok_or_else(|| format!("unknown function '{name}'"))?
-                    .clone();
+                let selected = self
+                    .select_overload(&q, &args)
+                    .ok_or_else(|| format!("unknown function '{name}'"))?;
+                let template = self.funcs[&selected].clone();
                 let fixed = template.decl.params.len() - usize::from(template.decl.variadic);
                 if (!template.decl.variadic && args.len() != fixed) || args.len() < fixed {
                     return Err(format!(
@@ -2836,6 +3687,12 @@ impl Engine {
                     .cloned()
                     .collect::<Vec<_>>();
                 let mut map = HashMap::new();
+                // The concrete owner supplies `impl<U>` generics of a static
+                // associated function, while its own `fn method<V>` generics
+                // continue to be inferred from arguments or the result type.
+                for (generic, concrete) in template.impl_generics.iter().zip(owner_args) {
+                    map.insert(generic.clone(), concrete);
+                }
                 if let Some(want) = expected {
                     if generics
                         .iter()
@@ -2859,15 +3716,31 @@ impl Engine {
                     // e.g. `lexer::Scan` (source type) becomes `lexer__Scan`.
                     // Compare a non-generic parameter using its resolved type,
                     // not its source spelling, to preserve cross-module calls.
-                    let pattern = if generics.is_empty() {
-                        concrete_hint.as_ref().unwrap_or(&p.ty)
-                    } else {
+                    // A generic function can mix template parameters with ordinary
+                    // concrete parameters. Infer only from parameters still containing
+                    // an unbound template variable; compare all others against their
+                    // resolved (monomorphized) type, just as method calls do.
+                    // For example, add_nested<T>(writer: ObjectWriter, value: &T)
+                    // must compare writer against std__old__json__ObjectWriter rather
+                    // than the source spelling std::old::json::ObjectWriter.
+                    let pattern = if unresolved {
                         &p.ty
+                    } else {
+                        concrete_hint.as_ref().unwrap_or(&p.ty)
                     };
                     type_variables(&ty,pattern,&generics,&mut map).map_err(|error|format!(
                         "{error}\n  = argument {} (`{}`) of call `{name}`\n  = declared parameter: {}\n  = supplied argument: {}",
                         i + 1, p.name, display_type(pattern), display_type(&ty)
                     ))?;
+                    let val = if matches!(&ty, TypeRef::Reference { mutable: true, .. }) {
+                        let inferred = substitute(&p.ty, &map);
+                        if !generics.iter().any(|g| contains_type_var(&inferred, g)) {
+                            let desired = self.resolved_type(&inferred, &template.namespace, &map)?;
+                            if implicit_shared_reborrow(&ty, &desired) {
+                                Expr::Cast(Box::new(val), desired)
+                            } else { val }
+                        } else { val }
+                    } else { val };
                     actual.push(val);
                 }
                 let concrete = generics
@@ -2892,7 +3765,7 @@ impl Engine {
                     });
                 }
                 let (fun, result) = self.instantiate_function(
-                    &q,
+                    &selected,
                     &concrete,
                     if template.decl.variadic {
                         Some(args.len() - fixed)
@@ -2903,15 +3776,68 @@ impl Engine {
                 if let Some(want) = expected {
                     if &result != want && !implicit_numeric_widen(&result, want) {
                         return Err(format!(
-                            "call '{name}' produces {result:?}, expected {want:?}"
+                            "call '{name}' produces {}, expected {}",
+                            display_type(&result),
+                            display_type(want)
                         ));
                     }
                 }
                 Ok((Expr::Call(fun, actual), result))
             }
             Expr::GenericCall(name, types, original_args) => {
+                if name == "size_of" || name == "align_of" {
+                    if types.len() != 1 || !original_args.is_empty() {
+                        return Err(format!(
+                            "{name}::<T>() expects one type and no arguments"
+                        ));
+                    }
+                    let concrete_type =
+                        self.resolved_type(&types[0], &scope.namespace, &scope.subst)?;
+                    let (size, alignment) = self.layout_of(&concrete_type, &mut Vec::new())?;
+                    let value = if name == "size_of" { size } else { alignment };
+                    return Ok((Expr::Int(value.to_string()), TypeRef::Named("u64".into())));
+                }
+                // Explicit monomorphization of a safe Nova callback, without
+                // invoking it: function_ref::<T>(some_generic_function).
+                if name == "function_ref" {
+                    let [Expr::Var(function)] = original_args.as_slice() else {
+                        return Err("function_ref::<T> expects one named Nova function".into());
+                    };
+                    let qualified = self.qualify(function, &scope.namespace);
+                    if self.externs.contains_key(&qualified) {
+                        return Err("extern C functions cannot be referenced as safe callbacks".into());
+                    }
+                    let template = self.funcs.get(&qualified)
+                        .ok_or_else(|| format!("unknown callback '{function}'"))?.clone();
+                    if template.decl.variadic {return Err("variadic functions cannot be callbacks".into());}
+                    if ast::function_is_unsafe(&template.decl.attributes,&qualified)? {
+                        return Err("unsafe functions cannot be referenced as safe callbacks".into());
+                    }
+                    let arguments = types.iter().map(|ty| self.resolved_type(ty,&scope.namespace,&scope.subst))
+                        .collect::<Result<Vec<_>,_>>()?;
+                    let generics = template.impl_generics.iter().chain(&template.decl.generics).cloned().collect::<Vec<_>>();
+                    if generics.len()!=arguments.len() {return Err("function_ref template argument count mismatch".into());}
+                    let substitutions = generics.into_iter().zip(arguments.iter().cloned()).collect::<HashMap<_,_>>();
+                    let parameters=template.decl.params.iter().map(|param|self.resolved_type(&param.ty,&template.namespace,&substitutions))
+                        .collect::<Result<Vec<_>,_>>()?;
+                    let (symbol,result)=self.instantiate_function(&qualified,&arguments,None)?;
+                    return Ok((Expr::FunctionRef(symbol),TypeRef::Function{params:parameters,result:Box::new(result)}));
+                }
                 let args = self.expand_call_args(original_args, scope)?;
-                let q = self.qualify(name, &scope.namespace);
+                let q = match self.generic_static_call(name, scope, args.len())? {
+                    Some((selected, _)) => selected,
+                    None => {
+                        let direct = self.qualify(name, &scope.namespace);
+                        if self.funcs.contains_key(&direct) || self.externs.contains_key(&direct) {
+                            direct
+                        } else {
+                            match self.blanket_constructor_call(name, args.len())? {
+                                Some((selected, _)) => selected,
+                                None => direct,
+                            }
+                        }
+                    }
+                };
                 // Compile-time reflection is a string literal containing an
                 // immutable JSON descriptor. No reflection tables are emitted
                 // into the executable and serialization reuses derive(Json).
@@ -2945,37 +3871,14 @@ impl Engine {
                         TypeRef::Named("str".into()),
                     ));
                 }
-                // Compiler intrinsic: an ABI-correct allocation size for native
-                // memory. The runtime is intentionally unaware of Nova types.
-                if q == "std::raw::size_of" || q == "std::raw::align_of" {
-                    if types.len() != 1 || !args.is_empty() {
-                        return Err(
-                            "std::raw::{size_of,align_of}::<T>() expects one type and no arguments"
-                                .into(),
-                        );
-                    }
-                    let concrete_type =
-                        self.resolved_type(&types[0], &scope.namespace, &scope.subst)?;
-                    let (size, alignment) = self.layout_of(&concrete_type, &mut Vec::new())?;
-                    let requested_value = if q == "std::raw::size_of" {
-                        size
-                    } else {
-                        alignment
-                    };
-                    return Ok((
-                        Expr::Int(requested_value.to_string()),
-                        TypeRef::Named("u64".into()),
-                    ));
-                }
                 let concrete = types
                     .iter()
                     .map(|t| self.resolved_type(t, &scope.namespace, &scope.subst))
                     .collect::<Result<Vec<_>, _>>()?;
-                let template = self
-                    .funcs
-                    .get(&q)
-                    .ok_or_else(|| format!("unknown generic function '{name}'"))?
-                    .clone();
+                let selected = self
+                    .select_overload(&q, &args)
+                    .ok_or_else(|| format!("unknown generic function '{name}'"))?;
+                let template = self.funcs[&selected].clone();
                 let generic = template
                     .impl_generics
                     .iter()
@@ -3027,7 +3930,7 @@ impl Engine {
                     });
                 }
                 let (f, ret) = self.instantiate_function(
-                    &q,
+                    &selected,
                     &concrete,
                     if template.decl.variadic {
                         Some(args.len() - fixed)
@@ -3062,13 +3965,18 @@ impl Engine {
                     .concrete_fields
                     .get(n)
                     .ok_or_else(|| format!("'{n}' has no fields"))?;
-                let info = defs
-                    .iter()
-                    .find(|f| f.name == *field)
-                    .ok_or_else(|| format!("'{n}' has no field '{field}'"))?;
-                Ok((Expr::Field(Box::new(base), field.clone()), info.ty.clone()))
+                if let Some(info)=defs.iter().find(|f|f.name==*field) {
+                    return Ok((Expr::Field(Box::new(base),field.clone()),info.ty.clone()));
+                }
+                // Properties lower to normal methods and are resolved with
+                // the same borrow checker, concepts and template inference.
+                // A field always takes precedence over a computed property.
+                let getter=Expr::MethodCall(value.clone(),format!("property_{field}"),
+                    vec![],vec![]);
+                self.expression(&getter,scope,expected).map_err(|_|format!(
+                    "'{n}' has neither a field nor a computed property '{field}'"))
             }
-            Expr::MethodCall(receiver, name, args) => {
+            Expr::MethodCall(receiver, name, args, explicit_types) => {
                 if matches!(receiver.as_ref(),Expr::Var(n) if n=="super") {
                     if !scope.vars.contains_key("self") {
                         return Err("super.method() requires an instance method".into());
@@ -3077,16 +3985,108 @@ impl Engine {
                         Box::new(Expr::Var("self".into())),
                         format!("__super__{name}"),
                         args.clone(),
+                        explicit_types.clone(),
                     );
                     return self.expression(&call, scope, expected);
                 }
                 let (base, ty) = self.expression(receiver, scope, None)?;
+                let dyn_trait = match &ty {
+                    TypeRef::Reference { inner, .. } | TypeRef::Pointer { inner, .. } => {
+                        match inner.as_ref() { TypeRef::Named(name) => dyn_trait_name(name), _ => None }
+                    }
+                    TypeRef::Named(name) => dyn_trait_name(name),
+                    _ => None,
+                };
+                if let Some(trait_name) = dyn_trait {
+                    let prefix = format!("__nova_dyn__{}__", ident(trait_name));
+                    let selected = self.funcs.keys().find(|candidate| {
+                        (candidate.starts_with(&prefix) || candidate.contains(&format!("::{prefix}")))
+                            && candidate.ends_with(&format!("__{name}"))
+                    }).cloned();
+                    if let Some(selected) = selected {
+                        let template = self.funcs[&selected].clone();
+                        let args = self.expand_call_args(args, scope)?;
+                        if args.len() + 1 != template.decl.params.len() {
+                            return Err(format!("dynamic method '{name}' received the wrong number of arguments"));
+                        }
+                        let mut actual = vec![base];
+                        for (arg, param) in args.iter().zip(template.decl.params.iter().skip(1)) {
+                            let hint = self.resolved_type(&param.ty, &template.namespace, &scope.subst)?;
+                            let (value, _) = self.expression(arg, scope, Some(&hint))?;
+                            actual.push(value);
+                        }
+                        let (function, result) = self.instantiate_function(&selected, &[], None)?;
+                        return Ok((Expr::Call(function, actual), result));
+                    }
+                }
+                // Generator/coroutine handles are represented as u64 during
+                // bootstrap. `dispose handle` is parsed as `.drop()`, but a
+                // scalar handle has no user destructor; route it to the
+                // compiler-owned coroutine ABI instead.
+                if name == "drop" && matches!(&ty, TypeRef::Named(kind) if kind == "u64") && args.is_empty() {
+                    return self.expression(
+                        &Expr::Call(
+                            "std::abi::native::coro::native_drop".into(),
+                            vec![base],
+                        ),
+                        scope,
+                        expected,
+                    );
+                }
+                // Coroutine/generator prefix operators are parsed as method
+                // calls so they can also remain ergonomic on typed owners.
+                // A raw bootstrap handle is still a u64, therefore dispatch
+                // the operation directly to the compiler-owned ABI instead
+                // of looking for a user method on u64.
+                if matches!(&ty, TypeRef::Named(kind) if kind == "u64") && args.is_empty() {
+                    let intrinsic = match name.as_str() {
+                        "next" => Some("std::abi::native::generator::native_next"),
+                        "finished" => Some("std::abi::native::generator::native_done"),
+                        "wait" => Some("std::abi::native::task::native_block_on"),
+                        "schedule" => Some("std::abi::native::task::native_spawn"),
+                        _ => None,
+                    };
+                    if let Some(intrinsic) = intrinsic {
+                        let call = Expr::Call(intrinsic.into(), vec![base]);
+                        // The runtime transports completed task values in one
+                        // machine word. Re-apply the async function's declared
+                        // scalar result at the user-facing wait site so
+                        // `let ok: bool = task.wait()` and integer aliases do
+                        // not leak the ABI's i64 representation.
+                        if let Some(want) = expected {
+                            if matches!(want, TypeRef::Named(name) if name == "bool") {
+                                return self.expression(
+                                    &Expr::Binary(
+                                        Box::new(call),
+                                        BinaryOp::Ne,
+                                        Box::new(Expr::Int("0".into())),
+                                    ),
+                                    scope,
+                                    expected,
+                                );
+                            }
+                            if !matches!(want, TypeRef::Named(name) if name == "i64") {
+                                return self.expression(
+                                    &Expr::Cast(Box::new(call), want.clone()),
+                                    scope,
+                                    expected,
+                                );
+                            }
+                        }
+                        return self.expression(&call, scope, expected);
+                    }
+                }
+                if !explicit_types.is_empty()
+                    && matches!(name.as_str(), "toJson" | "writeJson" | "len")
+                {
+                    return Err(format!("method '{name}' does not accept explicit generic arguments"));
+                }
                 if name == "toJson" || name == "writeJson" {
                     if !args.is_empty() {
                         return Err(format!("{name}() takes no arguments"));
                     }
                     let TypeRef::Named(concrete) = &ty else {
-                        return Err(format!("{name}() requires a struct value, not {ty:?}"));
+                        return Err(format!("{name}() requires a struct value, not {}", display_type(&ty)));
                     };
                     if !self.concrete_fields.contains_key(concrete) {
                         return Err(format!("{name}() requires a struct value"));
@@ -3136,17 +4136,56 @@ impl Engine {
                 let mut candidates = self
                     .funcs
                     .keys()
-                    .filter(|f| f.ends_with(&format!("::{name}")))
+                    .filter(|f| self.funcs[*f].decl.name == name.as_str())
                     .cloned()
                     .collect::<Vec<_>>();
                 candidates.sort();
-                let selected=candidates.into_iter().find(|f| {
-                    let target=f.rsplit_once("::").unwrap().0;
+                let receiver_is_addressable = addressable_receiver(&base);
+                let mut selected=candidates.into_iter().find(|f| {
+                    let target=self.overload_base(f).rsplit_once("::").unwrap().0;
+                    let function=&self.funcs[f].decl;
+                    let fixed=function.params.len()-usize::from(function.variadic);
+                    let arity_matches=(function.variadic && args.len()+1>=fixed)
+                        || (!function.variadic && args.len()+1==fixed);
                     let right_type=concrete_name==ident(target) || concrete_name.starts_with(&format!("{}__",ident(target)));
                     let wants_pointer=matches!(self.funcs[f].decl.params.first().map(|p|&p.ty),Some(TypeRef::Pointer{..}|TypeRef::Reference{..}));
                     let can_auto_borrow=!pointer_receiver && matches!(self.funcs[f].decl.params.first().map(|p|&p.ty),Some(TypeRef::Reference{..}));
-                    right_type && (pointer_receiver==wants_pointer || can_auto_borrow)
-                }).ok_or_else(||format!("method '{name}' is not defined for '{concrete_name}' with this receiver type"))?;
+                    let temporary_can_move = !receiver_is_addressable
+                        && !matches!(self.funcs[f].decl.params.first().map(|p|&p.ty),Some(TypeRef::Reference{..}|TypeRef::Pointer{..}));
+                    arity_matches && right_type && self.funcs[f].decl.params.first().is_some_and(|p|p.name=="self")
+                        && (receiver_is_addressable || temporary_can_move)
+                        && (pointer_receiver==wants_pointer || can_auto_borrow)
+                });
+                // Blanket impls are intentionally not materialized during the
+                // initial collection pass. If ordinary dispatch did not find
+                // a method, try an impl whose owner is one of its generic
+                // parameters and let instantiate_function perform the final
+                // concept check for the concrete receiver type.
+                let blanket_owner = if selected.is_none() {
+                    self.funcs.keys()
+                        .filter(|f| self.funcs[*f].decl.name == name.as_str())
+                        .filter_map(|f| {
+                            let (owner, _) = self.overload_base(f).rsplit_once("::")?;
+                            let definition = &self.funcs[f];
+                            let fixed=definition.decl.params.len()-usize::from(definition.decl.variadic);
+                            let arity_matches=(definition.decl.variadic && args.len()+1>=fixed)
+                                || (!definition.decl.variadic && args.len()+1==fixed);
+                            (arity_matches && definition.impl_generics.iter().any(|generic| generic == owner)
+                                && definition.decl.params.first().is_some_and(|p| p.name == "self")
+                                && (definition
+                                    .decl
+                                    .params
+                                    .first()
+                                    .is_some_and(|p| matches!(&p.ty, TypeRef::Named(ty) if ty == owner))))
+                                .then(|| f.clone())
+                        })
+                        .next()
+                } else {
+                    None
+                };
+                let is_blanket = selected.is_none() && blanket_owner.is_some();
+                selected = selected.or(blanket_owner);
+                let selected = selected.ok_or_else(||format!("method '{name}' is not defined for '{concrete_name}' with this receiver type"))?;
                 let template = self.funcs[&selected].clone();
                 // Local/field/index receivers borrow their original place.
                 // Computed temporaries still cannot be implicitly borrowed.
@@ -3168,6 +4207,12 @@ impl Engine {
                     } else {
                         base
                     }
+                } else if let (TypeRef::Reference { mutable: true, inner },
+                    Some(ast::Param { ty: TypeRef::Reference { mutable: false, .. }, .. })) =
+                    (&ty, template.decl.params.first())
+                {
+                    let shared = TypeRef::Reference { mutable: false, inner: inner.clone() };
+                    Expr::Cast(Box::new(base), shared)
                 } else {
                     base
                 };
@@ -3197,18 +4242,70 @@ impl Engine {
                     .cloned()
                     .collect::<Vec<_>>();
                 let mut map = HashMap::new();
-                let base_args = self
+                let base_args = if is_blanket {
+                    vec![TypeRef::Named(concrete_name.clone())]
+                } else {
+                    self
                     .instance_args
                     .get(&concrete_name)
                     .cloned()
-                    .unwrap_or_default();
+                    .unwrap_or_default()
+                };
                 if template.impl_generics.len() != base_args.len() {
                     return Err(format!(
                         "method '{name}' does not match receiver generic arity"
                     ));
                 }
-                for (param, arg) in template.impl_generics.iter().zip(base_args) {
+                for (param, arg) in template.impl_generics.iter().zip(base_args.iter().cloned()) {
                     map.insert(param.clone(), arg);
+                }
+                // The receiver binds the impl<T> parameters. `obj.method::<U>()`
+                // supplies only the method's own generics, not those of impl<T>.
+                if !explicit_types.is_empty() {
+                    if explicit_types.len() != template.decl.generics.len() {
+                        return Err(format!(
+                            "method '{name}' expects {} explicit generic arguments, got {}",
+                            template.decl.generics.len(), explicit_types.len()
+                        ));
+                    }
+                    for (param, ty) in template.decl.generics.iter().zip(explicit_types) {
+                        let concrete = self.resolved_type(ty, &scope.namespace, &scope.subst)?;
+                        map.insert(param.clone(), concrete);
+                    }
+                }
+                // SDLEF's typed component query is a language-level generic
+                // operation. `object.hasComponent::<C>()` is decided from
+                // the receiver's instantiated component type, so it cannot
+                // accidentally turn into a runtime string lookup or a plain
+                // active flag check.
+                if name == "hasComponent" || name == "HasComponent" {
+                    if template.decl.generics.len() != 1 || explicit_types.len() != 1 {
+                        return Err("hasComponent requires exactly one explicit component type, e.g. hasComponent::<Transform>()".into());
+                    }
+                    let component_type = base_args.first().ok_or_else(|| {
+                        "hasComponent requires a typed GameObject<T> receiver".to_string()
+                    })?;
+                    let requested_type = map.get(&template.decl.generics[0]).ok_or_else(|| {
+                        "hasComponent could not resolve its component type".to_string()
+                    })?;
+                    return Ok((Expr::Bool(component_type == requested_type), TypeRef::Named("bool".into())));
+                }
+                if name == "getComponent" || name == "GetComponent" {
+                    if template.decl.generics.len() != 1 || explicit_types.len() != 1 {
+                        return Err("getComponent requires exactly one explicit component type, e.g. getComponent::<Transform>()".into());
+                    }
+                    let component_type = base_args.first().ok_or_else(|| {
+                        "getComponent requires a typed GameObject<T> receiver".to_string()
+                    })?;
+                    let requested_type = map.get(&template.decl.generics[0]).ok_or_else(|| {
+                        "getComponent could not resolve its component type".to_string()
+                    })?;
+                    if component_type != requested_type {
+                        return Err(format!(
+                            "getComponent::<{}>() is not available on GameObject<{}>",
+                            display_type(requested_type), display_type(component_type)
+                        ));
+                    }
                 }
                 let mut actual = vec![base];
                 for (i, arg) in args.iter().enumerate() {
@@ -3236,6 +4333,15 @@ impl Engine {
                         "{error}\n  = argument {} (`{}`) of method `{name}`\n  = declared parameter: {}\n  = supplied argument: {}",
                         i + 1, p.name, display_type(pattern), display_type(&got)
                     ))?;
+                    let val = if matches!(&got, TypeRef::Reference { mutable: true, .. }) {
+                        let inferred = substitute(&p.ty, &map);
+                        if !generic.iter().any(|g| contains_type_var(&inferred, g)) {
+                            let desired = self.resolved_type(&inferred, &template.namespace, &map)?;
+                            if implicit_shared_reborrow(&got, &desired) {
+                                Expr::Cast(Box::new(val), desired)
+                            } else { val }
+                        } else { val }
+                    } else { val };
                     actual.push(val);
                 }
                 let concrete = generic
@@ -3353,48 +4459,179 @@ impl Engine {
         expected: Option<&TypeRef>,
     ) -> Result<(Expr, TypeRef), String> {
         let q = self.qualify(name, &scope.namespace);
-        let params = self
-            .structs
-            .get(&q)
-            .map(|d| d.decl.generics.clone())
-            .ok_or_else(|| format!("unknown struct '{name}'"))?;
-        let resolved = if args.is_empty() && !params.is_empty() {
-            if let Some(expected) = expected {
-                let want = self.resolved_type(expected, &scope.namespace, &scope.subst)?;
-                if let TypeRef::Named(n) = want {
-                    if self.concrete_fields.contains_key(&n) {
-                        return Err("generic struct initializer needs explicit <T>".into());
+        let definition=self.structs.get(&q).map(|entry|entry.decl.clone())
+            .ok_or_else(||format!("unknown struct '{name}'"))?;
+        let mut inferred=Vec::new();
+        if args.is_empty() && !definition.generics.is_empty() {
+            let mut substitutions=HashMap::new();
+            // If the surrounding expression provides a concrete instance,
+            // prefer its generic arguments over default literal inference.
+            if let Some(want) = expected {
+                match want {
+                    // `new Pair { ... }` can inherit its generic arguments
+                    // from `let pair: Pair<i64, str> = ...`.  Without this,
+                    // integer literals are inferred first (`i32`) and then
+                    // conflict with the declared `i64` key type.
+                    TypeRef::Applied(want_name, actuals)
+                        if self.qualify(want_name, &scope.namespace) == q
+                            && actuals.len() == definition.generics.len() =>
+                    {
+                        for (formal, actual) in definition.generics.iter().zip(actuals) {
+                            substitutions.insert(formal.clone(), actual.clone());
+                        }
                     }
+                    TypeRef::Named(want_name) => {
+                        if let Some(existing) = self.instance_args.get(want_name) {
+                            for (formal, actual) in definition.generics.iter().zip(existing) {
+                                substitutions.insert(formal.clone(), actual.clone());
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
-            return Err(format!(
-                "generic struct '{name}' requires explicit type arguments: new {name}<T> {{ ... }}"
-            ));
+            // Infer remaining type variables from named fields. Each field
+            // expression is checked once for its type; normal lowering later
+            // consumes it exactly once and preserves evaluation order.
+            for (field, expr) in fields {
+                let declared=definition.fields.iter().find(|f|f.name==*field)
+                    .ok_or_else(||format!("unknown field '{field}' in '{name}'"))?;
+                let (_,actual)=self.expression(expr,scope,None)?;
+                type_variables(&actual,&declared.ty,&definition.generics,&mut substitutions)
+                    .map_err(|error|format!("cannot infer field '{field}' of '{name}': {error}"))?;
+            }
+            for generic in &definition.generics {
+                inferred.push(substitutions.get(generic).cloned().ok_or_else(||
+                    format!("cannot infer '{generic}' for '{name}' from its fields; use <T>"))?);
+            }
+        }
+        let resolved=self.instantiate_type(&q,if args.is_empty() { &inferred } else {args})?;
+        let TypeRef::Named(ref concrete)=resolved else {unreachable!()};
+        if let Some(want)=expected {
+            let want=self.resolved_type(want,&scope.namespace,&scope.subst)?;
+            if want!=resolved {
+                return Err(format!("constructor for '{name}' produces {}, expected {}",
+                    display_type(&resolved),display_type(&want)));
+            }
+        }
+        let definitions = self
+            .concrete_fields
+            .get(concrete)
+            .cloned()
+            .ok_or_else(|| format!("internal type layout missing for '{concrete}'"))?;
+        // Class storage currently uses a flattened base-prefix layout, but
+        // construction must not leak that representation into derived class
+        // initializers.  `new Child { ... }` supplies only Child's fields;
+        // inherited fields belong to the base-construction step.  Defaults on
+        // inherited fields remain honored, while fields without defaults are
+        // represented by the zero value until explicit base-constructor
+        // lowering is available.
+        let own_fields = definition
+            .fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<HashSet<_>>();
+        let derived_class = definition.is_class && definition.parent.is_some();
+        let base_constructor = if derived_class {
+            let instance_args = self.instance_args.get(concrete).cloned().unwrap_or_default();
+            let bindings = definition
+                .generics
+                .iter()
+                .cloned()
+                .zip(instance_args)
+                .collect::<HashMap<_, _>>();
+            let parent = substitute(definition.parent.as_ref().unwrap(), &bindings);
+            let parent = self.resolved_type(&parent, &scope.namespace, &HashMap::new())?;
+            let TypeRef::Named(parent_name) = parent.clone() else {
+                return Err(format!("invalid base type for '{name}' initializer"));
+            };
+            let constructor = format!("{parent_name}::new");
+            let canonical_constructor = format!("{}::new", parent_name.replace("__", "::"));
+            let constructor_key = if self.funcs.contains_key(&constructor) {
+                constructor.clone()
+            } else {
+                canonical_constructor
+            };
+            let usable = self.funcs.get(&constructor_key).is_some_and(|function| {
+                function.decl.params.is_empty()
+                    && function.decl.attributes.iter().any(|attribute| {
+                        attribute.name == "static"
+                    })
+            });
+            usable.then_some((constructor_key, parent))
         } else {
-            self.instantiate_type(&q, args)?
+            None
         };
-        let TypeRef::Named(ref n) = resolved else {
-            unreachable!()
-        };
-        if let Some(want) = expected {
-            if want != &resolved {
+        let base_temp = "__nova_base_constructor";
+        let mut needs_base_constructor = false;
+        let mut initializer_scope = scope.clone();
+        if let Some((_, parent)) = &base_constructor {
+            initializer_scope
+                .vars
+                .insert(base_temp.into(), parent.clone());
+        }
+        let mut supplied=HashMap::<String,&Expr>::new();
+        for (field,expr) in fields {
+            if supplied.insert(field.clone(),expr).is_some() {
+                return Err(format!("duplicate field '{field}' in '{name}' initializer"));
+            }
+            if !definitions.iter().any(|f|f.name==*field) {
+                return Err(format!("unknown field '{field}' in '{name}' initializer"));
+            }
+            if derived_class
+                && !own_fields.contains(field.as_str())
+                && !scope.vars.contains_key(base_temp)
+            {
                 return Err(format!(
-                    "struct constructor for '{name}' produces {resolved:?}, expected {want:?}"
+                    "inherited field '{field}' cannot be initialized in '{name}'; initialize it in the base constructor"
                 ));
             }
         }
-        let definitions = self.concrete_fields[n].clone();
-        let mut actual = vec![];
-        for (field, e) in fields {
-            let ty = definitions
-                .iter()
-                .find(|f| f.name == *field)
-                .ok_or_else(|| format!("unknown field '{field}' in '{name}'"))?
-                .ty
-                .clone();
-            actual.push((field.clone(), self.expression(e, scope, Some(&ty))?.0));
+        let mut actual=Vec::with_capacity(definitions.len());
+        for field in definitions {
+            let init=if let Some(user)=supplied.get(&field.name) {
+                (**user).clone()
+            } else if derived_class
+                && !own_fields.contains(field.name.as_str())
+                && base_constructor.is_some()
+            {
+                needs_base_constructor = true;
+                Expr::Field(
+                    Box::new(Expr::Var(base_temp.into())),
+                    field.name.clone(),
+                )
+            } else if let Some(default)=field.default {
+                default
+            } else if derived_class && !own_fields.contains(field.name.as_str()) {
+                self.zero_expr(&field.ty)?
+            } else {
+                return Err(format!("missing field '{}' in '{name}' initializer",
+                    field.name));
+            };
+            actual.push((
+                field.name,
+                self.expression(&init, &initializer_scope, Some(&field.ty))?.0,
+            ));
         }
-        Ok((Expr::StructInit(n.clone(), actual), resolved))
+        let value = Expr::StructInit(concrete.clone(), actual);
+        if needs_base_constructor {
+            let (constructor, parent) = base_constructor.expect("base constructor checked above");
+            return self.expression(
+                &Expr::Block(vec![
+                    Stmt::Let {
+                        name: base_temp.into(),
+                        mutable: false,
+                        ty: Some(parent),
+                        init: Expr::Call(constructor, vec![]),
+                        defer: None,
+                    },
+                    Stmt::Tail(value),
+                ]),
+                scope,
+                expected,
+            );
+        }
+        Ok((value,resolved))
     }
     fn lookup_variant(
         &self,
@@ -3596,7 +4833,7 @@ mod readable_type_diagnostic_tests {
 
     #[test]
     fn reports_borrowed_mutex_mismatch_in_source_type_syntax() {
-        let mutex = TypeRef::Named("std__sync__MutexI64".to_owned());
+        let mutex = TypeRef::Named("std__old__sync__MutexI64".to_owned());
         let borrow = TypeRef::Reference {
             mutable: false,
             inner: Box::new(mutex.clone()),
@@ -3607,10 +4844,10 @@ mod readable_type_diagnostic_tests {
         };
         let mismatch = type_variables(&nested, &borrow, &[], &mut HashMap::new()).unwrap_err();
         assert!(
-            mismatch.contains("expected std::sync::MutexI64, found &std::sync::MutexI64"),
+            mismatch.contains("expected std::old::sync::MutexI64, found &std::old::sync::MutexI64"),
             "{mismatch}"
         );
-        assert_eq!(display_type(&nested), "&&std::sync::MutexI64");
+        assert_eq!(display_type(&nested), "&&std::old::sync::MutexI64");
         assert!(!mismatch.contains("Named("), "{mismatch}");
     }
 
@@ -3633,5 +4870,56 @@ mod readable_type_diagnostic_tests {
             display_type(&type_ref),
             "fn(&mut i64, [u8; 4]) -> *const str"
         );
+    }
+}
+
+#[cfg(test)]
+mod borrowed_field_receiver_regressions {
+    use super::*;
+
+    #[test]
+    fn dereferenced_borrowed_owner_fields_remain_addressable() {
+        let borrowed_field = Expr::Field(
+            Box::new(Expr::Deref(Box::new(Expr::Var("self".into())))),
+            "value".into(),
+        );
+        assert!(addressable_receiver(&borrowed_field));
+
+        // A computed owner is not an lvalue, including when used as a field
+        // receiver. This keeps the temporary-borrow prohibition unchanged.
+        let temporary = Expr::Call("make_value".into(), vec![]);
+        assert!(!addressable_receiver(&temporary));
+        assert!(!addressable_receiver(&Expr::Field(
+            Box::new(temporary),
+            "value".into(),
+        )));
+    }
+
+    #[test]
+    fn borrowed_method_can_call_method_on_own_field() {
+        let source = r#"
+            struct Text { amount: i64 }
+            impl Text {
+                fn value(self: &Text) -> i64 { return self.amount; }
+            }
+            struct Holder { text: Text }
+            impl Holder {
+                fn read(self: &Holder) -> i64 {
+                    return self.text.value();
+                }
+            }
+            fn main() -> i32 {
+                let holder = new Holder { text: new Text { amount: 7 } };
+                if holder.read() != 7 { return 1; }
+                return 0;
+            }
+        "#;
+        let parsed = crate::grammar::ProgramParser::new()
+            .parse(source)
+            .expect("borrowed field receiver example must parse");
+        let lowered = lower(&parsed)
+            .expect("field of a borrowed owner must be implicitly borrowable");
+        crate::hir::lower(&lowered)
+            .expect("borrowing a field must preserve ownership checks");
     }
 }

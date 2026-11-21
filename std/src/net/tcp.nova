@@ -1,0 +1,123 @@
+use std::abi::llvm;
+use std::core::address;
+use std::core::types::Size;
+use std::error::error::Error;
+use std::error::result::Result;
+use std::net::address::SocketAddress;
+use std::net::error::failure;
+use std::net::traits::SocketRead;
+use std::net::traits::SocketWrite;
+
+const AF_INET: i32 = 2;
+const SOCK_STREAM: i32 = 1;
+
+pub class TcpStream { descriptor: i32 }
+pub class TcpListener { descriptor: i32 }
+
+impl TcpStream {
+    static fn connect_descriptor(address: SocketAddress) -> Result<i32,Error> {
+        let descriptor = unsafe { llvm::net_socket(AF_INET, SOCK_STREAM, 0) };
+        if descriptor < 0 { return failure::<i32>(descriptor, "could not create TCP socket"); }
+        let status = unsafe { llvm::net_connect(descriptor, address.pointer(), address.length() as u32) };
+        if status < 0 {
+            unsafe { llvm::close_fd(descriptor); }
+            return failure::<i32>(status, "could not connect TCP socket");
+        }
+        return Ok(descriptor);
+    }
+    static fn connect(address: SocketAddress) -> Result<Self,Error> {
+        let descriptor = unsafe { llvm::net_socket(AF_INET, SOCK_STREAM, 0) };
+        if descriptor < 0 { return failure::<TcpStream>(descriptor, "could not create TCP socket"); }
+        let status = unsafe { llvm::net_connect(descriptor, address.pointer(), address.length() as u32) };
+        if status < 0 {
+            unsafe { llvm::close_fd(descriptor); }
+            return failure::<TcpStream>(status, "could not connect TCP socket");
+        }
+        return Ok(new TcpStream { descriptor: descriptor });
+    }
+    fn descriptor(self: &TcpStream) -> i32 { return self.descriptor; }
+    fn into_descriptor(self: TcpStream) -> i32 { return self.descriptor; }
+    static fn send_descriptor(descriptor: i32, value: str) -> Result<Size,Error> {
+        let sent = unsafe { llvm::net_send(descriptor, address(value) as (*const u8), std::core::text_size(value), 0) };
+        if sent < 0 { return failure::<Size>(sent as i32, "could not send TCP data"); }
+        return Ok(sent as Size);
+    }
+    fn send_text(self: &TcpStream, value: str) -> Result<Size,Error> {
+        let sent = unsafe { llvm::net_send(self.descriptor, address(value) as (*const u8), std::core::text_size(value), 0) };
+        if sent < 0 { return failure::<Size>(sent as i32, "could not send TCP data"); }
+        return Ok(sent as Size);
+    }
+    fn receive(self: &TcpStream, destination: *mut u8, capacity: Size) -> Result<Size,Error> {
+        let received = unsafe { llvm::net_recv(self.descriptor, destination, capacity, 0) };
+        if received < 0 { return failure::<Size>(received as i32, "could not receive TCP data"); }
+        return Ok(received as Size);
+    }
+    fn drop(self: TcpStream) -> () {
+        unsafe { llvm::close_fd(self.descriptor); }
+        return;
+    }
+}
+
+impl SocketRead for TcpStream {
+    fn receive(self: &TcpStream, destination: *mut u8, capacity: Size) -> Result<Size,Error> {
+        return self.receive(destination, capacity);
+    }
+}
+impl SocketWrite for TcpStream {
+    fn send(self: &TcpStream, value: str) -> Result<Size,Error> { return self.send_text(value); }
+}
+
+impl TcpListener {
+    static fn bind_descriptor(address: &SocketAddress) -> Result<i32,Error> {
+        let descriptor = unsafe { llvm::net_socket(AF_INET, SOCK_STREAM, 0) };
+        if descriptor < 0 { return failure::<i32>(descriptor, "could not create TCP listener"); }
+        let bound = unsafe { llvm::net_bind(descriptor, address.pointer(), address.length()) };
+        if bound < 0 {
+            unsafe { llvm::close_fd(descriptor); }
+            return failure::<i32>(bound, "could not bind TCP listener");
+        }
+        let listening = unsafe { llvm::net_listen(descriptor, 128) };
+        if listening < 0 {
+            unsafe { llvm::close_fd(descriptor); }
+            return failure::<i32>(listening, "could not listen on TCP socket");
+        }
+        return Ok(descriptor);
+    }
+    static fn bind(address: &SocketAddress) -> Result<Self,Error> {
+        let descriptor = unsafe { llvm::net_socket(AF_INET, SOCK_STREAM, 0) };
+        if descriptor < 0 { return failure::<TcpListener>(descriptor, "could not create TCP listener"); }
+        let reuse: i32 = 1;
+        let option = unsafe { llvm::net_set_option(descriptor, 1, 2, &reuse as (*const i32), 4) };
+        if option < 0 {
+            unsafe { llvm::close_fd(descriptor); }
+            return failure::<TcpListener>(option, "could not configure TCP listener");
+        }
+        let bound = unsafe { llvm::net_bind(descriptor, address.pointer(), address.length()) };
+        if bound < 0 {
+            unsafe { llvm::close_fd(descriptor); }
+            return failure::<TcpListener>(bound, "could not bind TCP listener");
+        }
+        let listening = unsafe { llvm::net_listen(descriptor, 128) };
+        if listening < 0 {
+            unsafe { llvm::close_fd(descriptor); }
+            return failure::<TcpListener>(listening, "could not listen on TCP socket");
+        }
+        return Ok(new TcpListener { descriptor: descriptor });
+    }
+    fn accept(self: &TcpListener) -> Result<TcpStream,Error> {
+        let descriptor = unsafe { llvm::net_accept(self.descriptor) };
+        if descriptor < 0 { return failure::<TcpStream>(descriptor, "could not accept TCP connection"); }
+        return Ok(new TcpStream { descriptor: descriptor });
+    }
+    fn descriptor(self: &TcpListener) -> i32 { return self.descriptor; }
+    fn into_descriptor(self: TcpListener) -> i32 { return self.descriptor; }
+    static fn accept_descriptor(descriptor: i32) -> Result<i32,Error> {
+        let accepted = unsafe { llvm::net_accept(descriptor) };
+        if accepted < 0 { return failure::<i32>(accepted, "could not accept TCP connection"); }
+        return Ok(accepted);
+    }
+    fn drop(self: TcpListener) -> () {
+        unsafe { llvm::close_fd(self.descriptor); }
+        return;
+    }
+}

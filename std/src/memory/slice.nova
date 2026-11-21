@@ -1,0 +1,24 @@
+use std::core::types::Size;
+use std::collections::traits::Collection;
+use std::memory::traits::MemoryBlock;
+
+pub class Slice<T> { pointer: *mut T, length: Size }
+
+impl<T> Slice<T> {
+    [[unsafe]] static fn from_raw(pointer: *mut T, length: Size) -> Self {
+        return new Slice<T> { pointer: pointer, length: length };
+    }
+    fn len(self: &Slice<T>) -> Size { return self.length; }
+    fn is_empty(self: &Slice<T>) -> bool { return self.length == 0; }
+    [[unsafe]] fn data_ptr(self: &Slice<T>) -> *mut T { return self.pointer; }
+}
+
+impl<T> Collection for Slice<T> {
+    fn len(self: &Slice<T>) -> Size { return self.length; }
+    fn is_empty(self: &Slice<T>) -> bool { return self.length == 0; }
+}
+
+impl<T> MemoryBlock for Slice<T> {
+    fn data_ptr(self: &Slice<T>) -> *mut u8 { return self.pointer as (*mut u8); }
+    fn capacity(self: &Slice<T>) -> Size { return self.length; }
+}

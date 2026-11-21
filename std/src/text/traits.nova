@@ -1,0 +1,16 @@
+use std::core::types::Size;
+
+// Public text contracts. Concrete storage remains an implementation detail.
+pub trait TextLike {
+    fn as_str(self: &Self) -> str;
+    fn len(self: &Self) -> Size;
+    fn is_empty(self: &Self) -> bool;
+}
+
+pub trait Appendable {
+    fn append(self: &mut Self, value: str) -> ();
+}
+
+pub concept Textual<T> = implements<T,TextLike>;
+pub concept AppendableText<T> = implements<T,Appendable>;
+

@@ -1,0 +1,11 @@
+pub const PI: f64 = 3.141592653589793;
+pub const E: f64 = 2.718281828459045;
+
+pub fn abs(value: i64) -> i64 { if value < 0 { return -value; } return value; }
+pub fn min(left: i64, right: i64) -> i64 { if left < right { return left; } return right; }
+pub fn max(left: i64, right: i64) -> i64 { if left > right { return left; } return right; }
+pub fn clamp(value: i64, lower: i64, upper: i64) -> i64 {
+    if value < lower { return lower; }
+    if value > upper { return upper; }
+    return value;
+}

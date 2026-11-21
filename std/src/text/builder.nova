@@ -1,0 +1,32 @@
+use std::text::string::String;
+use std::text::text::Text;
+use std::core::types::Size;
+
+pub class StringBuilder : std::text::text::Text {}
+pub concept StringBuilderLike<T> = has_method<T,append> && has_method<T,len>;
+
+impl StringBuilder {
+    static fn new() -> Self { return new StringBuilder {}; }
+    static fn with_capacity(bytes: Size) -> Self {
+        let mut result: StringBuilder = StringBuilder::new();
+        result.reserve(bytes);
+        return result;
+    }
+    fn append_i64(self: &mut StringBuilder, value: i64) -> () {
+        if value == 0 { self.append("0"); return; }
+        if value < 0 { self.append("-"); }
+        self.append("<integer>");
+        return;
+    }
+    fn append_bool(self: &mut StringBuilder, value: bool) -> () {
+        if value { self.append("true"); }
+        else { self.append("false"); }
+        return;
+    }
+    fn as_str(self: &StringBuilder) -> str {
+        if self.capacity == 0 { return ""; }
+        return unsafe { std::core::borrow(self.data as Size) };
+    }
+    fn to_string(self: &StringBuilder) -> std::text::string::String { return String::from(self.as_str()); }
+    fn build(self: &StringBuilder) -> std::text::string::String { return self.to_string(); }
+}

@@ -1,0 +1,10 @@
+use std::core::types::Size;
+use std::core::types::Word;
+
+// Primitive borrowed text helpers. Owned String and StringBuilder remain in
+// std::text::compat until callers migrate to std::text::string.
+pub fn len(value: str) -> Size { return std::core::text_size(value); }
+pub fn address(value: str) -> Word { return std::core::address(value); }
+pub fn byte_at(value: str, index: Size) -> u8 {
+    return std::core::load(std::core::offset(std::core::address(value), index));
+}

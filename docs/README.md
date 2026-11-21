@@ -1,32 +1,52 @@
-# Documentação da linguagem Nova
+# The Nova Language Guide
 
-Esta é a documentação de uso do **snapshot atual** do compilador Nova (`0.20.0-alpha.1` no `Cargo.toml`, com incrementos posteriores incorporados ao código). Ela foi preparada a partir do código Rust, da gramática LALRPOP, da biblioteca padrão e dos exemplos disponíveis no repositório.
+This guide teaches Nova through the executable packages in [`examples/features`](../examples/features). Those packages are checked by `cargo test`, so the snippets track the current compiler.
 
-## Comece aqui
+Nova is alpha software. Syntax and APIs may change.
 
-1. [Instalação](instalacao.md): dependências e compilação do compilador.
-2. [Primeiros passos](primeiros-passos.md): projeto, código inicial e execução.
-3. [Sintaxe](sintaxe.md): declarações, estruturas, funções e controle de fluxo.
-4. [Tipos, traits e concepts](tipos-concepts.md): tipagem, genéricos e restrições.
-5. [Ownership e RAII](ownership-raii.md): movimentos, empréstimos e liberação de recursos.
-6. [Macros e formatação](macros-formatacao.md): `macro_rules!`, `print!`, `println!` e `format!`.
-7. [Pacotes e módulos](pacotes-modulos.md): `Nova.toml`, `Nova.lock`, `mod`, `use` e `import`.
-8. [Biblioteca padrão](stdlib.md): principais namespaces e limites.
-9. [Async e concorrência](async-concorrencia.md): corrotinas, tarefas e sincronização.
-10. [CLI e ferramentas](cli-ferramentas.md): commands do compilador, linter, formatador, extensão.
-11. [Arquitetura](arquitetura.md): etapas do compilador e componentes do projeto.
-12. [Limitações conhecidas](limitacoes.md): diferenças entre suporte real e recursos futuros.
+## Learning path
 
-## Convenções
+1. [Installation and first project](01-getting-started.md)
+2. [Variables, functions, and control flow](02-fundamentals.md)
+3. [Arrays, structs, classes, and inheritance](03-types-and-classes.md)
+4. [Traits, generics, concepts, and polymorphism](04-traits-and-generics.md)
+5. [Option, Result, and failure handling](05-option-and-result.md)
+6. [Modules, imports, macros, and scope functions](06-modules-macros-scopes.md)
+7. [Generators, async, tasks, and spawn](07-async-and-coroutines.md)
+8. [I/O, formatting, networking, and backend](08-io-network-backend.md)
+9. [GUI and the Emacs-inspired editor](09-gui.md)
+10. [Unsafe code, pointers, and memory](10-unsafe-and-memory.md)
+11. [CLI and package reference](11-cli-and-packages.md)
+12. [Ownership, RAII, defer, and the standard library](12-ownership-and-stdlib.md)
+13. [Compiler architecture and current limitations](13-architecture-and-limitations.md)
 
-- Os blocos marcados `nova` são exemplos da linguagem; não são Rust.
-- Os comandos usam `./target/release/nova` para não depender da instalação global no PATH.
-- Exemplos de pacotes completos se encontram em `examples/packages/`.
-- Alguns recursos são protótipos: veja sempre [Limitações conhecidas](limitacoes.md).
-- O parser self-host em `selfhost/` é um experimento separado do compilador Rust principal.
+## How to use this guide
 
-## Documentação histórica
+Read a chapter, run its linked example, change one value, and run it again. Use `check` before `run` to separate compiler errors from runtime behavior:
 
-O diretório `docs/` também contém anotações de desenvolvimento como `CONCEPTS_018.md`, `OWNERSHIP_SUBSYSTEM_015.md`, `LANGUAGE_EXTENSIONS_019.md` e `STDLIB_020_NEXO_ABI.md`. Elas registram **o estado de determinados incrementos** e podem estar desatualizadas ou ser contraditas por mudanças posteriores. Use os guias sem sufixo de versão acima como referência inicial e o código-fonte como autoridade final.
+```bash
+cargo run -- check examples/features/basics
+cargo run -- run examples/features/basics
+echo $?
+```
 
-[Voltar ao README principal](../README.md)
+Small examples return `0` when the feature behaved as expected. Many successful examples intentionally print nothing.
+
+## Feature map
+
+| Feature | Executable example | Chapter |
+| --- | --- | --- |
+| Variables, functions, and control flow | [`basics`](../examples/features/basics), [`functions`](../examples/features/functions), [`control-flow`](../examples/features/control-flow) | [Fundamentals](02-fundamentals.md) |
+| Arrays, structs, and classes | [`arrays`](../examples/features/arrays), [`structs`](../examples/features/structs), [`classes`](../examples/features/classes) | [Types](03-types-and-classes.md) |
+| Traits and generics | [`traits`](../examples/features/traits), [`generics`](../examples/features/generics), [`trait-bounds`](../examples/features/trait-bounds) | [Traits](04-traits-and-generics.md) |
+| `impl Trait` and `dyn Trait` | [`impl-trait`](../examples/features/impl-trait), [`dyn-trait`](../examples/features/dyn-trait) | [Traits](04-traits-and-generics.md) |
+| Structural contracts | [`requires-contracts`](../examples/features/requires-contracts) | [Traits](04-traits-and-generics.md) |
+| Compile-time metaprogramming | [`metaprogramming`](../examples/features/metaprogramming) | [Traits](04-traits-and-generics.md) |
+| Compile-time effect contracts | [`effects`](../examples/features/effects) | [Traits](04-traits-and-generics.md) |
+| Option and Result | [`option-result`](../examples/features/option-result) | [Error handling](05-option-and-result.md) |
+| Modules, macros, and scope functions | [`modules`](../examples/features/modules), [`macros`](../examples/features/macros), [`scope-let`](../examples/features/scope-let), [`scope-also`](../examples/features/scope-also), [`scope-with`](../examples/features/scope-with) | [Modules](06-modules-macros-scopes.md) |
+| Generators, async, and tasks | [`yield`](../examples/features/yield), [`coroutines`](../examples/features/coroutines), [`async`](../examples/features/async), [`thread`](../examples/features/thread) | [Async](07-async-and-coroutines.md) |
+| I/O, networking, and backend | [`io-format`](../examples/features/io-format), [`net`](../examples/features/net), [`backend`](../examples/features/backend) | [I/O](08-io-network-backend.md) |
+| SDL2 GUI and editor | [`gui`](../examples/features/gui) | [GUI](09-gui.md) |
+| Raw pointers | [`unsafe-pointers`](../examples/features/unsafe-pointers) | [Unsafe](10-unsafe-and-memory.md) |
+| Scope cleanup | [`defer`](../examples/features/defer) | [Ownership](12-ownership-and-stdlib.md) |

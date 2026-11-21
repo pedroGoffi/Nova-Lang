@@ -1,0 +1,10 @@
+import std;
+
+// async returns a task; wait drives it to completion and reads its value.
+async fn compute(value: i64) -> i64 { return value + 1; }
+
+fn main() -> i32 {
+    let task = compute(41);
+    let result: i64 = task.wait();
+    return result as i32 - 42;
+}

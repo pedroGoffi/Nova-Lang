@@ -78,7 +78,16 @@ pub fn render(
 }
 
 fn expected_tokens(expected: &[String]) -> String {
-    let mut unique = expected.to_vec();
+    let mut unique = expected
+        .iter()
+        .map(|token| {
+            token
+                .trim_matches('"')
+                .replace("expr", "expression")
+                .replace("ident", "identifier")
+                .replace("literal", "literal value")
+        })
+        .collect::<Vec<_>>();
     unique.sort();
     unique.dedup();
     let shown = unique
@@ -92,6 +101,43 @@ fn expected_tokens(expected: &[String]) -> String {
     } else {
         shown
     }
+}
+
+fn readable_token<T: std::fmt::Debug>(token: &T) -> String {
+    let raw = format!("{token:?}");
+    let value = raw
+        .split_once(", ")
+        .map(|(_, value)| value.trim_end_matches(')'))
+        .unwrap_or(&raw);
+    let value = value.trim_matches('"');
+    if value.is_empty() {
+        "end of input".into()
+    } else {
+        format!("`{value}`")
+    }
+}
+
+/// Add ANSI styling only at the terminal boundary. Diagnostics remain plain
+/// text for tests, editors, redirected output, and machine-readable consumers.
+pub fn colorize_for_terminal(text: &str) -> String {
+    const RED: &str = "\x1b[31m";
+    const YELLOW: &str = "\x1b[33m";
+    const RESET: &str = "\x1b[0m";
+    text.lines()
+        .map(|line| {
+            if line.starts_with("error[") {
+                format!("{RED}{line}{RESET}")
+            } else if line.contains('^') {
+                format!("{RED}{line}{RESET}")
+            } else if line.trim_start().starts_with("= help:") {
+                format!("{YELLOW}{line}{RESET}")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + if text.ends_with('\n') { "\n" } else { "" }
 }
 
 /// Keep the original code of an already classified error (e.g. NOVA-C001).
@@ -183,7 +229,14 @@ fn sync_context(source: &crate::modules::SourceFile, declaration: usize) -> Vec<
 /// API supports a feature which has not reached typed MIR yet.
 fn suggestions(detail: &str) -> Vec<String> {
     let mut tips = Vec::new();
-    if detail.contains("requires a named receiver for implicit borrow") {
+    if detail.contains("cannot infer the type for `new(...)`") {
+        tips.push("declare the destination type so Nova can select the static `new` constructor: `let item: Item = new(arguments);`".into());
+        tips.push(
+            "use `new Type(arguments)` when there is no expected type at the call site".into(),
+        );
+    } else if detail.contains("`new(...)` needs a concrete named target type") {
+        tips.push("use a concrete struct/class type in the destination annotation; generic or anonymous targets cannot be inferred here".into());
+    } else if detail.contains("requires a named receiver for implicit borrow") {
         tips.push("the method borrows its receiver, but this call uses a field or temporary instead of a named local".into());
         tips.push("the current compiler cannot safely auto-borrow a field projection; expose an operation on the owning type or implement place-borrow lowering in the compiler".into());
         tips.push("do not copy an owning field into a temporary just to silence this error: that can violate ownership".into());
@@ -223,7 +276,7 @@ fn suggestions(detail: &str) -> Vec<String> {
             tips.push("this STD bootstrap currently supports signed integral container elements; arbitrary owned objects need dedicated compiler/runtime support".into());
         }
     } else if detail.contains("expected") && detail.contains("found") {
-        if detail.contains("std::sync::acquire") || detail.contains("std::sync::acquire_pair") {
+        if detail.contains("std::old::sync::acquire") || detail.contains("std::old::sync::acquire_pair") {
             tips.push("`sync(mutex)` already borrows its named mutex for the guard; supplying a local whose type is `&MutexI64` results in a nested reference (`&&MutexI64`)".into());
             tips.push("in this compiler version, use `sync` on a named owning mutex local; borrowed mutex parameters in `sync` are not supported yet. Do not remove borrowing checks or insert an unsafe cast".into());
         } else if detail.contains("found &")
@@ -238,7 +291,7 @@ fn suggestions(detail: &str) -> Vec<String> {
     }
     if detail.contains("NOVA-M015") || detail.contains("standard-library runtime layer is private")
     {
-        tips.push("applications must use the public `std::map`, `std::vec`, and other safe wrappers; do not call `std::internal` directly".into());
+        tips.push("applications must use the public `std::old::map`, `std::old::vec`, and other safe wrappers; do not call `std::internal` directly".into());
         tips.push("if this originates in `<builtin:std/...>`, check whether a transitive STD import was resolved against the wrong instance".into());
     }
     if detail.contains("only std = { builtin = \"std\" } is supported") {
@@ -296,8 +349,8 @@ pub fn parser<T: std::fmt::Debug, E: std::fmt::Debug>(
     let (at,len,message)=match error {
         ParseError::InvalidToken{location}=>(location.saturating_sub(1),1,"invalid token".to_string()),
         ParseError::UnrecognizedEof{location,expected}=>(location,1,format!("unexpected end of file; expected {}",expected_tokens(&expected))),
-        ParseError::UnrecognizedToken{token:(start,token,end),expected}=>(start,end.saturating_sub(start),format!("unexpected token {token:?}; expected {}",expected_tokens(&expected))),
-        ParseError::ExtraToken{token:(start,token,end)}=>(start,end.saturating_sub(start),format!("unexpected extra token {token:?}")),
+        ParseError::UnrecognizedToken{token:(start,token,end),expected}=>(start,end.saturating_sub(start),format!("unexpected token {}; expected {}",readable_token(&token),expected_tokens(&expected))),
+        ParseError::ExtraToken{token:(start,token,end)}=>(start,end.saturating_sub(start),format!("unexpected extra token {}",readable_token(&token))),
         ParseError::User{error}=>return format!("error[NOVA-P001]: lexer error: {error:?}\n  --> {path}\n  = note: the lexer did not provide a location"),
     };
     let mut out = render("NOVA-P001", path, source, at, len, &message);
@@ -574,8 +627,8 @@ pub fn semantic_with_context(
                     source.path, line, excerpt
                 ));
                 out.push_str("  = note: this is the enclosing declaration, not the precise failing expression\n");
-                if detail.contains("std::sync::acquire")
-                    || detail.contains("std::sync::acquire_pair")
+                if detail.contains("std::old::sync::acquire")
+                    || detail.contains("std::old::sync::acquire_pair")
                 {
                     let candidates = sync_context(source, at);
                     if !candidates.is_empty() {
@@ -691,8 +744,8 @@ mod rich_diagnostics_tests {
     #[test]
     fn borrowed_mutex_error_has_readable_types_and_actionable_sync_context() {
         let source=source("/project/src/main.nova",
-            "fn reverse(a: &std::sync::MutexI64, b: &std::sync::MutexI64) -> () {\n    sync(b) as g {\n        sync(a) as h { }\n    }\n}\n");
-        let error="expected std::sync::MutexI64, found &std::sync::MutexI64\n  = argument 1 (`mutex`) of call `std::sync::acquire`\n  = declared parameter: &std::sync::MutexI64\n  = supplied argument: &&std::sync::MutexI64\n  = nova-trace: specializing function 'reverse'";
+            "fn reverse(a: &std::old::sync::MutexI64, b: &std::old::sync::MutexI64) -> () {\n    sync(b) as g {\n        sync(a) as h { }\n    }\n}\n");
+        let error="expected std::old::sync::MutexI64, found &std::old::sync::MutexI64\n  = argument 1 (`mutex`) of call `std::old::sync::acquire`\n  = declared parameter: &std::old::sync::MutexI64\n  = supplied argument: &&std::old::sync::MutexI64\n  = nova-trace: specializing function 'reverse'";
         let diagnostic = semantic_with_context(
             error,
             &[source],
@@ -701,7 +754,7 @@ mod rich_diagnostics_tests {
         );
         assert!(
             diagnostic.contains(
-                "error[NOVA-T002]: expected std::sync::MutexI64, found &std::sync::MutexI64"
+                "error[NOVA-T002]: expected std::old::sync::MutexI64, found &std::old::sync::MutexI64"
             ),
             "{diagnostic}"
         );
@@ -828,9 +881,9 @@ mod rich_diagnostics_tests {
     }
     #[test]
     fn field_borrow_limitation_has_actionable_explanation_and_real_std_context() {
-        let s=SourceFile{path:"<builtin:std/src/symbol.nova>".into(),namespace:"std::symbol".into(),
+        let s=SourceFile{path:"<builtin:std/src/symbol.nova>".into(),namespace:"std::old::symbol".into(),
             text:"impl SymbolTable {\n fn define(self: &SymbolTable, key: str, id: i64) -> bool {\n  return self.entries.insert(key,id);\n }\n}".into()};
-        let err="method 'insert' requires a named receiver for implicit borrow\n  = nova-trace: specializing function 'std::symbol::SymbolTable::define'";
+        let err="method 'insert' requires a named receiver for implicit borrow\n  = nova-trace: specializing function 'std::old::symbol::SymbolTable::define'";
         let out = semantic_with_context(err, &[s], std::path::Path::new("/tmp/demo"), "surface");
         assert!(
             out.contains("cannot safely auto-borrow a field projection"),
@@ -862,7 +915,7 @@ mod rich_diagnostics_tests {
     fn builtin_privacy_diagnostic_has_safe_api_hint() {
         let raw="error[NOVA-M015]: the standard-library runtime layer is private\n  --> <builtin:std/src/map.nova>:54:17\n";
         let out = attach_package(raw, std::path::Path::new("/tmp/demo"), "module loading");
-        assert!(out.contains("public `std::map`"), "{out}");
+        assert!(out.contains("public `std::old::map`"), "{out}");
         assert!(out.contains("transitive STD import"), "{out}");
     }
     #[test]

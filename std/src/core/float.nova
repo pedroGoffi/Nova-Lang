@@ -1,0 +1,18 @@
+// Methods shared by floating-point values.
+impl f64 {
+    fn abs(self: f64) -> f64 {
+        if self < 0.0 { return -self; }
+        return self;
+    }
+    fn min(self: f64, other: f64) -> f64 {
+        if self < other { return self; }
+        return other;
+    }
+    fn max(self: f64, other: f64) -> f64 {
+        if self > other { return self; }
+        return other;
+    }
+    fn is_positive(self: f64) -> bool { return self > 0.0; }
+    fn is_negative(self: f64) -> bool { return self < 0.0; }
+    fn is_zero(self: f64) -> bool { return self == 0.0; }
+}

@@ -1,6 +1,6 @@
 grammar;
 
-use crate::ast::{Program, Item, Function, ExternFunction, Struct, Enum, Variant, Impl, Attribute, Field, Param, Stmt, MatchArm, Pattern, Expr, UnaryOp, BinaryOp, TypeRef, FunctionMode, MacroDef, TypeAlias, Trait, TraitRestriction, TraitMethod, Concept, ConceptExpr, Requirement, ConceptBound, MacroParam, MacroFragment, MacroBody, MacroArm, MacroRepetition, MacroConcept};
+use crate::ast::{Program, Item, Function, ExternFunction, Struct, Enum, Variant, Impl, Attribute, Field, Param, Stmt, MatchArm, Pattern, Expr, UnaryOp, BinaryOp, TypeRef, FunctionMode, MacroDef, TypeAlias, CompileTimeConst, Trait, TraitRestriction, TraitMethod, Concept, ConceptExpr, Requirement, ConceptBound, MacroParam, MacroFragment, MacroBody, MacroArm, MacroRepetition, MacroConcept};
 
 pub Program: Program = { <items:Item*> => Program { items } };
 Item: Item = {
@@ -30,28 +30,56 @@ UnpublishedItem: Item = {
     },
     <attributes:Attribute*> <e:EnumDef> => Item::Enum(Enum { attributes, ..e }),
     // Rust-style declarative rules: first matching AST fragment arm wins.
-    "macro_rules" "!" <name:Ident> "{" <arms:MacroArmRule*> "}"
+    "macro_rules" "!" <name:MemberIdent> "{" <arms:MacroArmRule*> "}"
         => Item::Macro(MacroDef { name, arms }),
     "macro" <name:Ident> "(" <params:Comma<MacroParamDef>> ")" "=>" <body:Expr> ";"
         => Item::Macro(MacroDef { name, arms: vec![MacroArm {params,body:MacroBody::Expression(body)}] }),
     "macro" <name:Ident> "(" <params:Comma<MacroParamDef>> ")" "=>" <body:Block>
         => Item::Macro(MacroDef { name, arms: vec![MacroArm {params,body:MacroBody::Statements(body)}] }),
+    // These are module-level values, not mutable static storage. They are
+    // evaluated at compile time and substituted before HIR/LLVM lowering.
+    "comptime" "const" <name:Ident> ":" <ty:Type> "=" <value:Expr> ";"
+        => Item::CompileTimeConst(CompileTimeConst { name, ty, value }),
+    "const" <name:Ident> ":" <ty:Type> "=" <value:Expr> ";"
+        => Item::CompileTimeConst(CompileTimeConst { name, ty, value }),
     "typedef" <name:Ident> "=" <target:Type> ";" => Item::TypeAlias(TypeAlias { name, target }),
     "static_assert" "(" <predicate:ConceptOr> ")" ";" => Item::ConceptAssert(predicate),
-    "concept" <name:Ident> "<" <generics:Comma<Ident>> ">" "=" <predicate:ConceptOr> ";"
+    "concept" <name:Ident> "<" <generics:NonEmptyComma<Ident>> ">" "=" <predicate:ConceptOr> ";"
+        => Item::Concept(Concept {name,generics,predicate}),
+    // The lexer combines adjacent `>` and `=` into `>=`. Within a concept
+    // declaration it means a generic closer followed by the definition `=`.
+    "concept" <name:Ident> "<" <generics:NonEmptyComma<Ident>> ">=" <predicate:ConceptOr> ";"
         => Item::Concept(Concept {name,generics,predicate}),
     <attributes:Attribute*> <t:TraitDef>
         => Item::Trait(Trait {attributes,..t}),
     <f:Function> => Item::Function(f),
     <f:ExternFunction> => Item::Extern(f),
     "namespace" <name:MemberIdent> "{" <items:Item*> "}" => Item::Namespace {name,items},
-    "impl" <generics:Generics> <target:Type> "{" <associated_types:AssociatedTypeBinding*> <methods:Method*> "}"
-        => Item::Impl(Impl { generics, trait_name:None, target, associated_types, methods }),
-    "impl" <generics:Generics> <trait_name:Path> "for" <target:Type> "{" <associated_types:AssociatedTypeBinding*> <methods:Method*> "}"
-        => Item::Impl(Impl { generics, trait_name:Some(trait_name), target, associated_types, methods }),
+    "impl" <generic_info:GenericHeader?> <target:Type> <where_bounds:WhereConcepts> "{" <associated_types:AssociatedTypeBinding*> <methods:Method*> "}"
+        => {
+            let (generics,bounds)=generic_info.unwrap_or_default();
+            Item::Impl(Impl {generics,trait_name:None,target,associated_types,
+                methods:methods.into_iter().map(|mut m| {
+                    let mut constraints=bounds.clone();constraints.extend(where_bounds.clone());
+                    constraints.extend(m.concept_bounds);m.concept_bounds=constraints;m
+                }).collect()})
+        },
+    "impl" <generic_info:GenericHeader?> <trait_name:Path> "for" <target:Type> <where_bounds:WhereConcepts> "{" <associated_types:AssociatedTypeBinding*> <methods:Method*> "}"
+        => {
+            let (generics,bounds)=generic_info.unwrap_or_default();
+            Item::Impl(Impl {generics,trait_name:Some(trait_name),target,associated_types,
+                methods:methods.into_iter().map(|mut m| {
+                    let mut constraints=bounds.clone();constraints.extend(where_bounds.clone());
+                    constraints.extend(m.concept_bounds);m.concept_bounds=constraints;m
+                }).collect()})
+        },
     "import" <path:Path> ";" => Item::Import(path),
     "mod" <at:@L> <name:MemberIdent> ";" => Item::Mod {name,at},
-    "use" <at:@L> <path:Path> ";" => Item::Use {path,at},
+    // C++-style type alias using the existing `use` keyword. Plain imports
+    // keep their existing meaning: `use module::Name;`.
+    "use" <name:Ident> "=" <target:Type> ";"
+        => Item::TypeAlias(TypeAlias {name, target}),
+    "use" <at:@L> <path:UsePath> ";" => Item::Use {path,at},
 };
 
 // Traits carry their operator binding in source rather than in the Rust
@@ -87,7 +115,7 @@ MacroParamDef: MacroParam = {
 // Concept checks are emitted as ordinary generic function specializations,
 // so existing Nova concept/trait/requires validation applies to macro values.
 MacroConceptRule: MacroConcept = {
-    "where" <name:Path> "<" <additional_args:Comma<Type>> ">"
+    "where" <name:Path> "<" <additional_args:NonEmptyComma<Type>> ">"
         => MacroConcept {name, additional_args},
     "where" <name:Path>
         => MacroConcept {name, additional_args:vec![]},
@@ -104,7 +132,7 @@ MacroSingleParam: MacroParam = {
     <name:Ident> => MacroParam {name,fragment:MacroFragment::Expr,concept:None,repetition:None},
 };
 TraitRestrictionRule: TraitRestriction = {
-    "<" <type_parameter:Ident> "in" <permitted_types:Comma<Type>> ">"
+    "<" <type_parameter:Ident> "in" <permitted_types:NonEmptyComma<Type>> ">"
         => TraitRestriction { type_parameter, permitted_types },
 };
 TraitParents: Vec<String> = {
@@ -114,9 +142,9 @@ TraitParents: Vec<String> = {
 AssociatedTypeDecl: String = {"type" <name:Ident> ";" => name};
 AssociatedTypeBinding: (String,TypeRef) = {"type" <name:Ident> "=" <ty:Type> ";" => (name,ty)};
 TraitMethodRule: TraitMethod = {
-    "fn" <name:MemberIdent> "(" <params:Comma<Param>> ")" "->" <result:Type> ";"
+    "fn" <name:FunctionName> "(" <params:Comma<Param>> ")" "->" <result:Type> ";"
         => TraitMethod {name, params, result, default_body: None},
-    "fn" <name:MemberIdent> "(" <params:Comma<Param>> ")" "->" <result:Type> <body:Block>
+    "fn" <name:FunctionName> "(" <params:Comma<Param>> ")" "->" <result:Type> <body:Block>
         => TraitMethod {name, params, result, default_body: Some(body)},
 };
 AttributeName: String = {
@@ -138,6 +166,7 @@ AttributeName: String = {
 // they cannot be parsed through Path/Ident. Accept them contextually here,
 // without broadening Ident and reintroducing LALRPOP ambiguities.
 MetaAttributeArgument: String = {
+    "async" => "async".into(),
     "struct" => "struct".into(),
     "enum" => "enum".into(),
     "trait" => "trait".into(),
@@ -157,7 +186,38 @@ MetaReservedArgument: String = {
     "sync" => "sync".into(),
     "scope" => "scope".into(),
 };
+AnnotationValue: String = {
+    <text:r#""([^"\\]|\\.)*""#> => text.to_string(),
+    <negative:"-"?> <digits:r"[0-9]+"> => format!("{}{}", if negative.is_some(){"-"}else{""}, digits),
+    "true" => "true".into(),
+    "false" => "false".into(),
+};
+AnnotationArgument: String = {
+    // `scope` starts a lexical statement in Nova and is not a general
+    // identifier. Annotation keys are a distinct syntactic context:
+    // @Service(scope = "singleton") must not turn `scope` into an Expr name.
+    "scope" "=" <value:AnnotationValue> => format!("scope={value}"),
+    <name:Ident> "=" <value:AnnotationValue> => format!("{name}={value}"),
+    AnnotationValue,
+    MetaAttributeArgument,
+};
+// A qualified annotation has one leading name and a non-empty, right-
+// recursive suffix. It is not a generic Path: the leading keyword set is
+// different, and a nested Path here can compete with the following field Type.
+AnnotationName: String = {
+    <name:AttributeName> => name,
+    <name:AttributeName> "::" <tail:AnnotationNameTail> => format!("{name}::{tail}"),
+};
+AnnotationNameTail: String = {
+    <name:MemberIdent> => name,
+    <name:MemberIdent> "::" <tail:AnnotationNameTail> => format!("{name}::{tail}"),
+};
 Attribute: Attribute = {
+    // Declarative `@Service`, `@Int(min = 10, max = 20)` annotations.
+    // One production for marker and parameterized annotations: this avoids
+    // multiplying item/method/field parser states for identical @ prefixes.
+    "@" <name:AnnotationName> <args:("(" <Comma<AnnotationArgument>> ")")?>
+        => Attribute {name,args:args.unwrap_or_default()},
     // Struct derives and legacy attributes.
     "#" "[" <name:AttributeName> "(" <args:Comma<MetaAttributeArgument>> ")" "]" => Attribute { name, args },
     // Marker attributes on functions (also accepted in Rust-style notation).
@@ -181,7 +241,7 @@ ConceptUnary: ConceptExpr = {
     "(" <inner:ConceptOr> ")" => inner,
     "true" => ConceptExpr::Literal(true),
     "false" => ConceptExpr::Literal(false),
-    <name:Path> "<" <args:Comma<ConceptArgument>> ">" => ConceptExpr::Apply{name,args},
+    <name:Path> "<" <args:NonEmptyComma<ConceptArgument>> ">" => ConceptExpr::Apply{name,args},
 };
 // Compile-time intrinsic arguments can denote contextual member names.
 // `next` is reserved as the generator operator in expressions, but must
@@ -189,16 +249,21 @@ ConceptUnary: ConceptExpr = {
 // identifier or permitting the keyword as a general type name.
 ConceptArgument: TypeRef = {
     "next" => TypeRef::Named("next".into()),
+    "new" => TypeRef::Named("new".into()),
+    "get" => TypeRef::Named("get".into()),
     Type,
 };
 RequireParam: (String,TypeRef) = {
     <ty:Type> <variable:Ident> => (variable,ty),
 };
 RequireRule: Requirement = {
+    "type" <owner:Ident> "::" <item:Ident> ";" => Requirement::AssociatedType {owner,item},
     "{" <variable:Ident> "." <field:MemberIdent> "}" "->" <result:Type> ";"
         => Requirement::Field {variable,field,result},
-    "{" <variable:Ident> "." <method:MemberIdent> "(" ")" "}" "->" <result:Type> ";"
-        => Requirement::Method {variable,method,result},
+    "{" <variable:Ident> "." <method:MemberIdent> "(" <arguments:Comma<Type>> ")" "}" "->" <result:Type> ";"
+        => Requirement::Method {variable,method,arguments,result},
+    "{" <owner:Ident> "::" <method:MemberIdent> "(" <arguments:Comma<Type>> ")" "}" "->" <result:Type> ";"
+        => Requirement::StaticMethod {owner,method,arguments,result},
     "{" <left:Ident> "+" <right:Ident> "}" "->" <result:Type> ";"
         => Requirement::Binary {left,operation:BinaryOp::Add,right,result},
     "{" <left:Ident> "-" <right:Ident> "}" "->" <result:Type> ";"
@@ -215,7 +280,7 @@ RequireRule: Requirement = {
         => Requirement::Binary {left,operation:BinaryOp::BitXor,right,result},
 };
 ConceptUse: ConceptBound = {
-    <name:Path> "<" <args:Comma<Type>> ">" => ConceptBound{name,args},
+    <name:Path> "<" <args:NonEmptyComma<Type>> ">" => ConceptBound{name,args},
 };
 WhereConcepts: Vec<ConceptBound> = {
     "where" <bounds:Comma<ConceptUse>> => bounds,
@@ -225,8 +290,11 @@ GenericBoundParam: (String,Option<String>) = {
     <parameter:Ident> ":" <constraint:Path> => (parameter,Some(constraint)),
     <parameter:Ident> => (parameter,None),
 };
-FunctionGenerics: (Vec<String>,Vec<ConceptBound>) = {
-    "<" <parameters:Comma<GenericBoundParam>> ">" => {
+// Keep the generic clause non-nullable. The old FunctionGenerics had an
+// empty alternative, which collided with its own '<' prefix after class,
+// enum and function names (LALRPOP 0.22.2 shift/reduce conflict).
+GenericHeader: (Vec<String>,Vec<ConceptBound>) = {
+    "<" <parameters:NonEmptyComma<GenericBoundParam>> ">" => {
         let mut names=Vec::new();let mut bounds=Vec::new();
         for (name,constraint) in parameters {
             if let Some(concept)=constraint {
@@ -236,10 +304,28 @@ FunctionGenerics: (Vec<String>,Vec<ConceptBound>) = {
         }
         (names,bounds)
     },
-    => (vec![],vec![]),
+};
+// Integrate the optional suffix with its name, instead of a nullable grammar
+// rule shared by declarations and impl. The '<' token now selects one
+// syntactically distinct branch; a bare name cannot eat that lookahead.
+TypeDeclName: (String,Vec<String>,Vec<ConceptBound>) = {
+    <name:Ident> <info:GenericHeader> => (name,info.0,info.1),
+    <name:Ident> => (name,vec![],vec![]),
+};
+FunctionDeclName: (String,Vec<String>,Vec<ConceptBound>) = {
+    <name:FunctionName> <info:GenericHeader> => (name,info.0,info.1),
+    <name:FunctionName> => (name,vec![],vec![]),
+};
+FunctionName: String = {
+    <name:MemberIdent> => name,
+    "apply" => "apply".into(),
+    "also" => "also".into(),
+    "let" => "let".into(),
+    "run" => "run".into(),
+    "with" => "with".into(),
 };
 Generics: Vec<String> = {
-    "<" <generics:Comma<Ident>> ">" => generics,
+    "<" <generics:NonEmptyComma<Ident>> ">" => generics,
     => vec![],
 };
 // `with Trait1, Trait2` is Nova syntax for #[capabilities(...)]. Both
@@ -248,12 +334,12 @@ CapabilityClause: Vec<String> = {
     "with" <traits:Comma<Path>> => traits,
 };
 StructDef: Struct = {
-    "struct" <name:Ident> <generics:Generics> <flags:CapabilityClause?> <parent:Parent?> "{" <fields:Comma<Field>> "}"
-        => Struct { name, generics, fields,
+    "struct" <header:TypeDeclName> <flags:CapabilityClause?> <parent:Parent?> "{" <fields:Comma<Field>> "}"
+        => Struct { name:header.0, generics:header.1, concept_bounds:header.2, fields,
             attributes:flags.map(|args|vec![Attribute{name:"capabilities".into(),args}]).unwrap_or_default(),
             is_class: false, parent },
-    "class" <name:Ident> <generics:Generics> <flags:CapabilityClause?> <parent:Parent?> "{" <fields:Comma<Field>> "}"
-        => Struct { name, generics, fields,
+    "class" <header:TypeDeclName> <flags:CapabilityClause?> <parent:Parent?> "{" <fields:Comma<Field>> "}"
+        => Struct { name:header.0, generics:header.1, concept_bounds:header.2, fields,
             attributes:flags.map(|args|vec![Attribute{name:"capabilities".into(),args}]).unwrap_or_default(),
             is_class: true, parent },
 };
@@ -296,70 +382,128 @@ OperatorMethod: Function = {
 
 // Modifiers apply only to methods. `override` requires a virtual ancestor.
 Method: Function = {
+    // Read-only computed property. It is an ordinary Nova method, so the
+    // compiler does not create a hidden field, vtable or runtime descriptor.
+    "property" <name:MemberIdent> ":" <result:Type> "{" "get" "=>" <value:Expr> ";" "}"
+        => Function { mode:FunctionMode::Normal, name:format!("property_{name}"),
+            generics:vec![], concept_bounds:vec![],
+            params:vec![Param {name:"self".into(),ty:TypeRef::Reference {
+                mutable:false,inner:Box::new(TypeRef::Named("Self".into()))},
+                default:None,attributes:vec![]}], variadic:false, result,
+            body:vec![Stmt::Return(Some(value))], is_virtual:false,
+            is_override:false, attributes:vec![] },
+    // Spring-style annotations may precede a static handler method.
+    // `@GetMapping("/users") static fn index(...)` and the legacy
+    // `static @GetMapping("/users") fn index(...)` are both accepted.
+    // One static-method production handles both annotation orders, including
+    // @GetMapping(...) static fn and static @GetMapping(...) fn. The optional
+    // prefix avoids duplicating the whole static-method parse subtree.
+    <annotations:Attribute*> "static" <f:Function> => Function { attributes: {
+        let mut attrs=f.attributes.clone();
+        attrs.extend(annotations);
+        attrs.push(Attribute {name:"static".into(),args:vec![]});
+        attrs
+    }, ..f },
     OperatorMethod,
     "virtual" <f:Function> => Function { is_virtual: true, ..f },
     "override" <f:Function> => Function { is_override: true, ..f },
     Function,
 };
 EnumDef: Enum = {
-    "enum" <name:Ident> <generics:Generics> "{" <variants:Comma<Variant>> "}"
-        => Enum { name, generics, variants, attributes: vec![] },
+    "enum" <header:TypeDeclName> "{" <variants:Comma<Variant>> "}"
+        => Enum { name:header.0, generics:header.1, concept_bounds:header.2, variants, attributes: vec![] },
 };
 Variant: Variant = {
     <name:Ident> "(" <payload:Comma<Type>> ")" => Variant { name, payload },
     <name:Ident> => Variant {name,payload:vec![]},
 };
-Field: Field = { <name:MemberIdent> ":" <ty:Type> => Field { name, ty } };
+// The next '(' after @Name belongs to annotation arguments. Previously it
+// could instead begin the unit type '()' of the field, making @Name() locally
+// ambiguous. Separate undecorated fields (which still accept the unit type)
+// from decorated fields. Decorated unit fields may use an alias such as Unit.
+Field: Field = {
+    <name:MemberIdent> ":" <ty:Type> "=" <default:Expr>
+        => Field {name,ty,default:Some(default),attributes:vec![]},
+    <name:MemberIdent> ":" <ty:Type>
+        => Field {name,ty,default:None,attributes:vec![]},
+    <name:MemberIdent> ":" <attributes:Attribute+> <ty:AnnotatedFieldType> "=" <default:Expr>
+        => Field {name,ty,default:Some(default),attributes},
+    <name:MemberIdent> ":" <attributes:Attribute+> <ty:AnnotatedFieldType>
+        => Field {name,ty,default:None,attributes},
+};
+// Only the immediate '()' case is excluded. Reference types, arrays and
+// function types may still contain the unit type in their nested positions.
+AnnotatedFieldType: TypeRef = {
+    "dyn" <name:Path> => TypeRef::Named(format!("dyn {name}")),
+    "[" <inner:Type> ";" <n:r"[0-9]+"> "]" => TypeRef::Array(Box::new(inner), n.parse().unwrap_or(0)),
+    "*" "const" <inner:Type> => TypeRef::Pointer {mutable:false,inner:Box::new(inner)},
+    "*" "mut" <inner:Type> => TypeRef::Pointer {mutable:true,inner:Box::new(inner)},
+    "&" <mutability:"mut"?> <inner:Type> => TypeRef::Reference {mutable:mutability.is_some(),inner:Box::new(inner)},
+    <name:Path> "<" <args:NonEmptyComma<Type>> ">" => TypeRef::Applied(name,args),
+    "fn" "(" <params:Comma<Type>> ")" "->" <result:Type> => TypeRef::Function {params,result:Box::new(result)},
+    "auto" => TypeRef::Named("auto".into()),
+    <name:Path> => TypeRef::Named(name),
+};
 Function: Function = {
-    "const" <f:FunctionBase> => Function { attributes:vec![Attribute{name:"const".into(),args:vec![]}],..f },
-    "comptime" <f:FunctionBase> => Function { attributes:vec![Attribute{name:"comptime".into(),args:vec![]}],..f },
-    <attributes:Attribute+> <f:FunctionBase> => Function { attributes, ..f },
+    "const" <f:FunctionBase> => { let mut attributes=vec![Attribute{name:"const".into(),args:vec![]}]; attributes.extend(f.attributes.clone()); Function { attributes, ..f } },
+    "comptime" <f:FunctionBase> => { let mut attributes=vec![Attribute{name:"comptime".into(),args:vec![]}]; attributes.extend(f.attributes.clone()); Function { attributes, ..f } },
+    <attributes:Attribute+> <f:FunctionBase> => { let mut merged=f.attributes.clone(); merged.extend(attributes); Function { attributes:merged, ..f } },
     FunctionBase,
 };
+EffectRequirements: Vec<String> = {
+    "requires" "(" <effects:Comma<EffectName>> ")" => effects,
+};
+EffectName: String = {
+    <name:Path> => name,
+};
 FunctionBase: Function = {
-    "fn" <name:MemberIdent> <generic_info:FunctionGenerics> "(" <params:Comma<FnParam>> ")" "->" <result:Type> <where_bounds:WhereConcepts> <body:Block>
+    "fn" <header:FunctionDeclName> "(" <params:Comma<FnParam>> ")" "->" <result:Type> <effect_requirements:EffectRequirements?> <where_bounds:WhereConcepts> <body:Block>
          => {
             let variadic=params.last().map(|(_,v)|*v).unwrap_or(false);
             let params=params.into_iter().map(|(mut p,v)| {
                 if v && !variadic {p.name=format!("__nova_invalid_pack__{}",p.name);}
                 p
             }).collect();
-            let (generics,mut concept_bounds)=generic_info;
+            let (name,generics,mut concept_bounds)=header;
             concept_bounds.extend(where_bounds);
-            Function {mode:FunctionMode::Normal,name,generics,concept_bounds,params,variadic,result,body,is_virtual:false,is_override:false,attributes:vec![]}
+            let attributes=effect_requirements.map(|args|vec![Attribute{name:"effects".into(),args}]).unwrap_or_default();
+            Function {mode:FunctionMode::Normal,name,generics,concept_bounds,params,variadic,result,body,is_virtual:false,is_override:false,attributes}
         },
-    "gen" "fn" <name:MemberIdent> <generic_info:FunctionGenerics> "(" <params:Comma<FnParam>> ")" "->" <result:Type> <where_bounds:WhereConcepts> <body:Block>
+    "gen" "fn" <header:FunctionDeclName> "(" <params:Comma<FnParam>> ")" "->" <result:Type> <effect_requirements:EffectRequirements?> <where_bounds:WhereConcepts> <body:Block>
          => {
             let variadic=params.last().map(|(_,v)|*v).unwrap_or(false);
             let params=params.into_iter().map(|(mut p,v)| {
                 if v && !variadic {p.name=format!("__nova_invalid_pack__{}",p.name);}
                 p
             }).collect();
-            let (generics,mut concept_bounds)=generic_info;
+            let (name,generics,mut concept_bounds)=header;
             concept_bounds.extend(where_bounds);
-            Function {mode:FunctionMode::Generator,name,generics,concept_bounds,params,variadic,result,body,is_virtual:false,is_override:false,attributes:vec![]}
+            let attributes=effect_requirements.map(|args|vec![Attribute{name:"effects".into(),args}]).unwrap_or_default();
+            Function {mode:FunctionMode::Generator,name,generics,concept_bounds,params,variadic,result,body,is_virtual:false,is_override:false,attributes}
         },
-    "coro" "fn" <name:MemberIdent> <generic_info:FunctionGenerics> "(" <params:Comma<FnParam>> ")" "->" <result:Type> <where_bounds:WhereConcepts> <body:Block>
+    "coro" "fn" <header:FunctionDeclName> "(" <params:Comma<FnParam>> ")" "->" <result:Type> <effect_requirements:EffectRequirements?> <where_bounds:WhereConcepts> <body:Block>
          => {
             let variadic=params.last().map(|(_,v)|*v).unwrap_or(false);
             let params=params.into_iter().map(|(mut p,v)| {
                 if v && !variadic {p.name=format!("__nova_invalid_pack__{}",p.name);}
                 p
             }).collect();
-            let (generics,mut concept_bounds)=generic_info;
+            let (name,generics,mut concept_bounds)=header;
             concept_bounds.extend(where_bounds);
-            Function {mode:FunctionMode::Coroutine,name,generics,concept_bounds,params,variadic,result,body,is_virtual:false,is_override:false,attributes:vec![]}
+            let attributes=effect_requirements.map(|args|vec![Attribute{name:"effects".into(),args}]).unwrap_or_default();
+            Function {mode:FunctionMode::Coroutine,name,generics,concept_bounds,params,variadic,result,body,is_virtual:false,is_override:false,attributes}
         },
-    "async" "fn" <name:MemberIdent> <generic_info:FunctionGenerics> "(" <params:Comma<FnParam>> ")" "->" <result:Type> <where_bounds:WhereConcepts> <body:Block>
+    "async" "fn" <header:FunctionDeclName> "(" <params:Comma<FnParam>> ")" "->" <result:Type> <effect_requirements:EffectRequirements?> <where_bounds:WhereConcepts> <body:Block>
          => {
             let variadic=params.last().map(|(_,v)|*v).unwrap_or(false);
             let params=params.into_iter().map(|(mut p,v)| {
                 if v && !variadic {p.name=format!("__nova_invalid_pack__{}",p.name);}
                 p
             }).collect();
-            let (generics,mut concept_bounds)=generic_info;
+            let (name,generics,mut concept_bounds)=header;
             concept_bounds.extend(where_bounds);
-            Function {mode:FunctionMode::Async,name,generics,concept_bounds,params,variadic,result,body,is_virtual:false,is_override:false,attributes:vec![]}
+            let attributes=effect_requirements.map(|args|vec![Attribute{name:"effects".into(),args}]).unwrap_or_default();
+            Function {mode:FunctionMode::Async,name,generics,concept_bounds,params,variadic,result,body,is_virtual:false,is_override:false,attributes}
         },
 };
 // C ABI ellipsis `...` is distinct from Nova `...values: T`.
@@ -369,14 +513,14 @@ ExternFunction: ExternFunction = {
     ExternFunctionBase,
 };
 ExternFunctionBase: ExternFunction = {
-    "extern" "fn" <name:MemberIdent> "(" <arguments:Comma<ExternParam>> ")" "->" <result:Type> ";"
+    "extern" "fn" <name:FunctionName> "(" <arguments:Comma<ExternParam>> ")" "->" <result:Type> ";"
         => {
             let c_variadic=arguments.last().map(|a|a.is_none()).unwrap_or(false);
             let mut params=Vec::new();
             for (i,arg) in arguments.into_iter().enumerate(){
                 if let Some(param)=arg {params.push(param);}
                 else if !c_variadic || i!=params.len(){
-                    params.push(Param{name:"__nova_invalid_c_varargs__".into(),ty:TypeRef::Named("i32".into()),default:None});
+                    params.push(Param{name:"__nova_invalid_c_varargs__".into(),ty:TypeRef::Named("i32".into()),default:None,attributes:vec![]});
                 }
             }
             ExternFunction { name, params, result, c_variadic, attributes:vec![] }
@@ -387,28 +531,66 @@ ExternParam: Option<Param> = {
     <param:Param> => Some(param),
 };
 
-Param: Param = { <name:Ident> ":" <ty:Type> <default:("=" <Expr>)?> => Param { name, ty, default } };
+// `out` is compiler-only sugar for an exclusive output borrow. Keep its
+// marker until call-site validation and definite-assignment checking.
+Param: Param = {
+    "out" <name:Ident> ":" <ty:Type> => Param {
+        name, ty:TypeRef::Applied("__nova_internal_out_type".into(),vec![ty]),default:None,attributes:vec![]
+    },
+    <attributes:Attribute+> <name:Ident> ":" <ty:Type> <default:("=" <Expr>)?> => Param { name, ty, default, attributes },
+    <name:Ident> ":" <ty:Type> <default:("=" <Expr>)?> => Param { name, ty, default, attributes:vec![] }
+};
 FnParam: (Param,bool) = {
     "..." <param:Param> => (param,true),
     <param:Param> => (param,false),
 };
+// Closures do not support default parameters. Using Param here admitted
+// `= Expr` before the closing `|`: the parser could consume that delimiter
+// as a bitwise-or operator inside the default value instead of ending the
+// parameter list. This propagated incorrect lookaheads across the entire
+// expression-precedence hierarchy (LALRPOP shift/reduce conflicts).
+LambdaParam: Param = {
+    "out" <name:Ident> ":" <ty:Type> => Param {
+        name, ty:TypeRef::Applied("__nova_internal_out_type".into(),vec![ty]), default:None, attributes:vec![]
+    },
+    <name:Ident> ":" <ty:Type> => Param { name,ty,default:None,attributes:vec![] },
+};
 Type: TypeRef = {
+    "dyn" <name:Path> => TypeRef::Named(format!("dyn {name}")),
+    "impl" <name:Path> => TypeRef::Named(format!("impl {name}")),
     "[" <inner:Type> ";" <n:r"[0-9]+"> "]" => TypeRef::Array(Box::new(inner), n.parse().unwrap_or(0)),
     "*" "const" <inner:Type> => TypeRef::Pointer { mutable: false, inner: Box::new(inner) },
     "*" "mut" <inner:Type> => TypeRef::Pointer { mutable: true, inner: Box::new(inner) },
     "&" <mutability:"mut"?> <inner:Type> => TypeRef::Reference { mutable:mutability.is_some(), inner:Box::new(inner) },
-    <name:Path> "<" <args:Comma<Type>> ">" => TypeRef::Applied(name,args),
+    <name:Path> "<" <args:NonEmptyComma<Type>> ">" => TypeRef::Applied(name,args),
     "fn" "(" <params:Comma<Type>> ")" "->" <result:Type> => TypeRef::Function {params, result:Box::new(result)},
     "auto" => TypeRef::Named("auto".into()),
     <name:Path> => TypeRef::Named(name),
     "(" ")" => TypeRef::Named("()".into()),
 };
-Path: String = {
-    <first:Ident> <rest:("::" <MemberIdent>)*> => {
-        let mut name=first;
-        for part in rest {name.push_str("::");name.push_str(&part);}
-        name
+// Imports accept a final `*` as a path segment. Keeping it in the
+// same path nonterminal avoids a shift/reduce ambiguity with `Path::Member`.
+UsePath: String = {
+    <first:Ident> <rest:("::" <UseSegment>)*> => {
+        let mut path=first;
+        for segment in rest {path.push_str("::");path.push_str(&segment);}
+        path
     },
+};
+UseSegment: String = {
+    <name:MemberIdent> => name,
+    "*" => "*".into(),
+};
+// Right-recursive qualified paths avoid the nullable `("::" MemberIdent)*`
+// expansion, which introduced another shift/reduce conflict on `::`.
+// A `::<` generic-call suffix remains separate from ordinary path segments.
+Path: String = {
+    <name:Ident> => name,
+    <name:Ident> "::" <tail:PathSegments> => format!("{name}::{tail}"),
+};
+PathSegments: String = {
+    <name:MemberIdent> => name,
+    <name:MemberIdent> "::" <tail:PathSegments> => format!("{name}::{tail}"),
 };
 // A block's final expression is the only expression without a semicolon.
 // Bare `if` statements remain statements, but an exhaustive final if/else
@@ -442,8 +624,56 @@ Stmt: Stmt = {
         condition:Expr::Var("__nova_macro_stmt_repeat_optional".into()),
         then_body:body, else_body:None
     },
+    // Refutable let-else binds a variant's payload for the rest of the block.
+    // No runtime primitive is required: normalize_block_tail rewrites the
+    // continuation into an ordinary enum match before type checking.
+    "let" <path:Path> "(" <bindings:Comma<Ident>> ")" "=" <value:ValueExpr> "else" <failure:Block> ";"
+        => crate::ast::refutable_let_else(path, bindings, value, failure),
+    // Struct/array bindings are expanded to single-evaluation field/index reads.
+    "let" <name:Path> "{" <names:Comma<Ident>> "}" "=" <init:ValueExpr> ";"
+        => crate::ast::destructure_binding(Some(name),names,init),
+    "let" "(" <names:Comma<Ident>> ")" "=" <init:ValueExpr> ";"
+        => crate::ast::destructure_binding(None,names,init),
+    // Explicit ownership replacement. The marker is lowered after the
+    // concrete local type and its Drop implementation are known.
+    "replace" <name:Ident> "=" <value:Expr> ";"
+        => crate::ast::replace_stmt(name, value),
+    // Declarative cascade. The receiver may be parenthesized or a target-typed
+    // `new(...)`; the declared local type is forwarded to the generated
+    // cascade temporary so bare `new()` can resolve its constructor.
+    "let" <mutability:"mut"?> <name:Ident> <ty:(":" <Type>)?> "="
+        <base:CascadeReceiver> ".." <assignments:CascadeAssignments> ";"
+        => Stmt::Let {
+            name,
+            mutable: mutability.is_some(),
+            ty: ty.clone().filter(|t| *t != TypeRef::Named("auto".into())),
+            init: crate::ast::cascade_expr(base, assignments, ty),
+            defer: None,
+        },
     "let" <mutability:"mut"?> <name:Ident> <ty:(":" <Type>)?> "=" <init:ValueExpr> <defer:("defer" <Expr>)?> ";"
         => Stmt::Let { name, mutable: mutability.is_some(), ty: ty.filter(|t| *t != TypeRef::Named("auto".into())), init, defer },
+    // `using` is a declaration form; use the existing `scope { ... }` to
+    // delimit its cleanup lifetime without adding a nested block production.
+    "using" <name:Ident> <ty:(":" <Type>)?> "=" <init:ValueExpr>
+        "defer" <cleanup:Expr> ";"
+        => Stmt::Let {
+            name,
+            mutable: false,
+            ty: ty.filter(|t| *t != TypeRef::Named("auto".into())),
+            init,
+            defer: Some(cleanup),
+        },
+    // RAII form: the owner is cleaned up by the normal HIR destructor pass.
+    // An explicit `defer` remains available when cleanup needs arguments or a
+    // custom operation instead of the type's Drop implementation.
+    "using" <name:Ident> <ty:(":" <Type>)?> "=" <init:ValueExpr> ";"
+        => Stmt::Let {
+            name,
+            mutable: false,
+            ty: ty.filter(|t| *t != TypeRef::Named("auto".into())),
+            init,
+            defer: None,
+        },
     "auto" <mutability:"mut"?> <name:Ident> "=" <init:ValueExpr> <defer:("defer" <Expr>)?> ";"
         => Stmt::Let { name, mutable: mutability.is_some(), ty: None, init, defer },
     "defer" <cleanup:Expr> ";" => Stmt::Defer(cleanup),
@@ -458,8 +688,22 @@ Stmt: Stmt = {
         => crate::ast::assignment_stmt(target, op, value),
     "return" <value:ValueExpr> ";" => Stmt::Return(Some(value)),
     "return" ";" => Stmt::Return(None),
+    // Refutable binding without boilerplate `match`. Bindings exist only in
+    // the successful arm; the subject is evaluated exactly once.
+    "if" "let" <pattern:Pattern> "=" <value:Expr> <then_body:Block> <else_body:ElseBlock?>
+        => Stmt::Match { value, arms: vec![
+            MatchArm {pattern, body:then_body},
+            MatchArm {pattern:Pattern::Wildcard,body:else_body.unwrap_or_default()}
+        ] },
     "if" <condition:Expr> <then_body:Block> <else_body:ElseBlock?>
         => Stmt::If { condition, then_body, else_body },
+    // Refutable loop re-evaluates its expression each iteration and breaks
+    // on the first non-match, without allocating an iterator adapter.
+    "while" "let" <pattern:Pattern> "=" <value:Expr> <body:Block>
+        => Stmt::Loop(vec![Stmt::Match { value, arms:vec![
+            MatchArm {pattern,body},
+            MatchArm {pattern:Pattern::Wildcard,body:vec![Stmt::Break]}
+        ]}]),
     "while" <condition:Expr> <body:Block> => Stmt::While { condition, body },
     "loop" <body:Block> => Stmt::Loop(body),
     "for" <name:Ident> "in" <start:Expr> ".." <end:Expr> <body:Block>
@@ -527,7 +771,28 @@ Pattern: Pattern = {
     <path:Path> "(" <bindings:Comma<Ident>> ")" => Pattern::Variant {path,bindings},
     <path:Path> => if path=="_" {Pattern::Wildcard}else{Pattern::Variant {path,bindings:vec![]}},
 };
-pub Expr: Expr = { OrExpr };
+// A compact expression-bodied closure binds more weakly than every binary
+// operator. To apply an operator to a closure value, parenthesize the closure.
+pub Expr: Expr = {
+    PipelineExpr,
+    "|" <params:Comma<LambdaParam>> "|" <value:Expr> => Expr::Lambda {
+        params,
+        result:TypeRef::Named("auto".into()),
+        body:vec![Stmt::Return(Some(value))]
+    },
+};
+// The pipeline injects the preceding value as the first call argument.
+// `x |> f |> g(y)` is equivalent to `g(f(x), y)`; every step evaluates once.
+PipelineExpr: Expr = {
+    <value:PipelineExpr> "|>" <stage:Atom> => crate::ast::pipeline_call(value,stage),
+    CoalesceExpr
+};
+// Lazy optional fallback; lowered to a typed enum match before HIR.
+CoalesceExpr: Expr = {
+    <value:OrExpr> "??" <fallback:CoalesceExpr> => Expr::Call(
+        "__nova_internal_coalesce".into(), vec![value,fallback]),
+    OrExpr
+};
 OrExpr: Expr = {<l:OrExpr> "||" <r:AndExpr> => Expr::Binary(Box::new(l),BinaryOp::Or,Box::new(r)), AndExpr};
 AndExpr: Expr = {<l:AndExpr> "&&" <r:BitOrExpr> => Expr::Binary(Box::new(l),BinaryOp::And,Box::new(r)), BitOrExpr};
 BitOrExpr: Expr = {<l:BitOrExpr> "|" <r:BitXorExpr> => Expr::Binary(Box::new(l),BinaryOp::BitOr,Box::new(r)), BitXorExpr};
@@ -552,9 +817,15 @@ AddExpr: Expr = {
     <l:AddExpr> "-" <r:MulExpr> => Expr::Binary(Box::new(l),BinaryOp::Sub,Box::new(r)),MulExpr,
 };
 MulExpr: Expr = {
-    <l:MulExpr> "*" <r:UnaryExpr> => Expr::Binary(Box::new(l),BinaryOp::Mul,Box::new(r)),
-    <l:MulExpr> "/" <r:UnaryExpr> => Expr::Binary(Box::new(l),BinaryOp::Div,Box::new(r)),
-    <l:MulExpr> "%" <r:UnaryExpr> => Expr::Binary(Box::new(l),BinaryOp::Rem,Box::new(r)),UnaryExpr,
+    <l:MulExpr> "*" <r:CastExpr> => Expr::Binary(Box::new(l),BinaryOp::Mul,Box::new(r)),
+    <l:MulExpr> "/" <r:CastExpr> => Expr::Binary(Box::new(l),BinaryOp::Div,Box::new(r)),
+    <l:MulExpr> "%" <r:CastExpr> => Expr::Binary(Box::new(l),BinaryOp::Rem,Box::new(r)),CastExpr,
+};
+// `&mut value as (*mut T)` must mean `(&mut value) as (*mut T)`.
+// Casts bind less tightly than unary address/deref operations.
+CastExpr: Expr = {
+    <e:CastExpr> "as" <ty:CastType> => Expr::Cast(Box::new(e),ty),
+    UnaryExpr,
 };
 UnaryExpr: Expr = {
     "-" <e:UnaryExpr> => Expr::Unary(UnaryOp::Neg,Box::new(e)),
@@ -566,12 +837,12 @@ UnaryExpr: Expr = {
     "await" <e:UnaryExpr> => Expr::Await(Box::new(e)),
     // Coroutine operations are language syntax. The compiler lowers them to
     // generic, ABI-compatible STD primitives, without user-facing imports.
-    "next" <handle:UnaryExpr> => Expr::Call("std::generator::native_next".into(),vec![handle]),
-    "finished" <handle:UnaryExpr> => Expr::Call("std::generator::native_done".into(),vec![handle]),
-    "resume" <handle:UnaryExpr> => Expr::Call("std::coro::native_resume".into(),vec![handle,Expr::Int("0".into())]),
-    "join" <handle:UnaryExpr> => Expr::Call("std::task::native_block_on".into(),vec![handle]),
-    "spawn" <handle:UnaryExpr> => Expr::Call("std::task::native_spawn".into(),vec![handle]),
-    "dispose" <handle:UnaryExpr> => Expr::Call("std::coro::native_drop".into(),vec![handle]),
+    "next" <handle:UnaryExpr> => Expr::MethodCall(Box::new(handle),"next".into(),vec![],vec![]),
+    "finished" <handle:UnaryExpr> => Expr::MethodCall(Box::new(handle),"finished".into(),vec![],vec![]),
+    "resume" <handle:UnaryExpr> => Expr::MethodCall(Box::new(handle),"resume".into(),vec![Expr::Int("0".into())],vec![]),
+    "join" <handle:UnaryExpr> => Expr::MethodCall(Box::new(handle),"wait".into(),vec![],vec![]),
+    "spawn" <handle:UnaryExpr> => Expr::MethodCall(Box::new(handle),"schedule".into(),vec![],vec![]),
+    "dispose" <handle:UnaryExpr> => Expr::MethodCall(Box::new(handle),"drop".into(),vec![],vec![]),
     "..." <e:UnaryExpr> => Expr::Spread(Box::new(e)),
     PostfixExpr,
 };
@@ -585,8 +856,30 @@ CastType: TypeRef = {
     "(" <ty:Type> ")" => ty,
 };
 PostfixExpr: Expr = {
-    <e:PostfixExpr> "as" <ty:CastType> => Expr::Cast(Box::new(e),ty),
-    <e:PostfixExpr> "." <name:MemberIdent> "(" <args:Comma<CallArgument>> ")" => Expr::MethodCall(Box::new(e),name,args),
+    // Optional chaining and propagation are lowered into ordinary match arms.
+    <e:PostfixExpr> "?" => Expr::Call("__nova_internal_try".into(),vec![e]),
+    <e:PostfixExpr> "?." <name:MemberIdent> "(" <args:Comma<CallArgument>> ")" => {
+        let mut values=vec![e, Expr::Str(name)]; values.extend(args);
+        Expr::Call("__nova_internal_optional_method".into(), values)
+    },
+    <e:PostfixExpr> "?." <name:MemberIdent> => Expr::Call(
+        "__nova_internal_optional_field".into(), vec![e, Expr::Str(name)]),
+    <e:PostfixExpr> "." <name:MemberIdent> "::<" <types:NonEmptyComma<Type>> ">" "(" <args:Comma<CallArgument>> ")"
+        => Expr::MethodCall(Box::new(e),name,args,types),
+    <e:PostfixExpr> "." <name:MemberIdent> "(" <args:Comma<CallArgument>> ")"
+        => Expr::MethodCall(Box::new(e),name,args,vec![]),
+    // `apply` is a dedicated postfix form; it is not a general member with
+    // an optional block, so normal field access remains unambiguous.
+    <e:PostfixExpr> "." "apply" <body:Block>
+        => crate::ast::apply_expr(e, body),
+    <e:PostfixExpr> "." "also" <body:Block>
+        => crate::ast::scope_expr(e, "also", body),
+    <e:PostfixExpr> "." "let" <body:Block>
+        => crate::ast::scope_expr(e, "let", body),
+    <e:PostfixExpr> "." "run" <body:Block>
+        => crate::ast::scope_expr(e, "run", body),
+    <e:PostfixExpr> "." "with" <body:Block>
+        => crate::ast::scope_expr(e, "with", body),
     <e:PostfixExpr> "." <field:MemberIdent> => Expr::Field(Box::new(e),field),
     <e:PostfixExpr> "[" <index:Expr> "]" => Expr::Index(Box::new(e),Box::new(index)),
     Atom,
@@ -606,13 +899,59 @@ IfValue: Expr = {
 // Ordinary expressions still use the existing precedence grammar.
 ValueExpr: Expr = {
     IfValue,
+    // Keep unsafe expressions at the value level, like if/match expressions.
+    // Putting this production in Atom conflicts with the statement form
+    // `unsafe { ... }` when the parser is deciding between a statement and a
+    // tail expression.
+    "unsafe" <body:Block>
+        => Expr::Call("__nova_internal_unsafe_expr".into(), vec![Expr::Block(body)]),
+    MatchValue,
     <body:Block> => Expr::Block(body),
     Expr,
 };
+CascadeReceiver: Expr = {
+    "new" "(" <args:Comma<CallArgument>> ")"
+        => Expr::Call("__nova_target_new".into(), args),
+    "(" <base:Expr> ")" => base,
+};
+
+// Match as a value reuses exhaustive enum matching; its arms become
+// continuations before type checking. No runtime enum visitor is introduced.
+MatchValue: Expr = {
+    "match" <value:Expr> "{" <arms:MatchArms> "}"
+        => Expr::Block(vec![
+            Stmt::Expr(Expr::Var("__nova_internal_match_value".into())),
+            Stmt::Match {value,arms}
+        ]),
+};
+CascadeAssignments: Vec<(String, Option<BinaryOp>, Expr)> = {
+    <field:MemberIdent> <op:AssignmentOp> <value:OrExpr> <rest:CascadeAssignmentRest> => {
+        let mut assignments = vec![(field, op, value)];
+        assignments.extend(rest);
+        assignments
+    }
+};
+CascadeAssignmentRest: Vec<(String, Option<BinaryOp>, Expr)> = {
+    => vec![],
+    ".." <field:MemberIdent> <op:AssignmentOp> <value:OrExpr> <rest:CascadeAssignmentRest> => {
+        let mut assignments = vec![(field, op, value)];
+        assignments.extend(rest);
+        assignments
+    }
+};
 Atom: Expr = {
+    // Kotlin-style top-level receiver scope. The postfix spelling
+    // `value.with { ... }` is also accepted below in PostfixExpr.
+    "with" "(" <base:Expr> ")" <body:Block>
+        => crate::ast::scope_expr(base, "with", body),
     "resume" "(" <handle:Expr> "," <resume_value:Expr> ")"
-        => Expr::Call("std::coro::native_resume".into(), vec![handle,resume_value]),
+        => Expr::MethodCall(Box::new(handle), "resume".into(), vec![resume_value], vec![]),
     "fn" "(" <params:Comma<Param>> ")" "->" <result:Type> <body:Block> => Expr::Lambda {params,result,body},
+    "|" <params:Comma<LambdaParam>> "|" "->" <result:Type> <body:Block> => Expr::Lambda {params,result,body},
+    // Scientific notation is one floating-point token, not a decimal followed
+    // by an identifier like `e308`. Recognize signed exponents and
+    // mantissas with or without a decimal point (1e3, 1.5E-2).
+    <n:r"[0-9]+(\.[0-9]+)?[eE][+-]?[0-9]+"> => Expr::Float(n.to_string()),
     <n:r"[0-9]+\.[0-9]+"> => Expr::Float(n.to_string()),
     <n:r"[0-9]+"> => Expr::Int(n.to_string()),
     "true" => Expr::Bool(true),
@@ -623,10 +962,36 @@ Atom: Expr = {
     // pass decodes and validates escapes before lowering to a typed char.
     <s:r#"'([^'\\]|\\.)*'"#> => Expr::Cast(
         Box::new(Expr::Str(s.to_string())), TypeRef::Named("char".into())),
-    "new" <name:Path> "<" <generics:Comma<Type>> ">" "{" <fields:Comma<FieldInit>> "}"
+    // C++-style construction is sugar for a static `new` defined in Nova.
+    // Field initialization remains `new Type { field: value }`.
+    // Target-typed construction uses the expected type from the surrounding
+    // expression, e.g. `let value: Counter = new(7);`.
+    "new" "(" <args:Comma<CallArgument>> ")"
+        => Expr::Call("__nova_target_new".into(),args),
+    "new" <name:Path> "<" <generics:NonEmptyComma<Type>> ">" "(" <args:Comma<CallArgument>> ")"
+        => Expr::GenericCall(format!("{name}::new"),generics,args),
+    "new" <name:Path> "(" <args:Comma<CallArgument>> ")"
+        => Expr::Call(format!("{name}::new"),args),
+    "new" <name:Path> "<" <generics:NonEmptyComma<Type>> ">" "{" <fields:Comma<FieldInit>> "}"
         => Expr::GenericStructInit(name,generics,fields),
     "new" <name:Path> "{" <fields:Comma<FieldInit>> "}"
         => Expr::StructInit(name,fields),
+    // List comprehension. It is lowered to std::algorithm::comprehend, so it
+    // works with the same Vec/foreach protocol as explicit collection code.
+    // Keep the comprehension head at the precedence level below `for`; using
+    // the top-level Expr here makes LALRPOP prefer the ordinary array branch
+    // when it sees the contextual `for` token.
+    "[" <value:OrExpr> "for" "(" <name:Ident> ":" <item_ty:Type> ")" "in" <collection:OrExpr> "if" <predicate:OrExpr> "]"
+        => crate::ast::list_comprehension(name,item_ty,collection,value,Some(predicate)),
+    "[" <value:OrExpr> "for" "(" <name:Ident> ":" <item_ty:Type> ")" "in" <collection:OrExpr> "]"
+        => crate::ast::list_comprehension(name,item_ty,collection,value,None),
+    // The untyped spelling is accepted for parser tooling; semantic typing
+    // will request `for item: T in ...` when the collection element type is
+    // not available to infer a callback parameter.
+    "[" <value:OrExpr> "for" <name:Ident> "in" <collection:OrExpr> "if" <predicate:OrExpr> "]"
+        => crate::ast::list_comprehension(name,TypeRef::Named("auto".into()),collection,value,Some(predicate)),
+    "[" <value:OrExpr> "for" <name:Ident> "in" <collection:OrExpr> "]"
+        => crate::ast::list_comprehension(name,TypeRef::Named("auto".into()),collection,value,None),
     "[" <members:Comma<Expr>> "]" => Expr::Array(members),
     // AST splice. Only valid inside argument lists/arrays of a macro template.
     "$" "(" <value:Expr> ")" "," "*"
@@ -635,22 +1000,44 @@ Atom: Expr = {
         => Expr::Call("__nova_macro_repeat_plus".into(),vec![value]),
     "$" "(" <value:Expr> ")" "?"
         => Expr::Call("__nova_macro_repeat_optional".into(),vec![value]),
+    // `get` is a contextual property keyword, but also a legal global function.
+    // Keep calls distinct from the special `property ... { get => ... }` production.
+    "get" "(" <args:Comma<CallArgument>> ")" => Expr::Call("get".into(),args),
     <name:Path> "!" "(" <args:Comma<Expr>> ")" => Expr::MacroCall(name,args),
     <name:Path> "!" "[" <args:Comma<Expr>> "]" => Expr::MacroCall(name,args),
     <name:Path> "!" "{" <args:Comma<Expr>> "}" => Expr::MacroCall(name,args),
-    <name:Path> "::<" <generics:Comma<Type>> ">" "(" <args:Comma<CallArgument>> ")"
+    <name:Path> "::<" <generics:NonEmptyComma<Type>> ">" "(" <args:Comma<CallArgument>> ")"
         => Expr::GenericCall(name,generics,args),
-    <name:Path> "(" <args:Comma<CallArgument>> ")" => Expr::Call(name,args),
+    <name:Path> "(" <args:Comma<CallArgument>> ")"
+        => Expr::Call(name,args),
     <name:Path> => Expr::Var(name),
     "(" <e:Expr> ")" => e,
 };
 // Named arguments are AST expressions only until signature binding. They are
 // never lowered directly into the typed HIR.
 CallArgument: Expr = {
+    // C#-style output declaration using Nova's existing `let` keyword.
+    "out" "let" <name:Ident> <ty:(":" <Type>)?> => Expr::Call(
+        "__nova_internal_out_declare".into(),
+        vec![Expr::Var(name), ty.map(Expr::Zero).unwrap_or(Expr::Unit)]),
+    "out" <value:OutPlace> => Expr::Call("__nova_internal_out_argument".into(),vec![value]),
     <name:Ident> ":" <value:Expr> => Expr::Call("__nova_internal_named_arg".into(),vec![Expr::Str(name),value]),
     Expr,
 };
-FieldInit: (String,Expr) = { <name:MemberIdent> ":" <expr:Expr> => (name,expr) };
+// Restrict output targets to lvalues. Besides rejecting nonsensical forms
+// like `out compute()`, this keeps the existing `out(...)` function-call
+// syntax unambiguous for users who already have a function named `out`.
+OutPlace: Expr = {
+    <name:Ident> <fields:("." <MemberIdent>)*> => {
+        fields.into_iter().fold(Expr::Var(name),|base,field|Expr::Field(Box::new(base),field))
+    },
+    <name:Ident> "[" <index:Expr> "]" => Expr::Index(Box::new(Expr::Var(name)),Box::new(index)),
+};
+FieldInit: (String,Expr) = {
+    <name:MemberIdent> ":" <expr:Expr> => (name,expr),
+    // `new Point { x, y }` uses the locals with the same names.
+    <name:MemberIdent> => (name.clone(), Expr::Var(name)),
+};
 // Only non-prefix-operator keywords can be identifiers in contextual positions:
 // `coro` can name a module (std::coro), and `use` is the Express middleware
 // method name (app.use(callback) and fn use(...)).  LALRPOP's literal
@@ -663,6 +1050,10 @@ FieldInit: (String,Expr) = { <name:MemberIdent> ":" <expr:Expr> => (name,expr) }
 // `cursor.next()` and `entry.next` remain legal method/field names.
 MemberIdent: String = {
     Ident,
+    // `get` is a keyword in property accessors (`property x { get => ... }`)
+    // but remains a valid method name: obj.get(), fn get(...), std::vec::get.
+    // Keep it contextual here instead of making it a general expression Ident.
+    "get" => "get".into(),
     // `sync` and `scope` are reserved statement starters, but remain valid
     // members of qualified paths (e.g. std::sync::new_i64) and method names.
     // Keeping them out of Ident avoids a grammar ambiguity between
@@ -676,10 +1067,16 @@ MemberIdent: String = {
     "join" => "join".into(),
     "spawn" => "spawn".into(),
     "dispose" => "dispose".into(),
+    "coro" => "coro".into(),
+    // `replace` is also a statement keyword, but remains valid as a method
+    // name (for example `Guard<T>::replace(value)`).
+    "replace" => "replace".into(),
 };
 Ident: String = {
     <s:r"[a-zA-Z_][a-zA-Z0-9_]*"> => s.to_string(),
-    "coro" => "coro".to_string(),
+    // `out` remains a contextual keyword: existing STD and self-host code
+    // legitimately use it as a parameter/local name (`fn append(out: u64)`).
+    "out" => "out".to_string(),
     // Unlike `coro` and `use`, sync/scope cannot start ordinary identifiers:
     // they introduce concurrency statements with an overlapping Expr prefix.
     "use" => "use".to_string(),
@@ -697,6 +1094,19 @@ Comma<T>: Vec<T> = {
     => vec![],
     <head:T> <tail:("," <T>)*> => {
         let mut values = vec![head];
+        values.extend(tail);
+        values
+    },
+};
+
+// Angle-bracketed generics and macro concept type arguments are never empty.
+// Keep the nullable Comma<T> only for actual optional lists (e.g. fn()).
+// Right recursion also avoids the `Comma<GenericBoundParam>` tail reduction
+// conflicting with the next comma in LALRPOP's merged states.
+NonEmptyComma<T>: Vec<T> = {
+    <head:T> => vec![head],
+    <head:T> "," <tail:NonEmptyComma<T>> => {
+        let mut values=vec![head];
         values.extend(tail);
         values
     },

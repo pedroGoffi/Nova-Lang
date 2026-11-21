@@ -1,0 +1,60 @@
+use std::platform::sdl2;
+use super::traits::RendererBackend;
+
+pub class Window {
+    native: sdl2::Window,
+    renderer: sdl2::Renderer,
+    events: sdl2::EventBuffer
+}
+
+impl Window {
+    static fn open(title: str, width: i32, height: i32) -> Self {
+        sdl2::initialize_video();
+        // Use one SDL renderer path. Mixing SDL_RenderPresent with an OpenGL
+        // swap on the same window is the source of the visible flicker.
+        let native = sdl2::open(title, width, height);
+        let renderer = sdl2::create_renderer(&native, sdl2::RENDERER_ACCELERATED | sdl2::RENDERER_PRESENT_VSYNC);
+        let events = sdl2::new_event_buffer();
+        renderer.set_blend_mode(sdl2::BLEND_BLEND);
+        return new Window { native: native, renderer: renderer, events: events };
+    }
+
+    fn poll(self: &Window) -> u32 { return self.events.poll(); }
+    fn event_text(self: &Window) -> str { return self.events.text(); }
+    fn event_key(self: &Window) -> i32 { return self.events.key_code(); }
+    fn event_mod(self: &Window) -> i32 { return self.events.key_mod(); }
+    fn draw_panel(self: &Window, panel: &super::widgets::Panel) -> () {
+        panel.draw(&self.renderer);
+        return;
+    }
+    fn draw_editor(self: &Window, editor: &super::editor::TextEditor) -> () {
+        editor.draw(&self.renderer);
+        return;
+    }
+    fn draw_tabs(self: &Window, tabs: &super::widgets::TabBar) -> () {
+        tabs.draw(&self.renderer);
+        return;
+    }
+    fn draw_buffers(self: &Window, buffers: &super::widgets::BufferList) -> () {
+        buffers.draw(&self.renderer);
+        return;
+    }
+    fn close(self: Window) -> () {
+        self.events.release();
+        self.renderer.close();
+        self.native.close();
+        return;
+    }
+}
+
+impl RendererBackend for Window {
+    fn clear(self: &Window, red: u8, green: u8, blue: u8, alpha: u8) -> () {
+        self.renderer.set_draw_color(red, green, blue, alpha);
+        self.renderer.clear();
+        return;
+    }
+    fn present(self: &Window) -> () {
+        self.renderer.present();
+        return;
+    }
+}

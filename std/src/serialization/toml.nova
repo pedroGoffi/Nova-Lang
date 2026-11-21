@@ -1,0 +1,3 @@
+use std::text::string::String;
+pub class Document { source: std::text::string::String }
+impl Document { static fn parse(value: str) -> Self { return new Document { source: String::from(value) }; } }

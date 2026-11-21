@@ -1,0 +1,18 @@
+use std::core::types::Size;
+
+pub class Generator { state: Size }
+
+impl Generator {
+    static fn seeded(seed: Size) -> Self { return new Generator { state: seed }; }
+    fn next(self: &mut Generator) -> Size {
+        self.state = self.state * 6364136223846793005 + 1442695040888963407;
+        return self.state;
+    }
+    fn boolean(self: &mut Generator) -> bool { return (self.next() & 1) == 1; }
+    fn below(self: &mut Generator, upper: Size) -> Size {
+        if upper == 0 { return 0; }
+        return self.next() % upper;
+    }
+}
+
+pub fn seeded(seed: Size) -> Generator { return Generator::seeded(seed); }

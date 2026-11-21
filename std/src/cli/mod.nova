@@ -1,0 +1,7 @@
+pub class Argument { name: str, value: str }
+
+impl Argument {
+    static fn new(name: str, value: str) -> Self { return new Argument { name: name, value: value }; }
+    fn name(self: &Argument) -> str { return self.name; }
+    fn value(self: &Argument) -> str { return self.value; }
+}

@@ -1,0 +1,106 @@
+use std::core;
+use std::memory::raw;
+use std::core::types::Size;
+use std::text::traits::Appendable;
+use std::text::traits::TextLike;
+use std::abi::native::libc::string::strcmp;
+use std::abi::native::libc::string::strncmp;
+use std::abi::native::libc::string::strstr;
+
+// High-level owned text base. Allocation and pointer manipulation stay here;
+// String and StringBuilder expose only text operations to application code.
+pub class Text { data: *mut u8, capacity: Size, length: Size }
+
+impl Text {
+    static fn new() -> Text {
+        unsafe {
+            return new Text { data: raw::alloc_elements::<u8>(0), capacity: 0, length: 0 };
+        }
+    }
+    fn len(self: &Text) -> Size { return self.length; }
+    fn is_empty(self: &Text) -> bool { return self.length == 0; }
+
+    fn contains(self: &Text, value: str) -> bool {
+        unsafe { return (strstr(self.as_str(), value) as Size) != 0; }
+    }
+
+    fn starts_with(self: &Text, value: str) -> bool {
+        let count: Size = core::text_size(value);
+        if count > self.length { return false; }
+        unsafe { return strncmp(self.as_str(), value, count) == 0; }
+    }
+
+    fn ends_with(self: &Text, value: str) -> bool {
+        let count: Size = core::text_size(value);
+        if count > self.length { return false; }
+        let offset: Size = self.length - count;
+        unsafe {
+            let suffix: str = core::borrow((core::address(self.as_str()) as Size) + offset);
+            return strcmp(suffix, value) == 0;
+        }
+    }
+
+    fn ensure_capacity(self: &mut Text, required: Size) -> () {
+        if required + 1 <= self.capacity { return; }
+        unsafe { self.grow(required + 1); }
+        return;
+    }
+
+    [[unsafe]] fn grow(self: &mut Text, requested: Size) -> () {
+        if requested <= self.capacity { return; }
+        let mut target: Size = self.capacity;
+        if target == 0 { target = 8; }
+        while target < requested { target *= 2; }
+        unsafe { self.data = raw::reallocate_elements::<u8>(self.data, self.capacity, target); }
+        self.capacity = target;
+        return;
+    }
+
+    fn append(self: &mut Text, value: str) -> () {
+        let count: Size = core::text_size(value);
+        self.ensure_capacity(self.length + count);
+        unsafe {
+            core::copy(raw::element_at::<u8>(self.data, self.length),
+                core::address(value) as (*const u8), count);
+            self.length += count;
+            let terminator: *mut u8 = raw::element_at::<u8>(self.data, self.length);
+            *terminator = 0;
+        }
+        return;
+    }
+
+    fn as_str(self: &Text) -> str {
+        if self.capacity == 0 { return ""; }
+        unsafe {
+            let first: *mut u8 = self.data;
+            *first = 0;
+            return core::borrow(self.data as Size);
+        }
+    }
+
+    fn clear(self: &mut Text) -> () {
+        self.length = 0;
+        unsafe {
+            if self.capacity > 0 {
+                let first: *mut u8 = self.data;
+                *first = 0;
+            }
+        }
+        return;
+    }
+
+    fn reserve(self: &mut Text, bytes: Size) -> () {
+        self.ensure_capacity(bytes);
+        return;
+    }
+}
+
+impl TextLike for Text {
+    fn as_str(self: &Text) -> str { return self.as_str(); }
+    fn len(self: &Text) -> Size { return self.len(); }
+    fn is_empty(self: &Text) -> bool { return self.is_empty(); }
+}
+
+impl Appendable for Text {
+    fn append(self: &mut Text, value: str) -> () { self.append(value); return; }
+}

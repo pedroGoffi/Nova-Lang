@@ -1,0 +1,72 @@
+use std::error::error::Error;
+use std::core::control::Fallible;
+
+pub enum Result<T,E> { Ok(T), Err(E) }
+
+impl<T,E> Result<T,E> {
+    fn is_ok(self: Result<T,E>) -> bool {
+        match self { Ok(value) => { return true; } Err(error) => { return false; } }
+    }
+    fn is_err(self: Result<T,E>) -> bool {
+        match self { Ok(value) => { return false; } Err(error) => { return true; } }
+    }
+    fn unwrap(self: Result<T,E>) -> T {
+        match self {
+            Ok(value) => { return value; }
+            Err(error) => { std::core::panic::fail("called Result::unwrap on Err"); }
+        }
+    }
+    fn expect(self: Result<T,E>, message: str) -> T {
+        match self {
+            Ok(value) => { return value; }
+            Err(error) => { std::core::panic::fail(message); }
+        }
+    }
+    fn unwrap_err(self: Result<T,E>) -> E {
+        match self {
+            Ok(value) => { std::core::panic::fail("called Result::unwrap_err on Ok"); }
+            Err(error) => { return error; }
+        }
+    }
+    fn map<U>(self: Result<T,E>, transform: fn(T) -> U) -> Result<U,E> {
+        match self { Ok(value) => { return Ok(transform(value)); } Err(error) => { return Err(error); } }
+    }
+    fn map_err<F>(self: Result<T,E>, transform: fn(E) -> F) -> Result<T,F> {
+        match self { Ok(value) => { return Ok(value); } Err(error) => { return Err(transform(error)); } }
+    }
+    fn and<U>(self: Result<T,E>, alternate: Result<U,E>) -> Result<U,E> {
+        match self { Ok(value) => { return alternate; } Err(error) => { return Err(error); } }
+    }
+    fn and_then<U>(self: Result<T,E>, transform: fn(T) -> Result<U,E>) -> Result<U,E> {
+        match self { Ok(value) => { return transform(value); } Err(error) => { return Err(error); } }
+    }
+    fn or<F>(self: Result<T,E>, fallback: Result<T,F>) -> Result<T,F> {
+        match self { Ok(value) => { return Ok(value); } Err(error) => { return fallback; } }
+    }
+    fn or_else<F>(self: Result<T,E>, fallback: fn(E) -> Result<T,F>) -> Result<T,F> {
+        match self { Ok(value) => { return Ok(value); } Err(error) => { return fallback(error); } }
+    }
+    fn unwrap_or(self: Result<T,E>, fallback: T) -> T {
+        match self { Ok(value) => { return value; } Err(error) => { return fallback; } }
+    }
+    fn unwrap_or_else(self: Result<T,E>, fallback: fn(E) -> T) -> T {
+        match self { Ok(value) => { return value; } Err(error) => { return fallback(error); } }
+    }
+    fn ok(self: Result<T,E>) -> std::core::option::Option<T> {
+        match self { Ok(value) => { return Some(value); } Err(error) => { return None; } }
+    }
+    fn err(self: Result<T,E>) -> std::core::option::Option<E> {
+        match self { Ok(value) => { return None; } Err(error) => { return Some(error); } }
+    }
+}
+
+impl<T,E> Fallible for Result<T,E> {
+    type Output = T;
+    type Error = E;
+    fn is_ok(self: &Result<T,E>) -> bool { return self.is_ok(); }
+    fn is_err(self: &Result<T,E>) -> bool { return self.is_err(); }
+}
+
+pub fn failure<T>(code: i32, message: str) -> Result<T,Error> {
+    return Err(Error::new(code, message));
+}

@@ -1,0 +1,21 @@
+use std::net::address::SocketAddress;
+
+pub class HttpRequest { method: str, target: str }
+pub class HttpResponse { status: i32, body: str }
+
+impl HttpRequest {
+    static fn new(method: str, target: str) -> Self { return new HttpRequest { method: method, target: target }; }
+    fn method(self: &HttpRequest) -> str { return self.method; }
+    fn target(self: &HttpRequest) -> str { return self.target; }
+}
+impl HttpResponse {
+    fn status(self: &HttpResponse) -> i32 { return self.status; }
+    fn body(self: &HttpResponse) -> str { return self.body; }
+}
+
+pub class HttpClient { address: SocketAddress }
+impl HttpClient {
+    static fn new(address: SocketAddress) -> Self { return new HttpClient { address: address }; }
+}
+
+

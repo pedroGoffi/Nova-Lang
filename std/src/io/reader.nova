@@ -1,0 +1,48 @@
+use std::abi::llvm::read_fd;
+use std::core;
+use std::core::types::Size;
+use std::io::traits::Read;
+use std::error::error::Error;
+use std::error::result::Result;
+use std::memory::raw;
+use std::text::string::String;
+
+pub class Reader { descriptor: i32 }
+
+impl Reader {
+    static fn new(descriptor: i32) -> Self {
+        return new Reader { descriptor: descriptor };
+    }
+    [[unsafe]] fn read_raw(self: &Reader, destination: *mut u8, capacity: Size) -> i64 {
+        unsafe { return read_fd(self.descriptor, destination, capacity); }
+    }
+
+    // High-level convenience API. The raw pointer-based operation remains
+    // available through Read::read for callers that manage their own buffer.
+    fn read(self: Reader) -> std::text::string::String {
+        let capacity: Size = 4096;
+        let buffer: *mut u8 = unsafe { raw::alloc_elements::<u8>(capacity) };
+        let count: i64 = unsafe { self.read_raw(buffer, capacity - 1) };
+        if count < 0 {
+            unsafe { raw::deallocate_bytes(buffer); }
+            return std::text::string::String::new();
+        }
+        let end: *mut u8 = unsafe { raw::element_at::<u8>(buffer, count as Size) };
+        unsafe { *end = 0; }
+        let view: str = unsafe { core::borrow(buffer as Size) };
+        let result: std::text::string::String = std::text::string::String::from(view);
+        unsafe { raw::deallocate_bytes(buffer); }
+        return result;
+    }
+}
+
+impl Read for Reader {
+    fn read(self: &Reader, destination: *mut u8, capacity: Size) -> Result<Size,Error> {
+        let mut count: i64 = 0;
+        unsafe { count = self.read_raw(destination, capacity); }
+        if count < 0 { return Err(Error::new(count as i32, "could not read from stream")); }
+        return Ok(count as Size);
+    }
+}
+
+pub fn stdin() -> Reader { return Reader::new(0); }

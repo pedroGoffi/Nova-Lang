@@ -1,0 +1,11 @@
+use std::core::types::Size;
+use std::error::error::Error;
+use std::error::result::Result;
+
+pub trait Read {
+    fn read(self: &Self, destination: *mut u8, capacity: Size) -> Result<Size,Error>;
+}
+
+pub trait Write {
+    fn write(self: &Self, value: str) -> Result<Size,Error>;
+}

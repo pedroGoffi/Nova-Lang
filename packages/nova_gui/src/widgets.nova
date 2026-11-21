@@ -1,0 +1,485 @@
+use std::platform::sdl2;
+use super::traits::Widget;
+use super::traits::EventHandler;
+
+pub class Panel {
+    bounds: sdl2::Rect,
+    red: u8,
+    green: u8,
+    blue: u8,
+    alpha: u8,
+    border_red: u8,
+    border_green: u8,
+    border_blue: u8,
+    border_alpha: u8,
+    border_width: i32,
+    bordered: bool,
+    visible: bool,
+    enabled: bool,
+    focused: bool,
+    hovered: bool,
+    padding: i32,
+    shadow: bool,
+    header: bool,
+    header_height: i32,
+    accent_red: u8,
+    accent_green: u8,
+    accent_blue: u8,
+    grid: bool
+}
+
+impl Panel {
+    static fn new(x: i32, y: i32, width: i32, height: i32) -> Self {
+        return new Panel {
+            bounds: sdl2::rect(x, y, width, height),
+            red: 48,
+            green: 96,
+            blue: 180,
+            alpha: 255,
+            border_red: 120,
+            border_green: 180,
+            border_blue: 255,
+            border_alpha: 255,
+            border_width: 1,
+            bordered: true,
+            visible: true,
+            enabled: true,
+            focused: false,
+            hovered: false,
+            padding: 12,
+            shadow: true,
+            header: false,
+            header_height: 28,
+            accent_red: 70,
+            accent_green: 210,
+            accent_blue: 255,
+            grid: false
+        };
+    }
+
+    static fn builder(x: i32, y: i32, width: i32, height: i32) -> PanelBuilder {
+        return PanelBuilder::new(x, y, width, height);
+    }
+
+    fn set_fill_color(self: &mut Panel, red: u8, green: u8, blue: u8, alpha: u8) -> () {
+        self.red = red;
+        self.green = green;
+        self.blue = blue;
+        self.alpha = alpha;
+        return;
+    }
+
+    fn set_border_color(self: &mut Panel, red: u8, green: u8, blue: u8, alpha: u8) -> () {
+        self.border_red = red;
+        self.border_green = green;
+        self.border_blue = blue;
+        self.border_alpha = alpha;
+        return;
+    }
+
+    fn set_border_width(self: &mut Panel, width: i32) -> () {
+        if width < 0 {
+            self.border_width = 0;
+        } else {
+            self.border_width = width;
+        }
+        self.bordered = self.border_width > 0;
+        return;
+    }
+
+    fn move_to(self: &mut Panel, x: i32, y: i32) -> () {
+        self.bounds = sdl2::rect(x, y, self.bounds.width, self.bounds.height);
+        return;
+    }
+
+    fn resize(self: &mut Panel, width: i32, height: i32) -> () {
+        self.bounds = sdl2::rect(self.bounds.x, self.bounds.y, width, height);
+        return;
+    }
+
+    fn show(self: &mut Panel) -> () { self.visible = true; return; }
+    fn hide(self: &mut Panel) -> () { self.visible = false; return; }
+    fn enable(self: &mut Panel) -> () { self.enabled = true; return; }
+    fn disable(self: &mut Panel) -> () { self.enabled = false; return; }
+    fn focus(self: &mut Panel) -> () { self.focused = true; return; }
+    fn blur(self: &mut Panel) -> () { self.focused = false; return; }
+    fn hover(self: &mut Panel, value: bool) -> () { self.hovered = value; return; }
+    fn set_padding(self: &mut Panel, value: i32) -> () {
+        if value < 0 { self.padding = 0; } else { self.padding = value; }
+        return;
+    }
+    fn set_shadow(self: &mut Panel, value: bool) -> () { self.shadow = value; return; }
+    fn set_header(self: &mut Panel, value: bool) -> () { self.header = value; return; }
+    fn set_header_height(self: &mut Panel, value: i32) -> () { self.header_height = value; return; }
+    fn set_accent(self: &mut Panel, red: u8, green: u8, blue: u8) -> () {
+        self.accent_red = red;
+        self.accent_green = green;
+        self.accent_blue = blue;
+        return;
+    }
+    fn set_grid(self: &mut Panel, value: bool) -> () { self.grid = value; return; }
+
+    fn content_rect(self: &Panel) -> sdl2::Rect {
+        let inset = self.padding;
+        return sdl2::rect(
+            self.bounds.x + inset,
+            self.bounds.y + inset,
+            self.bounds.width - inset * 2,
+            self.bounds.height - inset * 2
+        );
+    }
+
+    fn contains(self: &Panel, x: i32, y: i32) -> bool {
+        return self.visible
+            && x >= self.bounds.x
+            && y >= self.bounds.y
+            && x < self.bounds.x + self.bounds.width
+            && y < self.bounds.y + self.bounds.height;
+    }
+}
+
+impl Widget for Panel {
+    fn draw(self: &Panel, renderer: &sdl2::Renderer) -> () {
+        if !self.visible { return; }
+        if self.shadow {
+            renderer.set_draw_color(8, 10, 16, 120);
+            let shadow = sdl2::rect(self.bounds.x + 6, self.bounds.y + 8, self.bounds.width, self.bounds.height);
+            renderer.fill_rect(&shadow);
+        }
+        let fill_alpha: u8 = if self.enabled { self.alpha } else { 100 };
+        renderer.set_draw_color(self.red, self.green, self.blue, fill_alpha);
+        renderer.fill_rect(&self.bounds);
+        if self.grid {
+            renderer.set_draw_color(48, 70, 96, 90);
+            let mut line_x = self.bounds.x + self.padding;
+            while line_x < self.bounds.x + self.bounds.width {
+                renderer.draw_line(line_x, self.bounds.y, line_x, self.bounds.y + self.bounds.height);
+                line_x += 32;
+            }
+            let mut line_y = self.bounds.y + self.padding;
+            while line_y < self.bounds.y + self.bounds.height {
+                renderer.draw_line(self.bounds.x, line_y, self.bounds.x + self.bounds.width, line_y);
+                line_y += 32;
+            }
+        }
+        if self.header {
+            renderer.set_draw_color(20, 34, 54, 255);
+            let header = sdl2::rect(self.bounds.x, self.bounds.y, self.bounds.width, self.header_height);
+            renderer.fill_rect(&header);
+            renderer.set_draw_color(self.accent_red, self.accent_green, self.accent_blue, 255);
+            let accent = sdl2::rect(self.bounds.x, self.bounds.y + self.header_height - 2, self.bounds.width, 2);
+            renderer.fill_rect(&accent);
+        }
+        if self.bordered {
+            let border_red: u8 = if self.focused { 180 } else if self.hovered { 150 } else { self.border_red };
+            let border_green: u8 = if self.focused { 220 } else if self.hovered { 200 } else { self.border_green };
+            let border_blue: u8 = if self.focused { 255 } else if self.hovered { 230 } else { self.border_blue };
+            renderer.set_draw_color(border_red, border_green, border_blue, self.border_alpha);
+            let mut layer: i32 = 0;
+            while layer < self.border_width {
+                let border = sdl2::rect(
+                    self.bounds.x + layer,
+                    self.bounds.y + layer,
+                    self.bounds.width - layer * 2,
+                    self.bounds.height - layer * 2
+                );
+                renderer.draw_rect(&border);
+                layer += 1;
+            }
+        }
+        return;
+    }
+}
+
+// Fluent configuration object for complex panels. It keeps presentation
+// policy out of application layout code and produces an ordinary Panel.
+pub class PanelBuilder {
+    bounds: sdl2::Rect,
+    red: u8,
+    green: u8,
+    blue: u8,
+    alpha: u8,
+    border_red: u8,
+    border_green: u8,
+    border_blue: u8,
+    border_alpha: u8,
+    border_width: i32,
+    bordered: bool,
+    visible: bool,
+    enabled: bool,
+    padding: i32,
+    shadow: bool,
+    header: bool,
+    header_height: i32,
+    accent_red: u8,
+    accent_green: u8,
+    accent_blue: u8,
+    grid: bool
+}
+
+impl PanelBuilder {
+    static fn new(x: i32, y: i32, width: i32, height: i32) -> Self {
+        return new PanelBuilder {
+            bounds: sdl2::rect(x, y, width, height),
+            red: 28, green: 40, blue: 60, alpha: 255,
+            border_red: 70, border_green: 120, border_blue: 170, border_alpha: 255,
+            border_width: 1, bordered: true, visible: true, enabled: true,
+            padding: 12, shadow: true, header: false, header_height: 28,
+            accent_red: 70, accent_green: 210, accent_blue: 255, grid: false
+        };
+    }
+
+    fn fill(self: PanelBuilder, red: u8, green: u8, blue: u8, alpha: u8) -> PanelBuilder {
+        let mut result = self;
+        result.red = red; result.green = green; result.blue = blue; result.alpha = alpha; return result;
+    }
+    fn border(self: PanelBuilder, red: u8, green: u8, blue: u8, width: i32) -> PanelBuilder {
+        let mut result = self;
+        result.border_red = red; result.border_green = green; result.border_blue = blue;
+        result.border_width = width; result.bordered = width > 0; return result;
+    }
+    fn padding(self: PanelBuilder, value: i32) -> PanelBuilder {
+        let mut result = self;
+        if value < 0 { result.padding = 0; } else { result.padding = value; }
+        return result;
+    }
+    fn shadow(self: PanelBuilder, value: bool) -> PanelBuilder { let mut result = self; result.shadow = value; return result; }
+    fn header(self: PanelBuilder, value: bool, height: i32) -> PanelBuilder {
+        let mut result = self;
+        result.header = value; result.header_height = height; return result;
+    }
+    fn accent(self: PanelBuilder, red: u8, green: u8, blue: u8) -> PanelBuilder {
+        let mut result = self;
+        result.accent_red = red; result.accent_green = green; result.accent_blue = blue; return result;
+    }
+    fn grid(self: PanelBuilder, value: bool) -> PanelBuilder { let mut result = self; result.grid = value; return result; }
+    fn disabled(self: PanelBuilder) -> PanelBuilder { let mut result = self; result.enabled = false; return result; }
+
+    fn build(self: PanelBuilder) -> Panel {
+        return new Panel {
+            bounds: self.bounds,
+            red: self.red, green: self.green, blue: self.blue, alpha: self.alpha,
+            border_red: self.border_red, border_green: self.border_green,
+            border_blue: self.border_blue, border_alpha: self.border_alpha,
+            border_width: self.border_width, bordered: self.bordered,
+            visible: self.visible, enabled: self.enabled, focused: false,
+            hovered: false, padding: self.padding, shadow: self.shadow,
+            header: self.header, header_height: self.header_height,
+            accent_red: self.accent_red, accent_green: self.accent_green,
+            accent_blue: self.accent_blue, grid: self.grid
+        };
+    }
+}
+
+// A tab is intentionally lightweight: the editor owns the actual text
+// storage, while the workspace owns tab state and presentation.
+pub class BufferTab {
+    label: str,
+    dirty: bool,
+    active: bool
+}
+
+impl BufferTab {
+    static fn new(label: str) -> Self {
+        return new BufferTab { label: label, dirty: false, active: false };
+    }
+    fn mark_dirty(self: &mut BufferTab) -> () { self.dirty = true; return; }
+    fn mark_clean(self: &mut BufferTab) -> () { self.dirty = false; return; }
+    fn select(self: &mut BufferTab) -> () { self.active = true; return; }
+    fn deselect(self: &mut BufferTab) -> () { self.active = false; return; }
+}
+
+pub class TabBar {
+    bounds: sdl2::Rect,
+    font: sdl2::Font,
+    count: i32,
+    active: i32,
+    dirty0: bool,
+    dirty1: bool,
+    dirty2: bool,
+    label0: str,
+    label1: str,
+    label2: str,
+    focused: bool,
+    visible: bool
+}
+
+impl TabBar {
+    static fn new(x: i32, y: i32, width: i32, height: i32, font: sdl2::Font) -> Self {
+        return new TabBar {
+            bounds: sdl2::rect(x, y, width, height),
+            font: font,
+            count: 0,
+            active: 0,
+            dirty0: false,
+            dirty1: false,
+            dirty2: false,
+            label0: "",
+            label1: "",
+            label2: "",
+            focused: true,
+            visible: true
+        };
+    }
+
+    fn active(self: &TabBar) -> i32 { return self.active; }
+    fn count(self: &TabBar) -> i32 { return self.count; }
+    fn select(self: &mut TabBar, index: i32) -> () {
+        if index >= 0 && index < self.count { self.active = index; }
+        return;
+    }
+    fn add_buffer(self: &mut TabBar, label: str) -> () {
+        if self.count >= 3 { return; }
+        if self.count == 0 { self.label0 = label; }
+        if self.count == 1 { self.label1 = label; }
+        if self.count == 2 { self.label2 = label; }
+        self.count += 1;
+        self.active = self.count - 1;
+        return;
+    }
+    fn set_dirty(self: &mut TabBar, index: i32, value: bool) -> () {
+        if index == 0 { self.dirty0 = value; }
+        if index == 1 { self.dirty1 = value; }
+        if index == 2 { self.dirty2 = value; }
+        return;
+    }
+    fn close_buffer(self: &mut TabBar) -> () {
+        if self.count > 1 {
+            self.count -= 1;
+            if self.active >= self.count { self.active = self.count - 1; }
+        }
+        return;
+    }
+    fn next(self: &mut TabBar) -> () {
+        self.active += 1;
+        if self.active >= self.count { self.active = 0; }
+        return;
+    }
+    fn previous(self: &mut TabBar) -> () {
+        if self.active == 0 { self.active = self.count - 1; } else { self.active -= 1; }
+        return;
+    }
+    fn handle_key(self: &mut TabBar, key: i32) -> () {
+        // Tab changes workspace buffers without stealing the editor arrows.
+        if key == sdl2::KEY_TAB { self.next(); return; }
+        return;
+    }
+    fn focus(self: &mut TabBar) -> () { self.focused = true; return; }
+    fn blur(self: &mut TabBar) -> () { self.focused = false; return; }
+    fn close(self: &mut TabBar) -> () { self.font.close(); return; }
+
+    fn title(self: &TabBar, index: i32) -> str {
+        if index == 0 { return self.label0; }
+        if index == 1 { return self.label1; }
+        return self.label2;
+    }
+}
+
+impl Widget for TabBar {
+    fn draw(self: &TabBar, renderer: &sdl2::Renderer) -> () {
+        if !self.visible { return; }
+        if self.count == 0 { return; }
+        renderer.set_draw_color(13, 18, 30, 255);
+        renderer.fill_rect(&self.bounds);
+        let width = self.bounds.width / self.count;
+        let mut index: i32 = 0;
+        while index < self.count {
+            let active = index == self.active;
+            let tab = sdl2::rect(self.bounds.x + index * width, self.bounds.y, width - 2, self.bounds.height);
+            if active {
+                renderer.set_draw_color(35, 62, 92, 255);
+                renderer.fill_rect(&tab);
+                renderer.set_draw_color(80, 220, 255, 255);
+                renderer.draw_line(tab.x, tab.y + tab.height - 2, tab.x + tab.width, tab.y + tab.height - 2);
+            } else {
+                renderer.set_draw_color(22, 30, 46, 255);
+                renderer.fill_rect(&tab);
+            }
+            if self.font.valid() {
+                let label = self.title(index);
+                let surface = self.font.render(label, 190, 215, 235, 255);
+                let texture = sdl2::texture_from_surface(renderer, &surface);
+                let source = sdl2::rect(0, 0, surface.width(), surface.height());
+                let destination = sdl2::rect(tab.x + 10, tab.y + 7, surface.width(), surface.height());
+                renderer.copy(&texture, &source, &destination);
+                texture.close();
+                surface.close();
+            }
+            let dirty = if index == 0 { self.dirty0 } else if index == 1 { self.dirty1 } else { self.dirty2 };
+            if dirty {
+                renderer.set_draw_color(245, 190, 80, 255);
+                let indicator = sdl2::rect(tab.x + tab.width - 14, tab.y + 12, 6, 6);
+                renderer.fill_rect(&indicator);
+            }
+            index += 1;
+        }
+        return;
+    }
+}
+
+pub class BufferList {
+    bounds: sdl2::Rect,
+    font: sdl2::Font,
+    active: i32,
+    count: i32,
+    label0: str,
+    label1: str,
+    label2: str,
+    visible: bool
+}
+
+impl BufferList {
+    static fn new(x: i32, y: i32, width: i32, height: i32, font: sdl2::Font) -> Self {
+        return new BufferList { bounds: sdl2::rect(x, y, width, height), font: font, active: 0, count: 0, label0: "", label1: "", label2: "", visible: true };
+    }
+    fn add_buffer(self: &mut BufferList, label: str, index: i32) -> () {
+        if index == 0 { self.label0 = label; if self.count < 1 { self.count = 1; } }
+        if index == 1 { self.label1 = label; if self.count < 2 { self.count = 2; } }
+        if index == 2 { self.label2 = label; if self.count < 3 { self.count = 3; } }
+        return;
+    }
+    fn select(self: &mut BufferList, index: i32) -> () {
+        if index >= 0 && index < 8 { self.active = index; }
+        return;
+    }
+    fn count(self: &BufferList) -> i32 { return self.count; }
+    fn close(self: &mut BufferList) -> () { self.font.close(); return; }
+    fn draw_row(self: &BufferList, renderer: &sdl2::Renderer, index: i32, label: str) -> () {
+        let row = sdl2::rect(self.bounds.x + 8, self.bounds.y + 42 + index * 34, self.bounds.width - 16, 28);
+        if index == self.active { renderer.set_draw_color(38, 72, 102, 255); } else { renderer.set_draw_color(23, 31, 48, 255); }
+        renderer.fill_rect(&row);
+        if self.font.valid() {
+            let surface = self.font.render(label, 170, 205, 225, 255);
+            let texture = sdl2::texture_from_surface(renderer, &surface);
+            let source = sdl2::rect(0, 0, surface.width(), surface.height());
+            let destination = sdl2::rect(row.x + 8, row.y + 5, surface.width(), surface.height());
+            renderer.copy(&texture, &source, &destination);
+            texture.close();
+            surface.close();
+        }
+        return;
+    }
+}
+
+impl Widget for BufferList {
+    fn draw(self: &BufferList, renderer: &sdl2::Renderer) -> () {
+        if !self.visible { return; }
+        if self.count == 0 { return; }
+        renderer.set_draw_color(17, 23, 36, 255);
+        renderer.fill_rect(&self.bounds);
+        renderer.set_draw_color(70, 210, 255, 255);
+        renderer.draw_line(self.bounds.x + self.bounds.width - 1, self.bounds.y, self.bounds.x + self.bounds.width - 1, self.bounds.y + self.bounds.height);
+        self.draw_row(renderer, 0, self.label0);
+        if self.count > 1 { self.draw_row(renderer, 1, self.label1); }
+        if self.count > 2 { self.draw_row(renderer, 2, self.label2); }
+        return;
+    }
+}
+
+pub class QuitOnClose { }
+
+impl EventHandler for QuitOnClose {
+    fn handle(self: &QuitOnClose, event: u32) -> bool {
+        return event == sdl2::EVENT_QUIT;
+    }
+}

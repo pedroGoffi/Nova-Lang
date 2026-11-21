@@ -1,0 +1,4 @@
+pub typedef Handle = u64;
+pub typedef Size = u64;
+pub typedef Word = u64;
+pub typedef Millis = u64;

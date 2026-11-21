@@ -1,0 +1,91 @@
+use std::core::types::Handle;
+use std::core::types::Size;
+
+pub concept Awaitable<T> = has_method<T,await_result>;
+
+pub struct Task<T> { handle: Handle, marker: [T; 0] }
+pub struct Future<T> { handle: Handle, marker: [T; 0] }
+
+pub fn manage(handle: Handle) -> Task<i64> {
+    return new Task<i64> { handle: handle, marker: [] };
+}
+
+[[unsafe]] pub fn manage_typed<T>(handle: Handle) -> Task<T> {
+    return new Task<T> { handle: handle, marker: [] };
+}
+
+[[unsafe]] pub fn future_typed<T>(handle: Handle) -> Future<T> {
+    return new Future<T> { handle: handle, marker: [] };
+}
+
+pub fn future(handle: Handle) -> Future<i64> {
+    return new Future<i64> { handle: handle, marker: [] };
+}
+
+pub fn delay(milliseconds: Size) -> Task<i64> {
+    return new Task<i64> {
+        handle: std::abi::native::task::native_sleep_ms(milliseconds),
+        marker: []
+    };
+}
+
+pub fn start(handle: Handle) -> Task<i64> {
+    std::abi::native::task::native_spawn(handle);
+    return new Task<i64> { handle: handle, marker: [] };
+}
+
+impl<T> Task<T> {
+    fn wait(self: &Task<T>) -> T {
+        return std::abi::native::task::native_block_on(self.handle) as T;
+    }
+    fn await_result(self: &Task<T>) -> T {
+        return std::abi::native::task::native_await_value(self.handle) as T;
+    }
+    fn finished(self: &Task<T>) -> bool {
+        return std::abi::native::coro::native_done(self.handle);
+    }
+    fn schedule(self: &Task<T>) -> () {
+        std::abi::native::task::native_spawn(self.handle);
+        return;
+    }
+    fn drop(self: Task<T>) -> () {
+        std::abi::native::coro::native_drop(self.handle);
+        return;
+    }
+}
+
+impl<T> Future<T> {
+    fn wait(self: &Future<T>) -> T {
+        return std::abi::native::task::native_block_on(self.handle) as T;
+    }
+    fn await_result(self: &Future<T>) -> T {
+        return std::abi::native::task::native_await_value(self.handle) as T;
+    }
+    fn finished(self: &Future<T>) -> bool {
+        return std::abi::native::coro::native_done(self.handle);
+    }
+    fn schedule(self: &Future<T>) -> () {
+        std::abi::native::task::native_spawn(self.handle);
+        return;
+    }
+    fn drop(self: Future<T>) -> () {
+        std::abi::native::coro::native_drop(self.handle);
+        return;
+    }
+}
+
+pub struct Scheduler { active: bool }
+
+pub fn new_scheduler() -> Scheduler {
+    return new Scheduler { active: true };
+}
+
+impl Scheduler {
+    fn poll(self: &Scheduler) -> i32 {
+        return std::abi::native::task::native_tick();
+    }
+    fn drive(self: &Scheduler) -> () {
+        std::abi::native::task::native_run_until_idle();
+        return;
+    }
+}

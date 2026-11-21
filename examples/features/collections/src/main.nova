@@ -1,0 +1,9 @@
+import std;
+
+struct Bag { values: [i32; 3] }
+
+fn main() -> i32 {
+    // A struct groups related values; its fields can contain arrays.
+    let bag = new Bag { values: [10, 20, 12] };
+    return bag.values[0] + bag.values[1] + bag.values[2] - 42;
+}

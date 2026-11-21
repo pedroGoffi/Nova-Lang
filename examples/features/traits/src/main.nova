@@ -1,0 +1,11 @@
+import std;
+
+// A trait defines shared behavior; impl supplies it for a concrete type.
+trait Measure { fn measure(self: &Self) -> i32; }
+struct Item { size: i32 }
+impl Measure for Item { fn measure(self: &Item) -> i32 { return self.size; } }
+
+fn main() -> i32 {
+    let item = new Item { size: 42 };
+    return item.measure() - 42;
+}

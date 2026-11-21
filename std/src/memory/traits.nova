@@ -1,0 +1,49 @@
+use std::core::types::Size;
+use std::error::error::Error;
+use std::error::result::Result;
+use std::memory::layout::Layout;
+use std::memory::nonnull::NonNull;
+use std::memory::errors::AllocError;
+
+// Compiler-known ownership properties remain concepts: they describe layout
+// and destruction rules that cannot be implemented by an ordinary trait.
+pub concept Storable<T> = storable<T>;
+pub concept Copyable<T> = copyable<T>;
+pub concept Destructible<T> = destructible<T>;
+
+// A memory provider owns the raw allocation boundary. Safe callers receive a
+// Result; only implementations are allowed to cross the raw-pointer boundary.
+pub trait Allocator {
+    fn allocate(self: &Self, layout: Layout) -> Result<NonNull<u8>,AllocError>;
+    fn deallocate(self: &Self, pointer: NonNull<u8>, layout: Layout) -> Result<(),AllocError>;
+    fn reallocate(self: &Self, pointer: NonNull<u8>, old_layout: Layout, new_layout: Layout) -> Result<NonNull<u8>,AllocError>;
+}
+
+// Typed backing storage used by Vec, String, arenas and future collections.
+pub trait MemoryBlock {
+    fn data_ptr(self: &Self) -> *mut u8;
+    fn capacity(self: &Self) -> Size;
+}
+
+pub trait Resizable extends MemoryBlock {
+    fn reserve(self: &mut Self, requested: Size) -> Result<(),Error>;
+}
+
+pub trait Owner {
+    fn is_null(self: &Self) -> bool;
+}
+
+pub trait ReferenceCounted {
+    fn strong_count(self: &Self) -> Size;
+}
+
+pub trait Buffer {
+    fn len(self: &Self) -> Size;
+    fn capacity(self: &Self) -> Size;
+}
+
+pub concept AllocatorLike<T> = implements<T,Allocator>;
+pub concept MemoryBlockLike<T> = implements<T,MemoryBlock>;
+pub concept ResizableMemory<T> = implements<T,Resizable>;
+pub concept OwnerLike<T> = implements<T,Owner>;
+pub concept BufferLike<T> = implements<T,Buffer>;

@@ -16,14 +16,14 @@ fn compile(source: &str) -> Result<String, String> {
 fn c_varargs_have_actual_llvm_c_abi_and_default_promotions() {
     let ir = compile(
         r#"
-      namespace std {namespace libc {namespace stdio {
+      namespace std {namespace abi {namespace native {namespace libc {namespace stdio {
          [[unsafe]] extern fn printf(fmt:str, ...) -> i32;
-      }}}
+      }}}}}
       fn main() -> i32 {
          let small:u8 = 7;
          let single:f32 = 1.25;
          let number:i64 = 100;
-         unsafe {std::libc::stdio::printf("%d %f %ld\n", small, single, number);}
+         unsafe {std::abi::native::libc::stdio::printf("%d %f %ld\n", small, single, number);}
          return 0;
       }
     "#,
@@ -43,11 +43,11 @@ fn c_varargs_have_actual_llvm_c_abi_and_default_promotions() {
 fn c_vararg_unsafe_is_required() {
     let err = compile(
         r#"
-      namespace std {namespace libc {namespace stdio {
+      namespace std {namespace abi {namespace native {namespace libc {namespace stdio {
          [[unsafe]] extern fn printf(fmt:str, ...) -> i32;
-      }}}
+      }}}}}
       fn main() -> i32 {
-         std::libc::stdio::printf("%d", 7);
+         std::abi::native::libc::stdio::printf("%d", 7);
          return 0;
       }
     "#,
@@ -60,13 +60,13 @@ fn c_vararg_unsafe_is_required() {
 fn c_vararg_rejects_aggregate_argument() {
     let err = compile(
         r#"
-      namespace std {namespace libc {namespace stdio {
+      namespace std {namespace abi {namespace native {namespace libc {namespace stdio {
          [[unsafe]] extern fn printf(fmt:str, ...) -> i32;
-      }}}
+      }}}}}
       struct Point {x:i64, y:i64}
       fn main() -> i32 {
          let point:Point=new Point{x:1,y:2};
-         unsafe {std::libc::stdio::printf("%s", point);}
+         unsafe {std::abi::native::libc::stdio::printf("%s", point);}
          return 0;
       }
     "#,
@@ -105,15 +105,24 @@ fn empty_c_ellipsis_rejected() {
 
 #[test]
 fn embedded_nested_std_links_to_real_libc_symbols() {
-    let (program, _sources) = package::load_detailed(Path::new("examples/packages/libc_demo"))
-        .expect("Nova.toml and std modules must load");
-    let linked = surface::lower(&program).expect("resolve libc module public externs");
-    let typed = hir::lower(&linked).expect("type-check libc and std::io pack");
-    let mir = mir::lower(&typed).expect("lower libc to MIR");
-    let ir = codegen::generate(&mir);
+    let worker = std::thread::Builder::new()
+        .name("libc-embedded-test".into())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            let (program, _sources) = package::load_detailed(Path::new("examples/packages/libc_demo"))
+                .expect("Nova.toml and std modules must load");
+            let linked = surface::lower(&program).expect("resolve libc module public externs");
+            let typed = hir::lower(&linked).expect("type-check libc and std::old::io pack");
+            let mir = mir::lower(&typed).expect("lower libc to MIR");
+            codegen::generate(&mir)
+        })
+        .expect("spawn libc embedded test")
+        .join()
+        .expect("libc embedded test thread");
+    let ir = worker;
     assert!(ir.contains("declare i32 @printf(ptr, ...)"), "{ir}");
     assert!(ir.contains("declare i64 @strlen(ptr)"), "{ir}");
-    assert!(ir.contains("@std__io__printf_i64__pack_2"), "{ir}");
+    assert!(ir.contains("std__old__io__println"), "{ir}");
     assert!(ir.contains("call i32 (ptr, ...) @printf"), "{ir}");
 }
 
@@ -141,11 +150,11 @@ fn bool_is_promoted_to_c_int() {
 fn annotated_libc_functions_need_unsafe() {
     let err = compile(
         r#"
-      namespace std {namespace libc {namespace string {
+      namespace std {namespace abi {namespace native {namespace libc {namespace string {
          [[unsafe]] extern fn strlen(text:str)->usize;
-      }}}
+      }}}}}
       fn main()->i32 {
-        let n:usize=std::libc::string::strlen("Nova");
+        let n:usize=std::abi::native::libc::string::strlen("Nova");
         return 0;
       }
     "#,

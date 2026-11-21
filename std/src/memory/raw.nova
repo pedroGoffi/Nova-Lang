@@ -1,0 +1,84 @@
+use std::core;
+use std::core::panic;
+use std::core::types::Size;
+
+pub concept RawPointer<T> = pointer<T>;
+
+[[unsafe]] pub fn allocate_bytes(size: Size, alignment: Size) -> *mut u8 {
+    if alignment == 0 || (alignment & (alignment - 1)) != 0 {
+        panic::fail("allocation alignment must be power of two");
+    }
+    let mut actual: Size = alignment;
+    if actual < 8 { actual = 8; }
+    let mut requested: Size = size;
+    if requested == 0 { requested = 1; }
+    let padding: Size = actual - 1;
+    if requested > (-1 as Size) - padding { panic::fail("allocation overflow"); }
+    let rounded: Size = ((requested + padding) / actual) * actual;
+    unsafe { return core::allocate(actual, rounded) as (*mut u8); }
+}
+
+[[unsafe]] pub fn deallocate_bytes(pointer: *mut u8) -> () {
+    if (pointer as Size) == 0 { return; }
+    unsafe { core::deallocate(pointer as Size); }
+    return;
+}
+
+[[unsafe]] pub fn reallocate_bytes(pointer: *mut u8, old_size: Size,
+    new_size: Size, alignment: Size) -> *mut u8 {
+    let result: *mut u8 = allocate_bytes(new_size, alignment);
+    let mut count: Size = old_size;
+    if new_size < count { count = new_size; }
+    unsafe {
+        if count > 0 { core::move(result, pointer as (*const u8), count); }
+        deallocate_bytes(pointer);
+    }
+    return result;
+}
+
+[[unsafe]] pub fn alloc_record<T>() -> *mut T {
+    unsafe { return allocate_bytes(size_of::<T>(), align_of::<T>()) as (*mut T); }
+}
+[[unsafe]] pub fn free_record<T>(pointer: *mut T) -> () {
+    if (pointer as Size) == 0 { return; }
+    unsafe { deallocate_bytes(pointer as (*mut u8)); }
+    return;
+}
+[[unsafe]] pub fn alloc_elements<T>(count: Size) -> *mut T {
+    let stride: Size = size_of::<T>();
+    if stride == 0 { panic::fail("zero-sized allocation unsupported"); }
+    if count > (-1 as Size) / stride { panic::fail("element allocation overflow"); }
+    unsafe { return allocate_bytes(count * stride, align_of::<T>()) as (*mut T); }
+}
+[[unsafe]] pub fn reallocate_elements<T>(data: *mut T, old_count: Size, new_count: Size) -> *mut T {
+    let stride: Size = size_of::<T>();
+    if stride == 0 { panic::fail("zero-sized allocation unsupported"); }
+    let max: Size = -1 as Size;
+    if old_count > max / stride || new_count > max / stride {
+        panic::fail("element reallocation overflow");
+    }
+    unsafe {
+        let result: *mut T = allocate_bytes(new_count * stride, align_of::<T>()) as (*mut T);
+        let mut count: Size = old_count * stride;
+        if new_count < old_count { count = new_count * stride; }
+        if count > 0 { core::move(result as (*mut u8), data as (*const u8), count); }
+        deallocate_bytes(data as (*mut u8));
+        return result;
+    }
+}
+[[unsafe]] pub fn element_at<T>(data: *mut T, index: Size) -> *mut T {
+    let stride: Size = size_of::<T>();
+    if stride == 0 || index > (-1 as Size) / stride {
+        panic::fail("element pointer offset overflow");
+    }
+    unsafe { return byte_offset(data as (*mut u8), index * stride) as (*mut T); }
+}
+[[unsafe]] pub fn take_from<T>(source: *mut T) -> T {
+    if (source as Size) == 0 { panic::fail("take from a null pointer"); }
+    unsafe { return *source; }
+}
+[[unsafe]] pub fn drop_in_place<T>(source: *mut T) -> () {
+    if (source as Size) == 0 { return; }
+    unsafe { let retiring: T = take_from::<T>(source); }
+    return;
+}

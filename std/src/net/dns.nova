@@ -1,0 +1,48 @@
+use std::abi::llvm;
+use std::core::types::Word;
+use std::error::error::Error;
+use std::error::result::Result;
+use std::memory::raw;
+use std::net::address::SocketAddress;
+use std::net::error::failure;
+
+pub class Hostname { value: str }
+impl Hostname {
+    static fn new(value: str) -> Self { return new Hostname { value: value }; }
+    fn as_str(self: &Hostname) -> str { return self.value; }
+}
+
+// Uses the host resolver and converts the first IPv4 answer into Nova-owned bytes.
+pub fn resolve(host: str, service: str) -> Result<SocketAddress,Error> {
+    let result_slot: *mut *mut u8 = unsafe { raw::alloc_record::<*mut u8>() };
+    let status = unsafe { llvm::net_resolve(host, service, result_slot as (*const u8), result_slot) };
+    let result: *mut u8 = unsafe { *result_slot };
+    unsafe { raw::free_record::<*mut u8>(result_slot); }
+    let result_address: Word = unsafe { result as Word };
+    if status != 0 || result_address == 0 { return failure::<SocketAddress>(status, "could not resolve hostname"); }
+    let address: *mut u8 = unsafe { load_word(result_address + 24) as (*mut u8) };
+    if byte(address, 0) != 2 as u8 {
+        unsafe { llvm::net_free_addresses(result); }
+        return failure::<SocketAddress>(-1, "hostname did not resolve to IPv4");
+    }
+    let copy = SocketAddress::ipv4(
+        byte(address, 4) as i32, byte(address, 5) as i32,
+        byte(address, 6) as i32, byte(address, 7) as i32,
+        (byte(address, 2) as i32) * 256 + byte(address, 3) as i32
+    );
+    unsafe { llvm::net_free_addresses(result); }
+    return Ok(copy);
+}
+
+fn byte(pointer: *mut u8, index: i32) -> u8 {
+    return unsafe { *raw::element_at(pointer, index as u64) };
+}
+fn load_word(address: Word) -> Word {
+    let mut value: Word = 0;
+    let mut index: Word = 0;
+    while index < 8 {
+        value |= (std::core::load(std::core::offset(address, index)) as Word) << (index * 8);
+        index += 1;
+    }
+    return value;
+}

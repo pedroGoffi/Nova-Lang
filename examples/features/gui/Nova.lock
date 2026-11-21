@@ -1,0 +1,10 @@
+# Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
+gui_example 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/features/gui hash=60494e2813ecc542
+nova_gui 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_gui hash=a697f552439d8353
+std 0.20.0 builtin hash=99a226b8e30e7093
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/features/gui/src/main.nova hash=60494e2813ecc542
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_gui/src/lib.nova hash=a697f552439d8353
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_gui/src/traits.nova hash=e6f6b34357fd78d2
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_gui/src/window.nova hash=cce36f42143c7e52
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_gui/src/widgets.nova hash=ebe6072c418675b2
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/packages/nova_gui/src/editor.nova hash=7a247192d7792ac8

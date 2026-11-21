@@ -1,0 +1,11 @@
+pub trait Optional {
+    fn is_some(self: &Self) -> bool;
+    fn is_none(self: &Self) -> bool;
+}
+
+pub trait Fallible {
+    type Output;
+    type Error;
+    fn is_ok(self: &Self) -> bool;
+    fn is_err(self: &Self) -> bool;
+}

@@ -20,6 +20,12 @@ pub struct AttributeSchema {
     pub required_methods: HashSet<String>,
     pub requires: HashSet<String>,
     pub conflicts: HashSet<String>,
+    /// Declarative expansion stage for framework decorators.
+    pub phase: String,
+    /// Stable ordering within a phase. Higher priorities run first.
+    pub priority: i64,
+    /// Whether the same decorator may appear more than once on one target.
+    pub repeatable: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -44,10 +50,17 @@ fn builtin_attribute(name: &str, target: &str) -> bool {
         "derive" | "repr" | "capabilities" | "requires" => target == "struct" || target == "enum",
         "operator" => target == "trait",
         "meta_attribute" | "meta_effect" | "meta_protocol" | "meta_derive" | "meta_derive_impl" => target == "trait",
-        "unsafe" | "pure" | "io" | "async" | "const" | "comptime" | "comptime_assert" | "meta_intrinsic" | "meta_proc_intrinsic" | "proc_derive" | "proc_attribute" | "proc_macro" => target == "function",
+        "unsafe" | "pure" | "io" | "async" | "const" | "static" | "comptime" | "comptime_assert" | "llvm_intrinsic" | "meta_intrinsic" | "meta_proc_intrinsic" | "proc_derive" | "proc_attribute" | "proc_macro" | "proc_field_validator" => target == "function",
         "effects" => target == "function",
         _ => false,
     }
+}
+
+fn builtin_effect(name: &str) -> bool {
+    matches!(
+        name,
+        "async" | "throws" | "unsafe" | "io" | "blocking" | "alloc" | "spawn" | "cancel"
+    )
 }
 
 impl Registry {
@@ -59,6 +72,27 @@ impl Registry {
         Ok(registry)
     }
 
+    /// Returns the compiler ordering contract for decorators declared by the
+    /// standard library. This deliberately performs only declaration
+    /// collection: application-specific procedural decorators are not known
+    /// yet, and must not make the ordering pass fail.
+    pub fn decorator_orders(program: &Program) -> Result<HashMap<String, (u8, i64)>, String> {
+        let mut registry = Self::default();
+        registry.declarations(&program.items, "")?;
+        Ok(registry
+            .attributes
+            .into_iter()
+            .map(|(name, schema)| {
+                let phase = match schema.phase.as_str() {
+                    "discover" => 0,
+                    "generate" => 1,
+                    _ => 2,
+                };
+                (name, (phase, schema.priority))
+            })
+            .collect())
+    }
+
     fn declarations(&mut self, items: &[Item], ns: &str) -> Result<(), String> {
         for item in items {
             match item {
@@ -68,7 +102,7 @@ impl Registry {
                     for marker in &f.attributes {
                         if marker.name != "meta_intrinsic" {continue;}
                         let origin=qual(ns,&f.name);
-                        if ns != "std::meta" || marker.args.len()!=1 ||
+                        if !matches!(ns, "std::meta" | "std::introspection::meta") || marker.args.len()!=1 ||
                             !matches!(marker.args[0].as_str(),"field_count"|"has_field"|"type_name"|"field_type"|"type_kind"|"variant_count"|"has_variant") {
                             return Err(format!("error[NOVA-META023]: invalid reflection primitive declaration '{origin}'"));
                         }
@@ -97,14 +131,27 @@ impl Registry {
                                 let mut required_methods = HashSet::new();
                                 let mut requires = HashSet::new();
                                 let mut conflicts = HashSet::new();
+                                let mut phase = "validate".to_string();
+                                let mut priority = 0_i64;
+                                let mut repeatable = false;
                                 let mut directives = HashSet::new();
                                 for directive in &a.args {
                                     if !directives.insert(directive.as_str()) {
                                         return Err(format!("error[NOVA-META002]: repeated directive '{directive}' in '{origin}'"));
                                     }
+                                    if directive == "repeatable" {
+                                        repeatable = true;
+                                    } else if let Some(raw) = directive.strip_prefix("phase_") {
+                                        if !matches!(raw, "discover" | "generate" | "validate") {
+                                            return Err(format!("error[NOVA-META012]: unknown decorator phase '{raw}' in '{origin}'"));
+                                        }
+                                        phase = raw.to_string();
+                                    } else if let Some(raw) = directive.strip_prefix("priority_") {
+                                        priority = raw.parse::<i64>().map_err(|_| format!("error[NOVA-META012]: invalid decorator priority '{directive}' in '{origin}'"))?;
+                                    } else
                                     if ["lint_unused", "lint_call"].contains(&directive.as_str()) {
                                         lint_actions.insert(directive.clone());
-                                    } else if ["struct", "enum", "trait", "function"].contains(&directive.as_str()) {
+                                    } else if ["struct", "enum", "trait", "function", "field", "parameter", "return_type"].contains(&directive.as_str()) {
                                         targets.insert(directive.clone());
                                     } else if directive=="args_any" {
                                         if explicit_arity {return Err(format!("error[NOVA-META012]: conflicting argument contracts on '{origin}'"));}
@@ -165,10 +212,10 @@ impl Registry {
                                 if lint_actions.contains("lint_call") && !targets.contains("function") {
                                     return Err(format!("error[NOVA-META002]: lint_call requires a function target in '{origin}'"));
                                 }
-                                if builtin_attribute(&t.name, "struct") || builtin_attribute(&t.name, "trait") || builtin_attribute(&t.name, "function") {
+                                if builtin_attribute(&t.name, "struct") || builtin_attribute(&t.name, "trait") || builtin_attribute(&t.name, "function") || builtin_attribute(&t.name, "field") {
                                     return Err(format!("error[NOVA-META003]: '{origin}' attempts to replace a core attribute"));
                                 }
-                                if self.attributes.insert(t.name.clone(), AttributeSchema {targets, definition: origin.clone(), lint_actions, min_args, max_args, min_fields, max_fields, required_fields, field_types, required_methods, requires, conflicts}).is_some() {
+                                if self.attributes.insert(t.name.clone(), AttributeSchema {targets, definition: origin.clone(), lint_actions, min_args, max_args, min_fields, max_fields, required_fields, field_types, required_methods, requires, conflicts, phase, priority, repeatable}).is_some() {
                                     return Err(format!("error[NOVA-META003]: attribute '#[{}]' defined more than once",t.name));
                                 }
                             }
@@ -231,25 +278,29 @@ impl Registry {
     fn verify_attributes(&self, attrs: &[Attribute], target: &str, owner: &str, shape: Shape<'_>) -> Result<(), String> {
         let mut seen = HashSet::new();
         for a in attrs {
+            if a.name.starts_with("__nova_return::") { continue; }
+            let short_name=a.name.rsplit("::").next().unwrap_or(&a.name);
             if !seen.insert(a.name.as_str()) {
                 // A type may have both `with Trait` and explicit capabilities
                 // but duplicate declarations should always be rejected.
-                return Err(format!("error[NOVA-META007]: duplicate {} attribute '#[{}]' on {owner}",a.name,a.name));
+                if !self.attributes.get(short_name).is_some_and(|schema| schema.repeatable) {
+                    return Err(format!("error[NOVA-META007]: duplicate {} attribute '#[{}]' on {owner}",a.name,a.name));
+                }
             }
-            if builtin_attribute(&a.name,target) {
+            if builtin_attribute(short_name,target) {
                 if a.name=="effects" {
                     if a.args.is_empty() {return Err(format!("error[NOVA-META008]: #[effects] on {owner} needs at least one effect"));}
                     let mut unique=HashSet::new();
                     for effect in &a.args {
                         if !unique.insert(effect) {return Err(format!("error[NOVA-META008]: duplicate effect '{effect}' on {owner}"));}
-                        if !self.effects.contains_key(effect) {
+                        if !builtin_effect(effect) && !self.effects.contains_key(effect) {
                             return Err(format!("error[NOVA-META008]: unknown effect '{effect}' on {owner}; declare a trait with #[meta_effect] in .nova"));
                         }
                     }
                 }
                 continue;
             }
-            let Some(schema)=self.attributes.get(&a.name) else {
+            let Some(schema)=self.attributes.get(short_name) else {
                 return Err(format!("error[NOVA-META009]: unsupported function attribute '{}' on {owner}; declare #[meta_attribute(...)] trait {} in .nova",a.name,a.name));
             };
             if !schema.targets.contains(target) {
@@ -282,12 +333,12 @@ impl Registry {
                 }
             }
             for required in &schema.requires {
-                if !attrs.iter().any(|other|other.name==*required) {
+                if !attrs.iter().any(|other|other.name.rsplit("::").next()==Some(required.as_str())) {
                     return Err(format!("error[NOVA-META015]: '#[{}]' on {owner} requires '#[{required}]'",a.name));
                 }
             }
             for forbidden in &schema.conflicts {
-                if attrs.iter().any(|other|other.name==*forbidden) {
+                if attrs.iter().any(|other|other.name.rsplit("::").next()==Some(forbidden.as_str())) {
                     return Err(format!("error[NOVA-META015]: '#[{}]' on {owner} conflicts with '#[{forbidden}]'",a.name));
                 }
             }
@@ -299,13 +350,31 @@ impl Registry {
             match item {
                 Item::Public(inner) => self.verify(std::slice::from_ref(inner.as_ref()),ns)?,
                 Item::Namespace{name,items} => self.verify(items,&qual(ns,name))?,
-                Item::Struct(t) => self.verify_attributes(&t.attributes,"struct",&qual(ns,&t.name),Shape::Fields(&t.fields))?,
+                Item::Struct(t) => {
+                    self.verify_attributes(&t.attributes,"struct",&qual(ns,&t.name),Shape::Fields(&t.fields))?;
+                    for field in &t.fields {
+                        self.verify_attributes(&field.attributes,"field",&format!("{}.{}",qual(ns,&t.name),field.name),Shape::None)?;
+                    }
+                },
                 Item::Enum(t) => self.verify_attributes(&t.attributes,"enum",&qual(ns,&t.name),Shape::None)?,
                 Item::Trait(t) => self.verify_attributes(&t.attributes,"trait",&qual(ns,&t.name),Shape::Methods(&t.methods))?,
-                Item::Function(f) => self.verify_attributes(&f.attributes,"function",&qual(ns,&f.name),Shape::None)?,
-                Item::Extern(f) => self.verify_attributes(&f.attributes,"function",&qual(ns,&f.name),Shape::None)?,
+                Item::Function(f) => {
+                    self.verify_attributes(&f.attributes,"function",&qual(ns,&f.name),Shape::None)?;
+                    for param in &f.params {
+                        self.verify_attributes(&param.attributes,"parameter",&format!("{}({})",qual(ns,&f.name),param.name),Shape::None)?;
+                    }
+                },
+                Item::Extern(f) => {
+                    self.verify_attributes(&f.attributes,"function",&qual(ns,&f.name),Shape::None)?;
+                    for param in &f.params {
+                        self.verify_attributes(&param.attributes,"parameter",&format!("{}({})",qual(ns,&f.name),param.name),Shape::None)?;
+                    }
+                },
                 Item::Impl(block) => for f in &block.methods {
                     self.verify_attributes(&f.attributes,"function",&format!("method {}",f.name),Shape::None)?;
+                    for param in &f.params {
+                        self.verify_attributes(&param.attributes,"parameter",&format!("method {}({})",f.name,param.name),Shape::None)?;
+                    }
                 },
                 _ => {}
             }
@@ -519,7 +588,7 @@ impl Registry {
             targets.sort_unstable();
             let mut actions=schema.lint_actions.iter().map(String::as_str).collect::<Vec<_>>();
             actions.sort_unstable();
-            out.push_str(&format!("  attribute #[{name}] -> {} [{}] args {}..{} fields {}..{} requires {:?} conflicts {:?} ({})\n",targets.join(","),actions.join(","),schema.min_args,schema.max_args.map(|v|v.to_string()).unwrap_or_else(||"any".into()),schema.min_fields.unwrap_or(0),schema.max_fields.map(|v|v.to_string()).unwrap_or_else(||"any".into()),schema.requires,schema.conflicts,schema.definition));
+            out.push_str(&format!("  attribute #[{name}] -> {} [{}] phase={} priority={} repeatable={} args {}..{} fields {}..{} requires {:?} conflicts {:?} ({})\n",targets.join(","),actions.join(","),schema.phase,schema.priority,schema.repeatable,schema.min_args,schema.max_args.map(|v|v.to_string()).unwrap_or_else(||"any".into()),schema.min_fields.unwrap_or(0),schema.max_fields.map(|v|v.to_string()).unwrap_or_else(||"any".into()),schema.requires,schema.conflicts,schema.definition));
         }
         for (name,(origin,derives)) in &self.derive_aliases {out.push_str(&format!("  derive {name} -> {} ({origin})\n",derives.join(",")));}
         for (name,definition) in &self.derive_impls {out.push_str(&format!("  derive impl {name} -> impl {} for Self; concepts {:?} (source-defined default methods)\n",definition.origin,definition.constraints));}

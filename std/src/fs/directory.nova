@@ -1,0 +1,9 @@
+use std::fs::path::Path;
+use std::error::result::Result;
+use std::error::error::Error;
+use std::core::value::Clone;
+pub class Directory { path: Path }
+impl Directory {
+    static fn open(path: str) -> Result<Directory,Error> { return Ok(new Directory { path: Path::new(path) }); }
+    fn as_path(self: &Directory) -> Path { return self.path.clone(); }
+}

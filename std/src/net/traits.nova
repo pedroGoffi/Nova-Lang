@@ -1,0 +1,14 @@
+use std::core::types::Size;
+use std::error::error::Error;
+use std::error::result::Result;
+
+pub trait SocketRead {
+    fn receive(self: &Self, destination: *mut u8, capacity: Size) -> Result<Size,Error>;
+}
+pub trait SocketWrite {
+    fn send(self: &Self, value: str) -> Result<Size,Error>;
+}
+pub trait NonBlocking {
+    fn set_nonblocking(self: &Self, enabled: bool) -> Result<(),Error>;
+    fn readable(self: &Self, timeout: i32) -> Result<bool,Error>;
+}

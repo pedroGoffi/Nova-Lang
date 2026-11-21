@@ -1,0 +1,30 @@
+// Methods shared by Nova signed integer values.
+impl i64 {
+    fn abs(self: i64) -> i64 {
+        if self < 0 { return -self; }
+        return self;
+    }
+    fn min(self: i64, other: i64) -> i64 {
+        if self < other { return self; }
+        return other;
+    }
+    fn max(self: i64, other: i64) -> i64 {
+        if self > other { return self; }
+        return other;
+    }
+    fn is_positive(self: i64) -> bool { return self > 0; }
+    fn is_negative(self: i64) -> bool { return self < 0; }
+    fn is_zero(self: i64) -> bool { return self == 0; }
+}
+
+impl u64 {
+    fn min(self: u64, other: u64) -> u64 {
+        if self < other { return self; }
+        return other;
+    }
+    fn max(self: u64, other: u64) -> u64 {
+        if self > other { return self; }
+        return other;
+    }
+    fn is_zero(self: u64) -> bool { return self == 0; }
+}

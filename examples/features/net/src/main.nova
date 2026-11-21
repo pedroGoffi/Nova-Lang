@@ -1,0 +1,14 @@
+import std;
+use std::net::address;
+use std::net::tcp::TcpListener;
+use std::net::udp::UdpSocket;
+
+fn main() -> i32 {
+    // Port zero asks the OS for an available ephemeral port.
+    let tcp_address = address::localhost(0);
+    let udp_address = address::localhost(0);
+    let listener = TcpListener::bind(&tcp_address);
+    let datagram = UdpSocket::bind(&udp_address);
+    // Result keeps failures typed; this smoke test exercises both constructors.
+    return 0;
+}

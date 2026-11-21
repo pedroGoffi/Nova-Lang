@@ -1,0 +1,109 @@
+use NB::*;
+pub mod components;
+@SpringBootApplication
+class SpringApp {}
+impl SpringApp {static fn main()->i32{return 0;}}
+fn read_integer(value:&i64)->i64 {return *value;}
+fn health_status(router:&NB::http::Router,path:str,expected:i32)->i32 {
+    match NB::http::Testing::perform(router,"GET",path,"") {Ok(response)=>{if response.status_code!=expected {return 1;}} Err(error)=>{return 2;}}return 0;
+}
+fn managed_tests()->i32 {
+    match SpringApp::nb_context() {
+        Ok(context)=>{
+            if context.len()!=7 {println!("Unexpected beans: {}",context.len());return 20;}
+            match context.get::<i64>() {Ok(bean)=>{if bean.with(read_integer)!=42 {return 21;}} Err(error)=>{return 22;}}
+            match context.named::<i64>("alternative") {Ok(bean)=>{if bean.with(read_integer)!=7 {return 23;}} Err(error)=>{return 24;}}
+            match context.get::<f64>() {Ok(bean)=>{return 25;} Err(error)=>{if error.code()!=1 {return 26;}}}
+            match context.named::<i64>("counter") {Ok(bean)=>{return 27;} Err(error)=>{if error.code()!=2 {return 28;}}}
+            match context.get::<components::Transient>() {
+                Ok(first)=>{match context.get::<components::Transient>() {Ok(second)=>{if first.identity()==second.identity() {return 29;}} Err(error)=>{return 30;}}}
+                Err(error)=>{return 31;}
+            }
+            let application=NB::app::Application::new(8080);let router=application.build();
+            match SpringApp::nb_register_managed(&router,&context) {Ok(status)=>{} Err(error)=>{println!("{}",error.as_str());return 32;}}
+            match NB::http::Testing::perform(&router,"GET","/spring/value","") {
+                Ok(response)=>{
+                    if response.status_code!=200 {return 33;}
+                    match response.body_text() {Ok(text)=>{if !text.equals("Nova:41") {println!("{}",text.as_str());return 34;}} Err(error)=>{return 35;}}
+                }
+                Err(error)=>{return 36;}
+            }
+            match SpringApp::nb_health_monitor(&context) {
+                Ok(monitor)=>{
+                    let health_router=application.build();monitor.show_details(true);
+                    if monitor.install(&health_router)!=0 {return 42;}
+                    if health_status(&health_router,"/actuator/health",503)!=0 {return 43;}
+                    if health_status(&health_router,"/actuator/health/readiness",503)!=0 {return 44;}
+                    if health_status(&health_router,"/actuator/health/liveness",200)!=0 {return 45;}
+                    match NB::http::Testing::perform(&health_router,"GET","/actuator/health","") {
+                        Ok(response)=>{match response.body_text() {Ok(text)=>{if !text.contains("database") || !text.contains("offline\\\"\\n") {println!("Health: {}",text.as_str());return 46;}} Err(error)=>{return 47;}}}
+                        Err(error)=>{return 48;}
+                    }
+                    monitor.readiness(false);
+                    if health_status(&health_router,"/actuator/health/liveness",200)!=0 {return 49;}
+                    monitor.liveness(false);
+                    if health_status(&health_router,"/actuator/health/liveness",503)!=0 {return 50;}
+                }
+                Err(error)=>{return 51;}
+            }
+            context.close();context.close();
+            if health_status(&router,"/actuator/health/liveness",503)!=0 {return 52;}
+            match context.get::<i64>() {Ok(bean)=>{return 37;} Err(error)=>{if error.code()!=4 {return 38;}}}
+            match NB::http::Testing::perform(&router,"GET","/spring/value","") {Ok(response)=>{if response.status_code!=503 {return 39;}} Err(error)=>{return 40;}}
+        }
+        Err(error)=>{println!("Context error {}: {}",error.code(),error.as_str());return 41;}
+    }
+    return 0;
+}
+struct Counter {value:i64}
+fn counter(context:&NB::context::ApplicationContext)->std::result::Result<Counter,std::error::OwnedError> {return Ok(new Counter{value:0});}
+fn initialize(value:&mut Counter)->() {value.value=41;return;}
+fn destroy(value:&mut Counter)->() {value.value=0;return;}
+fn increment(value:&mut Counter)->i64 {value.value+=1;return value.value;}
+fn read_counter(value:&Counter)->i64 {return value.value;}
+fn main()->i32 {
+    let context=NB::context::ApplicationContext::new();
+    let definition=NB::context::definition::<Counter>(counter,initialize,destroy);
+    match context.register::<Counter>("counter",definition) {Ok(status)=>{} Err(error)=>{println!("{}",error.as_str());return 1;}}
+    match context.get::<Counter>() {
+        Ok(first)=>{
+            if first.with(read_counter)!=41 {return 2;}
+            first.update(increment);
+            match context.named::<Counter>("counter") {
+                Ok(second)=>{if first.identity()!=second.identity() || second.with(read_counter)!=42 {return 3;}}
+                Err(error)=>{return 4;}
+            }
+            context.close();
+            if first.is_alive() {return 5;}
+        }
+        Err(error)=>{println!("{}",error.as_str());return 6;}
+    }
+    let failures=context_errors();if failures!=0 {return failures;}return managed_tests();
+}
+
+struct CycleA {}
+struct CycleB {}
+fn cycle_a(context:&NB::context::ApplicationContext)->std::result::Result<CycleA,std::error::OwnedError> {
+    match context.get::<CycleB>() {Ok(bean)=>{return Ok(new CycleA{});} Err(error)=>{return Err(error);}}
+}
+fn cycle_b(context:&NB::context::ApplicationContext)->std::result::Result<CycleB,std::error::OwnedError> {
+    match context.get::<CycleA>() {Ok(bean)=>{return Ok(new CycleB{});} Err(error)=>{return Err(error);}}
+}
+fn init_a(value:&mut CycleA)->() {return;}
+fn init_b(value:&mut CycleB)->() {return;}
+fn context_errors()->i32 {
+    let cyclic=NB::context::ApplicationContext::new();
+    match cyclic.register::<CycleA>("a",NB::context::definition::<CycleA>(cycle_a,init_a,init_a)) {Ok(status)=>{} Err(error)=>{return 60;}}
+    match cyclic.register::<CycleB>("b",NB::context::definition::<CycleB>(cycle_b,init_b,init_b)) {Ok(status)=>{} Err(error)=>{return 61;}}
+    match cyclic.get::<CycleA>() {Ok(bean)=>{return 62;} Err(error)=>{if error.code()!=3 {return 63;}}}
+    match cyclic.register::<CycleA>("late",NB::context::definition::<CycleA>(cycle_a,init_a,init_a)) {Ok(status)=>{return 64;} Err(error)=>{if error.code()!=4 {return 65;}}}
+    let missing=NB::context::ApplicationContext::new();
+    match missing.register::<CycleA>("a",NB::context::definition::<CycleA>(cycle_a,init_a,init_a)) {Ok(status)=>{} Err(error)=>{return 66;}}
+    match missing.get::<CycleA>() {Ok(bean)=>{return 67;} Err(error)=>{if error.code()!=1 {return 68;}}}
+    let ambiguous=NB::context::ApplicationContext::new();
+    match ambiguous.register::<Counter>("a",NB::context::definition::<Counter>(counter,initialize,destroy)) {Ok(status)=>{} Err(error)=>{return 69;}}
+    match ambiguous.register::<Counter>("a",NB::context::definition::<Counter>(counter,initialize,destroy)) {Ok(status)=>{return 70;} Err(error)=>{if error.code()!=1 {return 71;}}}
+    match ambiguous.register::<Counter>("b",NB::context::definition::<Counter>(counter,initialize,destroy)) {Ok(status)=>{} Err(error)=>{return 72;}}
+    match ambiguous.get::<Counter>() {Ok(bean)=>{return 73;} Err(error)=>{if error.code()!=2 {return 74;}}}
+    return 0;
+}

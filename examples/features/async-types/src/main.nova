@@ -1,0 +1,11 @@
+import std;
+
+// Async results keep their declared scalar type through the coroutine entry.
+async fn ready() -> bool { return true; }
+
+fn main() -> i32 {
+    let task = ready();
+    let value: bool = task.wait();
+    if value { return 0; }
+    return 1;
+}

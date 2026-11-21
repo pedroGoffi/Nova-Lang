@@ -63,12 +63,27 @@ fn valid_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// Resolve a named interpolation capture into a typed field access AST.
+/// Only identifiers separated by dots are accepted: no method calls or
+/// arbitrary compile-time string evaluation in a format placeholder.
+fn capture_path(path: &str) -> Option<Expr> {
+    let mut segments=path.split('.');
+    let first=segments.next()?;
+    if !valid_name(first) {return None;}
+    let mut value=Expr::Var(first.into());
+    for segment in segments {
+        if !valid_name(segment) {return None;}
+        value=Expr::Field(Box::new(value),segment.into());
+    }
+    Some(value)
+}
+
 fn write_text(text: &str, stderr: bool) -> Stmt {
     Stmt::Expr(Expr::Call(
         if stderr {
-            "std::io::native_eprint"
+            "std::old::io::eprint"
         } else {
-            "std::io::native_print"
+            "std::old::io::print"
         }
         .into(),
         vec![quoted(text)],
@@ -109,7 +124,15 @@ fn expand_output(
         });
     }
     let Expr::Str(raw_format) = &arguments[0] else {
-        return Err(format!("error[NOVA-FMT001]: `{name}!` requires a compile-time string literal as its first argument"));
+        if arguments.len() == 1 && name != "format" {
+            let mut output = vec![Stmt::Expr(Expr::Call(
+                if stderr { "std::old::io::eprint" } else { "std::old::io::print" }.into(),
+                vec![arguments[0].clone()],
+            ))];
+            if newline { output.push(write_text("\n",stderr)); }
+            return Ok(output);
+        }
+        return Err(format!("error[NOVA-FMT001]: `{name}!` requires a compile-time string literal for interpolation; pass a single typed value for generic printing"));
     };
     let format = decode_string(raw_format)?;
     let mut cursor = format.chars().peekable();
@@ -171,8 +194,8 @@ fn expand_output(
                     })?;
                     used_positional += 1;
                     value.clone()
-                } else if valid_name(binding) {
-                    Expr::Var(binding.into())
+                } else if let Some(value)=capture_path(binding) {
+                    value
                 } else {
                     return Err(format!(
                         "error[NOVA-FMT004]: invalid named placeholder `{{{binding}}}`"
@@ -241,9 +264,35 @@ mod tests {
         );
     }
     #[test]
+    fn nested_named_capture_uses_typed_field_ast() {
+        let statements=literal("\"User: {user.profile.name}\"",vec![]).unwrap();
+        assert!(matches!(&statements[1],Stmt::Expr(Expr::Call(name,values))
+            if name==WRITE_VALUE && matches!(&values[0],Expr::Field(owner,field)
+                if field=="name" && matches!(owner.as_ref(),Expr::Field(_,inner) if inner=="profile"))));
+        let error=literal("\"{user..name}\"",vec![]).unwrap_err();
+        assert!(error.contains("NOVA-FMT004"),"{error}");
+    }
+
+    #[test]
     fn no_argument_print_and_println_are_valid() {
         assert!(expand("print", &[]).unwrap().unwrap().is_empty());
         assert_eq!(expand("println", &[]).unwrap().unwrap().len(), 1);
+    }
+    #[test]
+    fn generic_println_accepts_typed_expression_once() {
+        let items=expand("println", &[Expr::Call("read_value".into(),vec![])])
+            .unwrap().unwrap();
+        assert_eq!(items.len(),2);
+        assert!(matches!(&items[0],Stmt::Expr(Expr::Call(name,arguments))
+            if name=="std::old::io::print" && arguments.len()==1
+                && matches!(&arguments[0],Expr::Call(callee,_) if callee=="read_value")));
+        assert!(matches!(&items[1],Stmt::Expr(Expr::Call(name,_)) if name=="std::old::io::print"));
+    }
+    #[test]
+    fn formatting_still_requires_literal_for_multiple_arguments() {
+        let error=expand("println", &[Expr::Var("template".into()),Expr::Int("1".into())])
+            .unwrap().unwrap_err();
+        assert!(error.contains("NOVA-FMT001"),"{error}");
     }
     #[test]
     fn malformed_formats_are_compile_errors() {
@@ -275,7 +324,7 @@ pub fn expand_format(arguments: &[Expr]) -> Result<Expr, String> {
         let Stmt::Expr(Expr::Call(name, mut values)) = statement else {
             unreachable!("format AST parser emitted a non-call statement")
         };
-        if name == "std::io::native_print" {
+        if name == "std::old::io::print" {
             parts.push(Expr::Call(TEXT_PART.into(), values));
         } else if name == WRITE_VALUE {
             debug_assert_eq!(values.len(), 4);

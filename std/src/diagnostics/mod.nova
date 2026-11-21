@@ -1,0 +1,16 @@
+pub enum Severity { Note, Warning, Error }
+pub class Diagnostic { severity: Severity, message: str, line: i64, column: i64 }
+
+impl Diagnostic {
+    static fn new(severity: Severity, message: str, line: i64, column: i64) -> Self {
+        return new Diagnostic { severity: severity, message: message, line: line, column: column };
+    }
+    fn is_error(self: &Diagnostic) -> bool {
+        match self.severity {
+            Severity::Error => { return true; }
+            _ => { return false; }
+        }
+    }
+    fn text(self: &Diagnostic) -> str { return self.message; }
+}
+pub mod logging;

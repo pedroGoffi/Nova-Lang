@@ -1,0 +1,13 @@
+import std;
+import nova_backend;
+
+use nova_backend::serve;
+
+fn home() -> str {
+    return "hello from Nova backend";
+}
+
+fn main() -> i32 {
+    // serve keeps the listener and process alive on :3000.
+    return serve(3000);
+}

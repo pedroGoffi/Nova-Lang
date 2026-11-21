@@ -1,0 +1,8 @@
+[package]
+name = "backend_example"
+version = "0.1.0"
+entry = "src/main.nova"
+
+[dependencies]
+std = { builtin = "std" }
+nova_backend = { path = "../../../packages/nova_backend" }

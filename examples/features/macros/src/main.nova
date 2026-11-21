@@ -1,0 +1,6 @@
+import std;
+
+// Macros transform syntax before type checking; this one duplicates an expression.
+macro twice(value) => value + value;
+
+fn main() -> i32 { return twice!(21) - 42; }

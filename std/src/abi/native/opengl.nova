@@ -1,0 +1,28 @@
+// OpenGL ABI used through an SDL2-created context. No GL implementation is
+// included in Nova; these declarations resolve to the platform OpenGL library.
+[[unsafe]] pub extern fn glClearColor(red: f32, green: f32, blue: f32, alpha: f32) -> ();
+[[unsafe]] pub extern fn glClear(mask: u32) -> ();
+[[unsafe]] pub extern fn glEnable(capability: u32) -> ();
+[[unsafe]] pub extern fn glDisable(capability: u32) -> ();
+[[unsafe]] pub extern fn glViewport(x: i32, y: i32, width: i32, height: i32) -> ();
+[[unsafe]] pub extern fn glMatrixMode(mode: u32) -> ();
+[[unsafe]] pub extern fn glLoadIdentity() -> ();
+[[unsafe]] pub extern fn glPushMatrix() -> ();
+[[unsafe]] pub extern fn glPopMatrix() -> ();
+[[unsafe]] pub extern fn glOrtho(left: f64, right: f64, bottom: f64, top: f64, near_plane: f64, far_plane: f64) -> ();
+[[unsafe]] pub extern fn glTranslatef(x: f32, y: f32, z: f32) -> ();
+[[unsafe]] pub extern fn glScalef(x: f32, y: f32, z: f32) -> ();
+[[unsafe]] pub extern fn glRotatef(angle: f32, x: f32, y: f32, z: f32) -> ();
+[[unsafe]] pub extern fn glBegin(mode: u32) -> ();
+[[unsafe]] pub extern fn glEnd() -> ();
+[[unsafe]] pub extern fn glColor3f(red: f32, green: f32, blue: f32) -> ();
+[[unsafe]] pub extern fn glColor4f(red: f32, green: f32, blue: f32, alpha: f32) -> ();
+[[unsafe]] pub extern fn glBlendFunc(source: u32, destination: u32) -> ();
+[[unsafe]] pub extern fn glVertex3f(x: f32, y: f32, z: f32) -> ();
+[[unsafe]] pub extern fn glFlush() -> ();
+[[unsafe]] pub extern fn glGenTextures(count: i32, textures: *mut u32) -> ();
+[[unsafe]] pub extern fn glDeleteTextures(count: i32, textures: *const u32) -> ();
+[[unsafe]] pub extern fn glBindTexture(target: u32, texture: u32) -> ();
+[[unsafe]] pub extern fn glTexParameteri(target: u32, parameter: u32, value: i32) -> ();
+[[unsafe]] pub extern fn glTexImage2D(target: u32, level: i32, internal_format: i32, width: i32, height: i32, border: i32, format: u32, pixel_type: u32, pixels: *const u32) -> ();
+[[unsafe]] pub extern fn glTexCoord2f(x: f32, y: f32) -> ();

@@ -1,0 +1,8 @@
+// Boolean helpers kept separate from compiler condition lowering.
+impl bool {
+    fn negate(self: bool) -> bool { return !self; }
+    fn choose<T>(self: bool, when_true: T, when_false: T) -> T {
+        if self { return when_true; }
+        return when_false;
+    }
+}

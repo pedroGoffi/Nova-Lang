@@ -1,0 +1,8 @@
+[package]
+name = "nb_spring"
+version = "0.1.0"
+entry = "src/main.nova"
+
+[dependencies]
+std = { builtin = "std" }
+NB = { path = "../../../packages/NB" }

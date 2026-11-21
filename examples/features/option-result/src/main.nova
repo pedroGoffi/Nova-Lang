@@ -1,0 +1,18 @@
+import std;
+use std::core::option::Option;
+use std::error::result::Result;
+
+fn checked(value: i32) -> Result<i32, i32> {
+    // Result makes success and failure explicit instead of using a sentinel value.
+    if value == 42 { return Ok(value); }
+    return Err(-1);
+}
+
+fn main() -> i32 {
+    // match handles every Result variant before extracting the value.
+    let result = checked(42);
+    match result {
+        Ok(value) => { return value - 42; }
+        Err(_) => { return 1; }
+    }
+}

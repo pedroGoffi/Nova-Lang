@@ -46,9 +46,9 @@ fn check_thread_callbacks(program: &ast::Program) -> Result<(), String> {
     ) -> Result<(), String> {
         match expr {
             Expr::Call(name, args) | Expr::GenericCall(name, _, args) => {
-                if name == "std::thread::spawn" || name.ends_with("::std::thread::spawn") {
+                if name == "std::old::thread::spawn" || name.ends_with("::std::old::thread::spawn") {
                     if args.len() != 1 {
-                        return Err("error[NOVA-C010]: std::thread::spawn expects one named [[pure]] callback".into());
+                        return Err("error[NOVA-C010]: std::old::thread::spawn expects one named [[pure]] callback".into());
                     }
                     let Expr::Var(callback) = &args[0] else {
                         return Err("error[NOVA-C010]: native thread callback must be a named, non-capturing [[pure]] function; closures with captures are not supported".into());
@@ -81,7 +81,7 @@ fn check_thread_callbacks(program: &ast::Program) -> Result<(), String> {
                 verify_stmts(else_body,ns,funcs)?;
             }
             Expr::Block(body) => verify_stmts(body,ns,funcs)?,
-            Expr::MethodCall(receiver, _, args) => {
+            Expr::MethodCall(receiver, _, args, _) => {
                 verify_expr(receiver, ns, funcs)?;
                 for value in args {
                     verify_expr(value, ns, funcs)?;
@@ -297,7 +297,7 @@ fn add_edge(graph: &mut Graph, from: &str, to: &str, function: &str) -> Result<(
 fn check_expr(expr: &Expr, held: &[String], function: &str) -> Result<(), String> {
     match expr {
         Expr::Call(name,_) | Expr::GenericCall(name,_,_)
-            if name == "std::sync::acquire" || name == "std::sync::acquire_pair" => {
+            if name == "std::old::sync::acquire" || name == "std::old::sync::acquire_pair" => {
             return Err(format!("error[NOVA-C007]: direct invocation of '{name}' bypasses compiler lock checking in '{function}'\n  help: use sync(mutex) as guard {{ ... }} instead"));
         },
         Expr::Var(name) if held.contains(name) => {
@@ -308,7 +308,7 @@ fn check_expr(expr: &Expr, held: &[String], function: &str) -> Result<(), String
             if !held.is_empty() && (name.ends_with("::native_block_on") || name.ends_with("::join") || name == "join") => {
             return Err(format!("error[NOVA-C004]: blocking join inside sync region in '{function}'\n  = locks held: {}\n  help: move the join outside the sync block to avoid circular waits",held.join(", ")))
         }
-        Expr::MethodCall(_,name,_) if !held.is_empty() && name == "join" => {
+        Expr::MethodCall(_,name,_, _) if !held.is_empty() && name == "join" => {
             return Err(format!("error[NOVA-C004]: blocking join inside sync region in '{function}'\n  = locks held: {}\n  help: finish the sync block before joining a thread",held.join(", ")))
         }
         Expr::If { condition, then_body, else_body } => {
@@ -324,7 +324,7 @@ fn check_expr(expr: &Expr, held: &[String], function: &str) -> Result<(), String
         Expr::Call(_,args) | Expr::GenericCall(_,_,args) | Expr::MacroCall(_,args) | Expr::Array(args) => {
             for arg in args { check_expr(arg,held,function)?; }
         },
-        Expr::MethodCall(receiver,_,args) => {
+        Expr::MethodCall(receiver,_,args, _) => {
             check_expr(receiver,held,function)?;
             for arg in args { check_expr(arg,held,function)?; }
         },
@@ -376,7 +376,7 @@ fn guard_expr(expr: &Expr, guard: &str, function: &str) -> Result<(), String> {
         Expr::Block(body) => {
             for stmt in body { guard_statement(stmt,guard,function)?; }
         }
-        Expr::MethodCall(receiver, method, args)
+        Expr::MethodCall(receiver, method, args, _)
             if matches!(receiver.as_ref(),Expr::Var(name) if name==guard)
                 && matches!(
                     method.as_str(),
@@ -410,7 +410,7 @@ fn guard_expr(expr: &Expr, guard: &str, function: &str) -> Result<(), String> {
                 guard_expr(item, guard, function)?;
             }
         }
-        Expr::MethodCall(receiver, _, args) => {
+        Expr::MethodCall(receiver, _, args, _) => {
             guard_expr(receiver, guard, function)?;
             for item in args {
                 guard_expr(item, guard, function)?;
@@ -604,9 +604,9 @@ fn rewrite_statement(
                 alias.to_string()
             };
             let target = if names.len() == 1 {
-                "std::sync::acquire"
+                "std::old::sync::acquire"
             } else {
-                "std::sync::acquire_pair"
+                "std::old::sync::acquire_pair"
             };
             let args = names
                 .iter()
@@ -752,7 +752,7 @@ mod tests {
     }
     #[test]
     fn sync_lowers_to_raii_guard_and_lexical_scope() {
-        let parsed=parse("fn main() -> i32 { let a = std::sync::new_i64(3); sync(a) as guard { let value = guard.get(); } return 0; }");
+        let parsed=parse("fn main() -> i32 { let a = std::old::sync::new_i64(3); sync(a) as guard { let value = guard.get(); } return 0; }");
         let result = lower_and_check(&parsed).unwrap();
         let Item::Function(function) = &result.items[0] else {
             panic!("expected function")
@@ -766,7 +766,7 @@ mod tests {
             panic!("expected lexical guard scope")
         };
         assert!(
-            matches!(&then_body[0], Stmt::Let{ name, init:Expr::Call(call,_),.. } if name=="guard" && call=="std::sync::acquire")
+            matches!(&then_body[0], Stmt::Let{ name, init:Expr::Call(call,_),.. } if name=="guard" && call=="std::old::sync::acquire")
         );
     }
     #[test]
@@ -796,7 +796,7 @@ mod tests {
     fn blocking_checks_only_apply_while_a_mutex_is_held() {
         // Await, direct runtime block_on, and thread.join are not inherently
         // illegal. Only waiting while a sync guard is held risks a deadlock.
-        let outside=parse("fn f() -> i32 { let awaited = await work; let joined = std::task::native_block_on(handle); worker.join(); return 0; }");
+        let outside=parse("fn f() -> i32 { let awaited = await work; let joined = std::abi::native::task::native_block_on(handle); worker.join(); return 0; }");
         lower_and_check(&outside)
             .expect("normal async/blocking operations outside sync must be valid");
 
@@ -806,7 +806,7 @@ mod tests {
 
         for snippet in [
             "sync(a) { worker.join(); }",
-            "sync(a) { std::task::native_block_on(handle); }",
+            "sync(a) { std::abi::native::task::native_block_on(handle); }",
             "sync(a) { let result = await work; }",
         ] {
             let source = format!("fn f() -> i32 {{ {snippet} return 0; }}");
@@ -827,30 +827,36 @@ mod tests {
             panic!("expected function")
         };
         assert!(
-            matches!(&function.body[0], Stmt::If{then_body,..} if matches!(&then_body[0],Stmt::Let{init:Expr::Call(name,..),..} if name=="std::sync::acquire_pair"))
+            matches!(&function.body[0], Stmt::If{then_body,..} if matches!(&then_body[0],Stmt::Let{init:Expr::Call(name,..),..} if name=="std::old::sync::acquire_pair"))
         );
     }
     #[test]
     fn nova_028_std_sync_and_thread_reach_typed_llvm() {
         let root = std::path::Path::new("examples/packages/std_concurrency_028");
         let (input, _) = crate::package::load_detailed(root).unwrap();
-        let lowered =
-            crate::surface::lower(&input).expect("concurrency syntax and std module resolve");
-        let typed =
-            crate::hir::lower(&lowered).expect("typed HIR accepts lexical RAII mutex guards");
-        let mir = crate::mir::lower(&typed).expect("MIR accepts concurrency and thread callback");
-        let llvm = crate::codegen::generate(&mir);
-        assert!(llvm.contains("@__nova_std__sync____mutex_lock("), "{llvm}");
-        assert!(
-            llvm.contains("@__nova_std__thread____thread_start("),
-            "{llvm}"
-        );
+        std::thread::Builder::new()
+            .name("nova-028-concurrency".into())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || {
+                let lowered = crate::surface::lower(&input)
+                    .expect("concurrency syntax and std module resolve");
+                let typed = crate::hir::lower(&lowered)
+                    .expect("typed HIR accepts lexical RAII mutex guards");
+                let mir = crate::mir::lower(&typed)
+                    .expect("MIR accepts concurrency and thread callback");
+                let llvm = crate::codegen::generate(&mir);
+                assert!(llvm.contains("@std__old__sync__lock_cell("), "{llvm}");
+                assert!(llvm.contains("@std__abi__llvm__thread_start("), "{llvm}");
+            })
+            .expect("spawn Nova 0.28 concurrency worker")
+            .join()
+            .expect("Nova 0.28 concurrency worker panicked");
     }
     #[test]
     fn native_thread_requires_pure_noncapturing_callback() {
-        let bad=parse("fn worker() -> () { return; } fn main() -> i32 { let thread = std::thread::spawn(worker); return 0; }");
+        let bad=parse("fn worker() -> () { return; } fn main() -> i32 { let thread = std::old::thread::spawn(worker); return 0; }");
         assert!(lower_and_check(&bad).unwrap_err().contains("NOVA-C010"));
-        let good=parse("[[pure]] fn worker() -> () { return; } fn main() -> i32 { let thread = std::thread::spawn(worker); return 0; }");
+        let good=parse("[[pure]] fn worker() -> () { return; } fn main() -> i32 { let thread = std::old::thread::spawn(worker); return 0; }");
         lower_and_check(&good).unwrap();
     }
     #[test]
@@ -860,7 +866,7 @@ mod tests {
     }
     #[test]
     fn direct_mutex_acquire_is_rejected() {
-        let tree = parse("fn work() -> i32 { let guard = std::sync::acquire(&a); return 0; }");
+        let tree = parse("fn work() -> i32 { let guard = std::old::sync::acquire(&a); return 0; }");
         assert!(lower_and_check(&tree).unwrap_err().contains("NOVA-C007"));
     }
     #[test]

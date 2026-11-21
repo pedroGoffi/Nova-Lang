@@ -184,12 +184,18 @@ impl TypesAndTraits {
                     self.expression(value, namespace)?;
                 }
             }
-            Expr::Call(_, arguments) | Expr::MacroCall(_, arguments) | Expr::Array(arguments) => {
+            Expr::Call(name, arguments) => {
+                self.expand_alias_in_path(name, namespace)?;
                 for argument in arguments {
                     self.expression(argument, namespace)?;
                 }
             }
-            Expr::MethodCall(receiver, _, arguments) => {
+            Expr::MacroCall(_, arguments) | Expr::Array(arguments) => {
+                for argument in arguments {
+                    self.expression(argument, namespace)?;
+                }
+            }
+            Expr::MethodCall(receiver, _, arguments, _) => {
                 self.expression(receiver, namespace)?;
                 for argument in arguments {
                     self.expression(argument, namespace)?;
@@ -218,6 +224,25 @@ impl TypesAndTraits {
             }
             Expr::Zero(target) => self.alias(target, namespace)?,
             _ => {}
+        }
+        Ok(())
+    }
+
+    /// Type aliases are transparent in every type position, including the
+    /// owner of an associated/static call (`Alias::new()`). Keep the call as
+    /// an ordinary AST node and only canonicalize its path here, before the
+    /// surface resolver searches generated methods.
+    fn expand_alias_in_path(&self, path: &mut String, namespace: &str) -> Result<(), String> {
+        let Some((owner, member)) = path.rsplit_once("::") else { return Ok(()); };
+        let resolved = self.type_ref(
+            &TypeRef::Named(owner.to_string()),
+            namespace,
+            &mut Vec::new(),
+        )?;
+        if let TypeRef::Named(canonical) = resolved {
+            if canonical != owner {
+                *path = format!("{canonical}::{member}");
+            }
         }
         Ok(())
     }
@@ -524,6 +549,7 @@ impl TypesAndTraits {
                         name: parameter.name.clone(),
                         ty: self.type_ref(&expanded, trait_namespace, &mut Vec::new())?,
                         default: None,
+                        attributes: vec![],
                     })
                 })
                 .collect::<Result<Vec<_>, String>>()?;
@@ -646,6 +672,9 @@ impl TypesAndTraits {
                     let mut concrete = value.clone();
                     for field in &mut concrete.fields {
                         self.alias(&mut field.ty, namespace)?;
+                        if let Some(default)=&mut field.default {
+                            self.expression(default,namespace)?;
+                        }
                     }
                     if let Some(parent) = &mut concrete.parent {
                         self.alias(parent, namespace)?;

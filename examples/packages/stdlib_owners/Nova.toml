@@ -1,7 +1,0 @@
-[package]
-name = "stdlib_owners"
-version = "0.1.0"
-entry = "src/main.nova"
-
-[dependencies]
-std = { builtin = "std" }

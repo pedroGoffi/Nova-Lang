@@ -1,0 +1,15 @@
+use std::error::error::Error;
+use std::error::result::Result;
+use std::net::address::SocketAddress;
+use std::net::tcp::TcpListener;
+use std::net::tcp::TcpStream;
+
+// Server facade: binding and accepting are expressed with typed sockets.
+// Descriptor management remains entirely inside net::tcp.
+pub fn bind(address: &SocketAddress) -> Result<TcpListener,Error> {
+    return TcpListener::bind(address);
+}
+
+pub fn accept(listener: &TcpListener) -> Result<TcpStream,Error> {
+    return listener.accept();
+}

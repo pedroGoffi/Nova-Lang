@@ -1,0 +1,3 @@
+pub concept Encoding<T> = has_method<T,encode> && has_method<T,decode>;
+pub const UTF8: i32 = 8;
+pub const ASCII: i32 = 7;

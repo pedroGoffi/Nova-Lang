@@ -1,0 +1,8 @@
+import std;
+
+fn main() -> i32 {
+    // let transforms a value and returns the block result.
+    let value: i32 = 21;
+    let doubled: i32 = value.let { return it + it; };
+    return doubled - 42;
+}

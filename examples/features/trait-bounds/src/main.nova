@@ -1,0 +1,14 @@
+import std;
+
+// A concept constrains a generic function to types implementing a trait.
+trait Scorable { fn score(self: &Self) -> i32; }
+struct Score { value: i32 }
+impl Scorable for Score { fn score(self: &Score) -> i32 { return self.value; } }
+concept ScorableType<T> = implements<T,Scorable>;
+
+fn read_score<T: ScorableType>(value: &T) -> i32 { return value.score(); }
+
+fn main() -> i32 {
+    let score = new Score { value: 42 };
+    return read_score::<Score>(&score) - 42;
+}

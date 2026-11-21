@@ -7,6 +7,15 @@ use std::collections::{HashMap, HashSet};
 
 pub type FunctionId = usize;
 pub type LocalId = usize;
+
+fn dyn_method_metadata(name: &str) -> Option<(String, String, usize)> {
+    let rest = name.strip_prefix("__nova_dyn__")?;
+    let parts = rest.rsplitn(3, "__").collect::<Vec<_>>();
+    let method = parts.first()?.to_string();
+    let slot = parts.get(1)?.parse().ok()?;
+    let trait_key = parts.get(2)?.to_string();
+    Some((trait_key, method, slot))
+}
 #[derive(Debug, Clone)]
 pub struct Program {
     pub types: Types,
@@ -16,9 +25,12 @@ pub struct Program {
 pub enum FunctionKind {
     Defined,
     External,
+    CompilerIntrinsic(crate::intrinsics::Intrinsic),
+    LlvmIntrinsic(crate::llvm_intrinsics::Intrinsic),
     JsonWriter(StructId),
     JsonReader(StructId),
     JsonToString(StructId),
+    DynMethod { slot: usize },
 }
 #[derive(Debug, Clone)]
 pub struct Function {
@@ -96,6 +108,8 @@ pub struct Place {
 }
 #[derive(Debug, Clone)]
 pub enum PlaceProjection {
+    /// Follow a borrowed reference (or an explicitly unsafe raw pointer).
+    Deref,
     Field(usize),
     Index(Expr),
 }
@@ -125,6 +139,9 @@ pub enum ExprKind {
     TakeMatchField(Box<Expr>, usize),
     Array(Vec<Expr>),
     Index(Box<Expr>, Box<Expr>),
+    /// Consumes one element of a fixed array. The ownership pass only creates
+    /// this form for a direct array local; MIR clears that slot's drop flag.
+    MoveIndex(Box<Expr>, Box<Expr>),
     /// Compiler-generated cleanup for a fixed array of owned structs.
     /// Consumes each element exactly once when its root is still live.
     DropArray { root: LocalId, element: TypeId, len: usize, drop_fn: FunctionId },
@@ -136,6 +153,7 @@ pub enum ExprKind {
     /// Consumes an owned local. MIR clears its drop flag after producing the value.
     MoveLocal(LocalId),
     Cast(Box<Expr>),
+    DynObjectRef { value: Box<Expr>, trait_key: String },
 }
 #[derive(Clone)]
 struct Signature {
@@ -210,19 +228,36 @@ impl<'a> Resolver<'a> {
         self.loop_depth -= 1;
         result
     }
-    /// Resolve an lvalue without evaluating its owning aggregate by value.
-    /// At this stage, projections are rooted in a named local. Reborrowing
-    /// through *references* is intentionally a separate lifetime feature.
-    fn place(&mut self, value: &ast::Expr) -> Result<(Place, TypeId), String> {
+    /// Resolve an addressable place without moving its owning aggregate.
+    /// A borrow may project through a reference or, within `unsafe`, a raw
+    /// pointer. Keep the mutability of the *referent* separate from the
+    /// mutability of the local binding (an immutable `&mut T` is writable).
+    fn place(&mut self, value: &ast::Expr) -> Result<(Place, TypeId, bool), String> {
         use ast::Expr as A;
         match value {
             A::Var(name) => {
                 let root = self.find_local(name)
                     .ok_or_else(|| format!("unknown local '{name}'"))?;
-                Ok((Place { root, projections: Vec::new() }, self.locals[root].ty))
+                Ok((Place { root, projections: Vec::new() }, self.locals[root].ty,
+                    self.locals[root].mutable))
+            }
+            A::Deref(parent) => {
+                let (mut place, parent_ty, _) = self.place(parent)?;
+                let (element, mutable) = match self.types.kind(parent_ty) {
+                    TypeKind::Reference { element, mutable } => (element, mutable),
+                    TypeKind::Pointer { element, mutable } => {
+                        if self.unsafe_depth == 0 {
+                            return Err("raw pointer dereference requires unsafe".into());
+                        }
+                        (element, mutable)
+                    }
+                    _ => return Err("cannot borrow through a non-pointer value".into()),
+                };
+                place.projections.push(PlaceProjection::Deref);
+                Ok((place, element, mutable))
             }
             A::Field(parent, name) => {
-                let (mut place, parent_ty) = self.place(parent)?;
+                let (mut place, parent_ty, mutable) = self.place(parent)?;
                 let TypeKind::Struct(sid) = self.types.kind(parent_ty) else {
                     return Err(format!("cannot borrow field '{name}' of non-struct"));
                 };
@@ -231,23 +266,22 @@ impl<'a> Resolver<'a> {
                     .ok_or_else(|| format!("unknown field '{name}'"))?;
                 let ty = field.ty;
                 place.projections.push(PlaceProjection::Field(index));
-                Ok((place, ty))
+                Ok((place, ty, mutable))
             }
             A::Index(parent, index) => {
-                let (mut place, parent_ty) = self.place(parent)?;
+                let (mut place, parent_ty, mutable) = self.place(parent)?;
                 let TypeKind::Array { element, len } = self.types.kind(parent_ty) else {
                     return Err("indexed borrow requires a fixed-size array".into());
                 };
                 let i32_ty = self.types.i32();
                 let index = self.expect(index, i32_ty)?;
-                // Avoid emitting an unreachable GEP for an obvious bad literal.
                 if let ExprKind::Int(n) = &index.kind {
                     if *n < 0 || *n >= len as i128 {
                         return Err(format!("array borrow index {n} out of bounds (length {len})"));
                     }
                 }
                 place.projections.push(PlaceProjection::Index(index));
-                Ok((place, element))
+                Ok((place, element, mutable))
             }
             _ => Err("borrow requires an addressable local, field or indexed array element".into()),
         }
@@ -342,6 +376,28 @@ impl<'a> Resolver<'a> {
                     && self.unsafe_depth == 0
                 {
                     return Err("casting between distinct pointer types requires unsafe".into());
+                }
+                // Raw addresses cross the 64-bit ABI only inside unsafe.
+                // Safe Nova never exposes a pointer as an unchecked integer.
+                if let (TypeKind::Reference { element: borrowed, mutable: borrowed_mut },
+                        TypeKind::Pointer { element: pointed, mutable: pointer_mut }) =
+                    (self.types.kind(inner.ty), self.types.kind(target)) {
+                    if borrowed != pointed {
+                        return Err("raw pointer from borrow must preserve the referenced element type".into());
+                    }
+                    if pointer_mut && !borrowed_mut {
+                        return Err("cannot create a mutable raw pointer from a shared borrow".into());
+                    }
+                    if self.unsafe_depth == 0 {
+                        return Err("converting a borrow to a raw pointer requires unsafe".into());
+                    }
+                }
+                let pointer_to_word = matches!(self.types.kind(inner.ty), TypeKind::Pointer { .. })
+                    && self.types.kind(target) == TypeKind::Primitive(Primitive::Unsigned(64));
+                let word_to_pointer = self.types.kind(inner.ty) == TypeKind::Primitive(Primitive::Unsigned(64))
+                    && matches!(self.types.kind(target), TypeKind::Pointer { .. });
+                if (pointer_to_word || word_to_pointer) && self.unsafe_depth == 0 {
+                    return Err("pointer-to-address casts require unsafe".into());
                 }
                 if !self.types.can_numeric_cast(inner.ty, target) {
                     return Err(format!(
@@ -542,6 +598,15 @@ impl<'a> Resolver<'a> {
                 (ty, ExprKind::Binary(Box::new(left), *op, Box::new(right)))
             }
             A::Call(name, args) => {
+                if name == "__nova_internal_unsafe_expr" {
+                    if args.len() != 1 {
+                        return Err("unsafe expression requires one block".into());
+                    }
+                    self.unsafe_depth += 1;
+                    let result = self.expr(&args[0], expected);
+                    self.unsafe_depth -= 1;
+                    return result;
+                }
                 let sig = self
                     .signatures
                     .get(name)
@@ -708,13 +773,32 @@ impl<'a> Resolver<'a> {
                 (element, ExprKind::Index(Box::new(value), Box::new(index)))
             }
             A::AddressOf { mutable, value } => {
-                let (place, element_ty) = self.place(value)?;
-                if *mutable && !self.locals[place.root].mutable {
+                let (place, element_ty, place_mutable) = self.place(value)?;
+                if *mutable && !place_mutable {
                     return Err(format!("mutable borrow requires 'let mut {}'",
                         self.locals[place.root].name));
                 }
                 let ty = if let Some(expected) = expected {
                     match self.types.kind(expected) {
+                        TypeKind::Reference { element: _, mutable: want }
+                            if !want && *mutable => return Err("mutable borrow cannot be coerced to shared dyn trait reference".into()),
+                        TypeKind::Reference { element: object, mutable: want }
+                            if want == *mutable
+                                && matches!(self.types.kind(object), TypeKind::TraitObject { .. })
+                                && element_ty != object => {
+                            let trait_key = match self.types.kind(object) {
+                                TypeKind::TraitObject { trait_name } => trait_name,
+                                _ => unreachable!(),
+                            };
+                            let concrete = Expr {
+                                ty: self.types.intern(TypeKind::Reference { element: element_ty, mutable: *mutable }),
+                                kind: ExprKind::AddressOf { place, mutable: *mutable },
+                            };
+                            return Ok(Expr {
+                                ty: expected,
+                                kind: ExprKind::DynObjectRef { value: Box::new(concrete), trait_key },
+                            });
+                        }
                         TypeKind::Pointer { element, mutable: want }
                             if element == element_ty && want == *mutable => {
                             if self.unsafe_depth == 0 {
@@ -835,7 +919,8 @@ impl<'a> Resolver<'a> {
                     let init = self.expr(init, ty)?;
                     let local = self.declare(name, init.ty, *mutable)?;
                     out.push(Stmt::Let { local, init });
-                    // A declaration-level defer replaces the automatic class destructor.
+                    // A declaration-level explicit defer replaces the
+                    // automatic destructor.
                     if let Some(deferred) = defer {
                         let cleanup = self.expr(deferred, None)?;
                         if cleanup.ty != self.types.unit() {
@@ -864,7 +949,7 @@ impl<'a> Resolver<'a> {
                     let local = self
                         .find_local(name)
                         .ok_or_else(|| format!("unknown pointer or borrow '{name}'"))?;
-                    let target = match self.types.kind(self.locals[local].ty) {
+                    let (target, raw_pointer) = match self.types.kind(self.locals[local].ty) {
                         TypeKind::Pointer {
                             element,
                             mutable: true,
@@ -872,12 +957,12 @@ impl<'a> Resolver<'a> {
                             if self.unsafe_depth == 0 {
                                 return Err("writing through a raw pointer requires unsafe".into());
                             }
-                            element
+                            (element, true)
                         }
                         TypeKind::Reference {
                             element,
                             mutable: true,
-                        } => element,
+                        } => (element, false),
                         _ => {
                             return Err(
                                 "dereference assignment needs a mutable pointer or &mut borrow"
@@ -885,10 +970,16 @@ impl<'a> Resolver<'a> {
                             )
                         }
                     };
-                    if let TypeKind::Struct(struct_id) = self.types.kind(target) {
-                        let name = &self.types.structs[struct_id].name;
-                        if self.signatures.contains_key(&format!("{name}__drop")) {
-                            return Err("overwriting an owned object through a borrow requires explicit replacement semantics".into());
+                    // Safe &mut references must not silently overwrite an
+                    // owned object without invoking Drop. For *mut T inside
+                    // unsafe, the caller explicitly owns initialization and
+                    // destruction (e.g. Vec's initialized-length invariant).
+                    if !raw_pointer {
+                        if let TypeKind::Struct(struct_id) = self.types.kind(target) {
+                            let name = &self.types.structs[struct_id].name;
+                            if self.signatures.contains_key(&format!("{name}__drop")) {
+                                return Err("overwriting an owned object through a borrow requires explicit replacement semantics".into());
+                            }
                         }
                     }
                     Stmt::DerefSet {
@@ -897,12 +988,25 @@ impl<'a> Resolver<'a> {
                     }
                 }
                 ast::Stmt::Set { name, value } => {
+                    let replacement = name.strip_prefix(ast::REPLACE_PREFIX);
+                    let actual_name = replacement.unwrap_or(name);
                     let local = self
-                        .find_local(name)
-                        .ok_or_else(|| format!("unknown local '{name}'"))?;
+                        .find_local(actual_name)
+                        .ok_or_else(|| format!("unknown local '{actual_name}'"))?;
+                    if replacement.is_some() {
+                        let cleanup = self.automatic_cleanup(local)?.ok_or_else(|| {
+                            format!("replace requires a droppable owner; '{actual_name}' has no Drop")
+                        })?;
+                        let Stmt::Defer { expr, .. } = cleanup else {
+                            return Err("compiler bug: automatic owner cleanup is not a defer".into());
+                        };
+                        // The consuming cleanup moves the old owner. The Set
+                        // below then reinitializes the same local.
+                        out.push(Stmt::Expr(expr));
+                    }
                     if !self.locals[local].mutable {
                         return Err(format!(
-                            "cannot assign to immutable local '{name}'; use 'let mut'"
+                            "cannot assign to immutable local '{actual_name}'; use 'let mut'"
                         ));
                     }
                     let ty = self.locals[local].ty;
@@ -1211,6 +1315,20 @@ fn drop_field_actions(
     }
 }
 pub fn lower(program: &ast::Program) -> Result<Program, String> {
+    lower_impl(program, None)
+}
+/// Accumulate independent function-body type errors (after valid type/signature setup).
+/// This intentionally does not attempt MIR generation with invalid HIR.
+pub fn lower_all_errors(program: &ast::Program) -> Result<Program, Vec<String>> {
+    let mut errors = Vec::new();
+    lower_impl(program, Some(&mut errors)).map_err(|error| {
+        if errors.is_empty() { vec![error] } else { errors }
+    })
+}
+fn lower_impl(
+    program: &ast::Program,
+    mut collected: Option<&mut Vec<String>>,
+) -> Result<Program, String> {
     let mut types = Types::new();
     let mut struct_ids = HashMap::new();
     for item in &program.items {
@@ -1341,7 +1459,8 @@ pub fn lower(program: &ast::Program) -> Result<Program, String> {
                         params.iter().all(|arg| ffi_safe(types, *arg, true))
                             && ffi_safe(types, result, false)
                     }
-                    TypeKind::Reference { .. } | TypeKind::Struct(_) | TypeKind::Array { .. } => {
+                    TypeKind::Reference { .. } | TypeKind::Struct(_) | TypeKind::Array { .. }
+                    | TypeKind::TraitObject { .. } => {
                         false
                     }
                 }
@@ -1354,6 +1473,45 @@ pub fn lower(program: &ast::Program) -> Result<Program, String> {
             ast::Item::Extern(f) => f.c_variadic,
             _ => false,
         };
+        if let ast::Item::Extern(f) = item {
+            if f.attributes.iter().any(|attr| attr.name == "llvm_intrinsic") {
+                return Err(format!("error[NOVA-LLVM006]: extern '{name}' cannot be a compiler intrinsic; use a std::abi::llvm function"));
+            }
+        }
+        if let ast::Item::Function(f) = item {
+            if let Some(marker) = f.attributes.iter().find(|attr| attr.name == "llvm_intrinsic") {
+                let is_std_llvm_name = name.starts_with("std__abi__llvm__")
+                    || name.contains("__std__abi__llvm__");
+                if !is_std_llvm_name {
+                    return Err(format!(
+                        "error[NOVA-LLVM007]: '{name}' cannot declare a compiler LLVM intrinsic; only std::abi::llvm owns #[llvm_intrinsic(...)]"
+                    ));
+                }
+                let intrinsic = crate::llvm_intrinsics::Intrinsic::from_name(name)
+                    .ok_or_else(|| format!("error[NOVA-LLVM001]: compiler intrinsic '{name}' is not a builtin of std::abi::llvm"))?;
+                if marker.args.len() != 1 || marker.args[0] != intrinsic.label() {
+                    return Err(format!("error[NOVA-LLVM002]: '{name}' needs #[llvm_intrinsic({})]",intrinsic.label()));
+                }
+                let (want_result, want_params) = intrinsic.signature();
+                let actual_params = p.iter().map(|id| types.llvm(*id)).collect::<Vec<_>>();
+                if types.llvm(r) != want_result || actual_params.len() != want_params.len() ||
+                   actual_params.iter().zip(want_params.iter()).any(|(got, expected)| got.as_str() != *expected) {
+                    return Err(format!("error[NOVA-LLVM003]: invalid compiler intrinsic signature for '{name}'; expected {want_result}({})",want_params.join(", ")));
+                }
+                let declaration_only = if want_result == "void" {
+                    matches!(f.body.as_slice(), [ast::Stmt::Return(None)])
+                } else {
+                    matches!(f.body.as_slice(), [ast::Stmt::Return(Some(ast::Expr::Int(value)))] if value == "0") ||
+                    matches!(f.body.as_slice(), [ast::Stmt::Return(Some(ast::Expr::Float(value)))] if value == "0.0")
+                };
+                if !declaration_only {
+                    return Err(format!("error[NOVA-LLVM004]: '{name}' must have only a declaration marker ('return;' or 'return 0;'); LLVM supplies the implementation"));
+                }
+                if intrinsic.is_unsafe() && !ast::function_is_unsafe(&f.attributes,name)? {
+                    return Err(format!("error[NOVA-LLVM005]: '{name}' must be declared [[unsafe]]"));
+                }
+            }
+        }
         let is_unsafe = match item {
             ast::Item::Function(f) => {
                 ast::function_is_unsafe(&f.attributes, &format!("function '{name}'"))?
@@ -1504,13 +1662,27 @@ pub fn lower(program: &ast::Program) -> Result<Program, String> {
             ast::Item::Function(f) => (
                 &f.name,
                 &f.params,
-                Some(f.body.as_slice()),
-                FunctionKind::Defined,
+                if f.attributes.iter().any(|attr|attr.name=="llvm_intrinsic") {None} else {Some(f.body.as_slice())},
+                if let Some((_trait_key, _method, slot)) = dyn_method_metadata(&f.name) {
+                    FunctionKind::DynMethod { slot }
+                } else if f.attributes.iter().any(|attr|attr.name=="llvm_intrinsic") {
+                    FunctionKind::LlvmIntrinsic(crate::llvm_intrinsics::Intrinsic::from_name(&f.name)
+                        .expect("validated LLVM builtin"))
+                } else { FunctionKind::Defined },
             ),
-            ast::Item::Extern(f) => (&f.name, &f.params, None, FunctionKind::External),
+            ast::Item::Extern(f) => (
+                &f.name,
+                &f.params,
+                None,
+                crate::intrinsics::Intrinsic::from_name(&f.name)
+                    .map(FunctionKind::CompilerIntrinsic)
+                    .unwrap_or(FunctionKind::External),
+            ),
             _ => continue,
         };
         let signature = &signatures[name];
+        let lowered = (|| -> Result<Function, String> {
+        let unit_type = types.unit();
         let mut resolver = Resolver::new(&signatures, &mut types, signature.result);
         // An unsafe function grants unsafe operations within its own body,
         // while callers still need an explicit unsafe context.
@@ -1535,10 +1707,16 @@ pub fn lower(program: &ast::Program) -> Result<Program, String> {
             parameter_cleanups.append(&mut body);
             body = parameter_cleanups;
         }
-        if matches!(kind, FunctionKind::Defined) && !terminates(&body) {
+        // Unit-returning functions may fall off the end, just like an
+        // explicit `return;`. Non-unit functions still need to return on
+        // every reachable path.
+        if matches!(kind, FunctionKind::Defined)
+            && signature.result != unit_type
+            && !terminates(&body)
+        {
             return Err(format!("function '{name}' does not return on every path"));
         }
-        functions[signature.id] = Some(Function {
+        Ok(Function {
             name: name.clone(),
             params: params_ids,
             locals: resolver.locals,
@@ -1546,7 +1724,21 @@ pub fn lower(program: &ast::Program) -> Result<Program, String> {
             body,
             kind,
             c_variadic: signature.c_variadic,
-        });
+        })
+        })();
+        match lowered {
+            Ok(function) => { functions[signature.id] = Some(function); }
+            Err(error) => {
+                if let Some(errors) = collected.as_deref_mut() {
+                    if errors.len() < 64 { errors.push(error); }
+                } else { return Err(error); }
+            }
+        }
+    }
+    if let Some(errors) = collected.as_ref() {
+        if !errors.is_empty() {
+            return Err(format!("{} independent HIR error(s)", errors.len()));
+        }
     }
     for (struct_id, symbol) in generated_drops {
         let signature = &signatures[&symbol];
@@ -1686,6 +1878,13 @@ pub fn lower(program: &ast::Program) -> Result<Program, String> {
         .map(|f| f.expect("signature must produce function"))
         .collect();
     let mut result = Program { types, functions };
-    crate::ownership::check(&mut result)?;
+    if let Some(errors) = collected {
+        if let Err(ownership_errors) = crate::ownership::check_all_errors(&mut result) {
+            errors.extend(ownership_errors);
+            return Err(format!("{} ownership error(s)", errors.len()));
+        }
+    } else {
+        crate::ownership::check(&mut result)?;
+    }
     Ok(result)
 }

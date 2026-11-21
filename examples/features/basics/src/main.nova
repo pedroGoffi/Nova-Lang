@@ -1,0 +1,8 @@
+import std;
+
+fn main() -> i32 {
+    // let declares a typed value; if selects a branch and return exits main.
+    let answer: i32 = 40 + 2;
+    if answer == 42 { return 0; }
+    return 1;
+}

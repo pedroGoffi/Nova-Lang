@@ -1,0 +1,35 @@
+use std::core::types::Size;
+use std::iter::traits::Iterator;
+
+pub class Range { current: i64, end_value: i64, step_value: i64 }
+
+impl Range {
+    static fn new(start: i64, end_value: i64) -> Self {
+        return new Range { current: start, end_value: end_value, step_value: 1 };
+    }
+    static fn stepped(start: i64, end_value: i64, step_value: i64) -> Self {
+        return new Range { current: start, end_value: end_value, step_value: step_value };
+    }
+    fn has_next(self: &Range) -> bool {
+        if self.step_value < 0 { return self.current > self.end_value; }
+        return self.current < self.end_value;
+    }
+    fn next(self: &mut Range) -> i64 {
+        let value: i64 = self.current;
+        self.current += self.step_value;
+        return value;
+    }
+    fn remaining(self: &Range) -> Size {
+        if !self.has_next() { return 0; }
+        if self.step_value < 0 { return (self.current - self.end_value) as Size; }
+        return (self.end_value - self.current) as Size;
+    }
+}
+
+pub fn range(start: i64, end_value: i64) -> Range { return Range::new(start, end_value); }
+
+impl Iterator for Range {
+    type Item = i64;
+    fn has_next(self: &Range) -> bool { return self.has_next(); }
+    fn next(self: &mut Range) -> i64 { return self.next(); }
+}

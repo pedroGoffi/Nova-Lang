@@ -1,0 +1,11 @@
+pub mod reader;
+pub mod writer;
+pub mod buffer;
+pub mod file;
+pub mod traits;
+
+// Common stream entry points. Specialized users can still import the
+// reader/writer modules directly, while ordinary code can use std::io.
+pub fn stdin() -> reader::Reader { return reader::stdin(); }
+pub fn stdout() -> writer::Writer { return writer::stdout(); }
+pub fn stderr() -> writer::Writer { return writer::stderr(); }

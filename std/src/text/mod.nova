@@ -1,0 +1,11 @@
+// High-level text API. Primitive borrowed-text operations live in
+// std::core::text; owned text and builders live here.
+pub mod text;
+pub mod string;
+pub mod builder;
+pub mod traits;
+pub mod compat;
+pub mod utf8;
+pub mod format;
+pub mod encoding;
+pub mod unicode;

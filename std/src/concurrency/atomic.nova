@@ -1,0 +1,8 @@
+use std::abi::llvm::atomic_load_i64;
+use std::abi::llvm::atomic_store_i64;
+pub class AtomicI64 { pointer: *mut i64 }
+impl AtomicI64 {
+    [[unsafe]] static fn from_raw(pointer: *mut i64) -> Self { return new AtomicI64 { pointer: pointer }; }
+    [[unsafe]] fn load(self: &AtomicI64) -> i64 { unsafe { return atomic_load_i64(self.pointer, 5); } }
+    [[unsafe]] fn store(self: &AtomicI64, value: i64) -> () { unsafe { atomic_store_i64(self.pointer, value, 5); } return; }
+}

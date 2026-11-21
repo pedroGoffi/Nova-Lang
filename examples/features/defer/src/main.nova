@@ -1,0 +1,23 @@
+import std;
+use std::io;
+
+fn release_resource() -> () {
+    io::stdout().write_line("3. recurso liberado pelo defer");
+    return;
+}
+
+fn use_resource() -> () {
+    io::stdout().write_line("1. recurso adquirido");
+
+    // A limpeza fica registrada para a saída deste escopo. Ela também seria
+    // executada se outra condição provocasse um return antecipado.
+    defer release_resource();
+
+    io::stdout().write_line("2. usando o recurso");
+    return;
+}
+
+fn main() -> i32 {
+    use_resource();
+    return 0;
+}

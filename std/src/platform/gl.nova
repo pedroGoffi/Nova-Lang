@@ -1,0 +1,70 @@
+pub const COLOR_BUFFER_BIT: u32 = 16384;
+pub const DEPTH_BUFFER_BIT: u32 = 256;
+pub const DEPTH_TEST: u32 = 2929;
+pub const PROJECTION: u32 = 5889;
+pub const MODELVIEW: u32 = 5888;
+pub const LINES: u32 = 1;
+pub const QUADS: u32 = 7;
+pub const BLEND: u32 = 3042;
+pub const SOURCE_ALPHA: u32 = 770;
+pub const ONE_MINUS_SOURCE_ALPHA: u32 = 771;
+pub const TEXTURE_2D: u32 = 3553;
+pub const TEXTURE_MIN_FILTER: u32 = 10241;
+pub const TEXTURE_MAG_FILTER: u32 = 10240;
+pub const LINEAR: i32 = 9729;
+pub const NEAREST: i32 = 9728;
+pub const RGBA: u32 = 6408;
+pub const BGRA: u32 = 32993;
+pub const UNSIGNED_BYTE: u32 = 5121;
+
+pub fn clear_color(red: f32, green: f32, blue: f32, alpha: f32) -> () { unsafe { std::abi::native::opengl::glClearColor(red, green, blue, alpha); } return; }
+pub fn clear(mask: u32) -> () { unsafe { std::abi::native::opengl::glClear(mask); } return; }
+pub fn enable(capability: u32) -> () { unsafe { std::abi::native::opengl::glEnable(capability); } return; }
+pub fn viewport(x: i32, y: i32, width: i32, height: i32) -> () { unsafe { std::abi::native::opengl::glViewport(x, y, width, height); } return; }
+pub fn projection() -> () { unsafe { std::abi::native::opengl::glMatrixMode(PROJECTION); std::abi::native::opengl::glLoadIdentity(); } return; }
+pub fn modelview() -> () { unsafe { std::abi::native::opengl::glMatrixMode(MODELVIEW); std::abi::native::opengl::glLoadIdentity(); } return; }
+pub fn push_matrix() -> () { unsafe { std::abi::native::opengl::glPushMatrix(); } return; }
+pub fn pop_matrix() -> () { unsafe { std::abi::native::opengl::glPopMatrix(); } return; }
+pub fn ortho(left: f64, right: f64, bottom: f64, top: f64, near_plane: f64, far_plane: f64) -> () { unsafe { std::abi::native::opengl::glOrtho(left, right, bottom, top, near_plane, far_plane); } return; }
+pub fn translate(x: f32, y: f32, z: f32) -> () { unsafe { std::abi::native::opengl::glTranslatef(x, y, z); } return; }
+pub fn scale(x: f32, y: f32, z: f32) -> () { unsafe { std::abi::native::opengl::glScalef(x, y, z); } return; }
+pub fn rotate(angle: f32, x: f32, y: f32, z: f32) -> () { unsafe { std::abi::native::opengl::glRotatef(angle, x, y, z); } return; }
+pub fn begin_lines() -> () { unsafe { std::abi::native::opengl::glBegin(LINES); } return; }
+pub fn begin_quads() -> () { unsafe { std::abi::native::opengl::glBegin(QUADS); } return; }
+pub fn end() -> () { unsafe { std::abi::native::opengl::glEnd(); } return; }
+pub fn color(red: f32, green: f32, blue: f32) -> () { unsafe { std::abi::native::opengl::glColor3f(red, green, blue); } return; }
+pub fn color_alpha(red: f32, green: f32, blue: f32, alpha: f32) -> () { unsafe { std::abi::native::opengl::glColor4f(red, green, blue, alpha); } return; }
+pub fn blend_alpha() -> () { unsafe { std::abi::native::opengl::glEnable(BLEND); std::abi::native::opengl::glBlendFunc(SOURCE_ALPHA, ONE_MINUS_SOURCE_ALPHA); } return; }
+pub fn vertex(x: f32, y: f32, z: f32) -> () { unsafe { std::abi::native::opengl::glVertex3f(x, y, z); } return; }
+pub fn flush() -> () { unsafe { std::abi::native::opengl::glFlush(); } return; }
+pub fn create_texture() -> u32 {
+    let mut texture: u32 = 0;
+    unsafe { std::abi::native::opengl::glGenTextures(1, &mut texture as (*mut u32)); }
+    return texture;
+}
+pub fn delete_texture(texture: u32) -> () {
+    unsafe { std::abi::native::opengl::glDeleteTextures(1, &texture as (*const u32)); }
+    return;
+}
+pub fn bind_texture(texture: u32) -> () { unsafe { std::abi::native::opengl::glBindTexture(TEXTURE_2D, texture); } return; }
+pub fn texture_filter_linear() -> () {
+    unsafe {
+        std::abi::native::opengl::glTexParameteri(TEXTURE_2D, TEXTURE_MIN_FILTER, LINEAR);
+        std::abi::native::opengl::glTexParameteri(TEXTURE_2D, TEXTURE_MAG_FILTER, LINEAR);
+    }
+    return;
+}
+pub fn texture_filter_nearest() -> () {
+    unsafe {
+        std::abi::native::opengl::glTexParameteri(TEXTURE_2D, TEXTURE_MIN_FILTER, NEAREST);
+        std::abi::native::opengl::glTexParameteri(TEXTURE_2D, TEXTURE_MAG_FILTER, NEAREST);
+    }
+    return;
+}
+pub fn upload_texture_bgra(width: i32, height: i32, pixels: *const u32) -> () {
+    unsafe { std::abi::native::opengl::glTexImage2D(TEXTURE_2D, 0, 4, width, height, 0, BGRA, UNSIGNED_BYTE, pixels); }
+    return;
+}
+pub fn texture_begin(texture: u32) -> () { bind_texture(texture); unsafe { std::abi::native::opengl::glEnable(TEXTURE_2D); } return; }
+pub fn texture_end() -> () { unsafe { std::abi::native::opengl::glDisable(TEXTURE_2D); } return; }
+pub fn tex_coord(x: f32, y: f32) -> () { unsafe { std::abi::native::opengl::glTexCoord2f(x, y); } return; }

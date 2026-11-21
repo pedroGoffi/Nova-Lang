@@ -1,0 +1,70 @@
+use std::core::types::Millis;
+use std::core::value::Clone;
+use std::core::value::Eq;
+use std::core::value::Ord;
+
+pub class Duration { milliseconds: Millis }
+
+impl Duration {
+    static fn zero() -> Self { return new Duration { milliseconds: 0 }; }
+    static fn from_millis(value: Millis) -> Self { return new Duration { milliseconds: value }; }
+    static fn from_seconds(value: Millis) -> Self { return new Duration { milliseconds: value * 1000 }; }
+    static fn from_minutes(value: Millis) -> Self { return new Duration { milliseconds: value * 60000 }; }
+    static fn from_hours(value: Millis) -> Self { return new Duration { milliseconds: value * 3600000 }; }
+    fn as_millis(self: &Duration) -> Millis { return self.milliseconds; }
+    fn as_seconds(self: &Duration) -> Millis { return self.milliseconds / 1000; }
+    fn as_minutes(self: &Duration) -> Millis { return self.milliseconds / 60000; }
+    fn as_hours(self: &Duration) -> Millis { return self.milliseconds / 3600000; }
+    fn is_zero(self: &Duration) -> bool { return self.milliseconds == 0; }
+    fn add(self: &Duration, other: Duration) -> Duration {
+        return Duration::from_millis(self.milliseconds + other.milliseconds);
+    }
+    fn sub(self: &Duration, other: Duration) -> Duration {
+        if other.milliseconds >= self.milliseconds { return Duration::zero(); }
+        return Duration::from_millis(self.milliseconds - other.milliseconds);
+    }
+    fn checked_add(self: &Duration, other: Duration) -> Duration {
+        let maximum: Millis = -1 as Millis;
+        if other.milliseconds > maximum - self.milliseconds { return Duration::zero(); }
+        return Duration::from_millis(self.milliseconds + other.milliseconds);
+    }
+    fn saturating_add(self: &Duration, other: Duration) -> Duration {
+        let maximum: Millis = -1 as Millis;
+        if other.milliseconds > maximum - self.milliseconds { return Duration::from_millis(maximum); }
+        return Duration::from_millis(self.milliseconds + other.milliseconds);
+    }
+    fn multiply(self: &Duration, factor: Millis) -> Duration {
+        return Duration::from_millis(self.milliseconds * factor);
+    }
+    fn compare(self: &Duration, other: Duration) -> i64 {
+        if self.milliseconds < other.milliseconds { return -1; }
+        if self.milliseconds > other.milliseconds { return 1; }
+        return 0;
+    }
+}
+
+pub fn milliseconds(value: Millis) -> Duration { return Duration::from_millis(value); }
+pub fn seconds(value: Millis) -> Duration { return Duration::from_seconds(value); }
+pub fn minutes(value: Millis) -> Duration { return Duration::from_minutes(value); }
+pub fn hours(value: Millis) -> Duration { return Duration::from_hours(value); }
+
+impl Clone for Duration {
+    fn clone(self: &Duration) -> Duration { return Duration::from_millis(self.milliseconds); }
+}
+
+impl Eq for Duration {
+    fn equals(self: &Self, other: &Self) -> bool {
+        return self.milliseconds == other.milliseconds;
+    }
+}
+
+impl Ord for Duration {
+    fn equals(self: &Self, other: &Self) -> bool {
+        return self.milliseconds == other.milliseconds;
+    }
+    fn compare(self: &Duration, other: &Duration) -> i64 {
+        if self.milliseconds < other.milliseconds { return -1; }
+        if self.milliseconds > other.milliseconds { return 1; }
+        return 0;
+    }
+}

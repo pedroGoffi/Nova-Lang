@@ -1,0 +1,9 @@
+// Private runtime interface. Do not call from application code.
+// Ownership, type constraints and behavior belong to std public modules.
+pub extern fn native_block_on(handle: u64) -> i64;
+pub extern fn native_spawn(handle: u64) -> ();
+pub extern fn native_sleep_ms(milliseconds: u64) -> u64;
+pub extern fn native_await_value(handle: u64) -> i64;
+pub extern fn native_tick() -> i32;
+pub extern fn native_run_until_idle() -> ();
+pub extern fn native_yield_now() -> i64;

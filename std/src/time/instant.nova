@@ -1,0 +1,13 @@
+use std::core::types::Millis;
+pub class Instant { milliseconds: Millis }
+impl Instant {
+    static fn from_millis(value: Millis) -> Self { return new Instant { milliseconds: value }; }
+    fn as_millis(self: &Instant) -> Millis { return self.milliseconds; }
+    fn elapsed_since(self: &Instant, earlier: Instant) -> Millis {
+        if self.milliseconds < earlier.milliseconds { return 0; }
+        return self.milliseconds - earlier.milliseconds;
+    }
+    fn add_millis(self: &Instant, value: Millis) -> Instant {
+        return Instant::from_millis(self.milliseconds + value);
+    }
+}

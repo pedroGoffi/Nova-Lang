@@ -1,0 +1,53 @@
+use std::abi::llvm;
+use std::core::address;
+use std::core::types::Size;
+use std::error::error::Error;
+use std::error::result::Result;
+use std::net::address::SocketAddress;
+use std::net::error::failure;
+use std::net::traits::SocketRead;
+use std::net::traits::SocketWrite;
+
+const AF_INET: i32 = 2;
+const SOCK_DGRAM: i32 = 2;
+
+pub class UdpSocket { descriptor: i32 }
+
+impl UdpSocket {
+    static fn bind(address: &SocketAddress) -> Result<Self,Error> {
+        let descriptor = unsafe { llvm::net_socket(AF_INET, SOCK_DGRAM, 0) };
+        if descriptor < 0 { return failure::<UdpSocket>(descriptor, "could not create UDP socket"); }
+        let status = unsafe { llvm::net_bind(descriptor, address.pointer(), address.length()) };
+        if status < 0 {
+            unsafe { llvm::close_fd(descriptor); }
+            return failure::<UdpSocket>(status, "could not bind UDP socket");
+        }
+        return Ok(new UdpSocket { descriptor: descriptor });
+    }
+    fn connect(self: &UdpSocket, address: &SocketAddress) -> Result<(),Error> {
+        let status = unsafe { llvm::net_connect(self.descriptor, address.pointer(), address.length() as u32) };
+        if status < 0 { return failure::<()>(status, "could not connect UDP socket"); }
+        return Ok(());
+    }
+    fn send_text(self: &UdpSocket, value: str) -> Result<Size,Error> {
+        let sent = unsafe { llvm::net_send(self.descriptor, address(value) as (*const u8), std::core::text_size(value), 0) };
+        if sent < 0 { return failure::<Size>(sent as i32, "could not send UDP datagram"); }
+        return Ok(sent as Size);
+    }
+    fn receive(self: &UdpSocket, destination: *mut u8, capacity: Size) -> Result<Size,Error> {
+        let received = unsafe { llvm::net_recv(self.descriptor, destination, capacity, 0) };
+        if received < 0 { return failure::<Size>(received as i32, "could not receive UDP datagram"); }
+        return Ok(received as Size);
+    }
+    fn descriptor(self: &UdpSocket) -> i32 { return self.descriptor; }
+    fn drop(self: UdpSocket) -> () {
+        unsafe { llvm::close_fd(self.descriptor); }
+        return;
+    }
+}
+impl SocketRead for UdpSocket {
+    fn receive(self: &UdpSocket, destination: *mut u8, capacity: Size) -> Result<Size,Error> { return self.receive(destination, capacity); }
+}
+impl SocketWrite for UdpSocket {
+    fn send(self: &UdpSocket, value: str) -> Result<Size,Error> { return self.send_text(value); }
+}

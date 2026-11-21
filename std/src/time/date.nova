@@ -1,0 +1,13 @@
+pub class Date { year: i64, month: i64, day: i64 }
+
+impl Date {
+    static fn new(year: i64, month: i64, day: i64) -> Self {
+        return new Date { year: year, month: month, day: day };
+    }
+    fn year(self: &Date) -> i64 { return self.year; }
+    fn month(self: &Date) -> i64 { return self.month; }
+    fn day(self: &Date) -> i64 { return self.day; }
+    fn is_valid(self: &Date) -> bool {
+        return self.year >= 1 && self.month >= 1 && self.month <= 12 && self.day >= 1 && self.day <= 31;
+    }
+}

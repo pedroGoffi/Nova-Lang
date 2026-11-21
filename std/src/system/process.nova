@@ -1,0 +1,28 @@
+use std::abi::native::libc::stdlib::exit;
+use std::system::traits::ProcessControl;
+use std::system::command::Command;
+use std::error::error::Error;
+use std::error::result::Result;
+
+pub class ExitCode { value: i32 }
+
+impl ExitCode {
+    static fn new(value: i32) -> Self { return new ExitCode { value: value }; }
+    fn value(self: &ExitCode) -> i32 { return self.value; }
+    fn is_success(self: &ExitCode) -> bool { return self.value == 0; }
+}
+
+pub fn success() -> ExitCode { return ExitCode::new(0); }
+pub fn failure(value: i32) -> ExitCode { return ExitCode::new(value); }
+
+impl ProcessControl for ExitCode {
+    fn run(self: &ExitCode, command: str) -> Result<ExitCode,Error> {
+        let command_value: Command = Command::new(command);
+        return command_value.status();
+    }
+}
+
+pub fn terminate(code: ExitCode) -> () {
+    unsafe { exit(code.value()); }
+    return;
+}

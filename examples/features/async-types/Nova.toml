@@ -1,0 +1,6 @@
+[package]
+name = "async_types"
+version = "0.1.0"
+
+[dependencies]
+std = { builtin = "std" }

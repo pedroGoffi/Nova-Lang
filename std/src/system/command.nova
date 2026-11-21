@@ -1,0 +1,117 @@
+use std::abi::native::libc::stdio::fgets;
+use std::abi::native::libc::stdio::feof;
+use std::abi::native::libc::stdio::pclose;
+use std::abi::native::libc::stdio::popen;
+use std::abi::native::libc::stdlib::free;
+use std::abi::native::libc::stdlib::malloc;
+use std::abi::native::libc::stdlib::system;
+use std::core;
+use std::core::types::Size;
+use std::error::error::Error;
+use std::error::result::Result;
+use std::text::string::String;
+use std::system::process::ExitCode;
+use std::system::traits::ProcessControl;
+
+// A command in shell mode. `system()` and `popen()` intentionally use the
+// host shell, just like C/C++ system(). Do not concatenate untrusted input.
+pub class Command { value: str, arguments: std::text::string::String }
+
+pub struct Output { status: ExitCode, stdout: std::text::string::String }
+
+impl Output {
+    fn status(self: &Output) -> ExitCode { return ExitCode::new(self.status.value()); }
+    fn stdout(self: &Output) -> str { return self.stdout.as_str(); }
+    fn success(self: &Output) -> bool { return self.status.is_success(); }
+}
+
+impl Command {
+    static fn new(value: str) -> Self {
+        return new Command { value: value, arguments: String::new() };
+    }
+
+    // Adds one argument and returns the command so calls can be chained.
+    // Arguments are currently assembled for the shell-backed implementation.
+    fn arg(self: &mut Command, value: str) -> &mut Command {
+        self.arguments.append(" ");
+        self.arguments.append(value);
+        return self;
+    }
+
+    fn command(self: &Command) -> std::text::string::String { return self.shell_command(); }
+
+    fn shell_command(self: &Command) -> std::text::string::String {
+        let mut complete: std::text::string::String = String::from(self.value);
+        complete.append(self.arguments.as_str());
+        return complete;
+    }
+
+    // Equivalent to C/C++ system(): waits for the shell command and returns
+    // its normalized exit code. A non-zero exit code is not an Error.
+    fn status(self: &Command) -> Result<ExitCode,Error> {
+        let complete: std::text::string::String = self.shell_command();
+        let mut status: i32 = 0;
+        unsafe { status = system(complete.as_str()); }
+        if status < 0 { return Err(Error::new(status, "could not execute command")); }
+        if (status & 127) != 0 { return Err(Error::new(status, "command terminated by signal")); }
+        return Ok(ExitCode::new((status >> 8) & 255));
+    }
+
+    // Executes through the shell and captures stdout. Stderr remains attached
+    // to the parent process, matching the usual popen("r") behavior.
+    fn output(self: &Command) -> Result<Output,Error> {
+        let complete: std::text::string::String = self.shell_command();
+        let stream: *mut u8 = unsafe { popen(complete.as_str(), "r") };
+        let stream_address: Size = unsafe { stream as Size };
+        if stream_address == 0 {
+            return Err(Error::new(-1, "could not open command output"));
+        }
+
+        let buffer: *mut u8 = unsafe { malloc(4096) };
+        let buffer_address: Size = unsafe { buffer as Size };
+        if buffer_address == 0 {
+            unsafe { pclose(stream); }
+            return Err(Error::new(-12, "could not allocate command output buffer"));
+        }
+
+        let mut captured: std::text::string::String = String::new();
+        unsafe {
+            while feof(stream) == 0 {
+                let line: *mut u8 = fgets(buffer, 4096, stream);
+                if (line as Size) == 0 { break; }
+                captured.append(core::borrow(buffer as Size));
+            }
+        }
+
+        let raw_status: i32 = unsafe { pclose(stream) };
+        unsafe { free(buffer); }
+        if raw_status < 0 {
+            return Err(Error::new(raw_status, "could not wait for command"));
+        }
+        if (raw_status & 127) != 0 {
+            return Err(Error::new(raw_status, "command terminated by signal"));
+        }
+
+        return Ok(new Output {
+            status: ExitCode::new((raw_status >> 8) & 255),
+            stdout: captured
+        });
+    }
+}
+
+impl ProcessControl for Command {
+    fn run(self: &Command, command: str) -> Result<ExitCode,Error> {
+        let command_value: Command = Command::new(command);
+        return command_value.status();
+    }
+}
+
+pub fn run(command: str) -> Result<ExitCode,Error> {
+    let command_value: Command = Command::new(command);
+    return command_value.status();
+}
+
+pub fn output(command: str) -> Result<Output,Error> {
+    let command_value: Command = Command::new(command);
+    return command_value.output();
+}

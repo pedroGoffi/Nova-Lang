@@ -1,0 +1,24 @@
+// Standard-library manifest. It lives in a specialization directory so the
+// std/src root contains no loose Nova modules.
+pub concept StandardCollection<T> = has_method<T,len> && has_method<T,is_empty>;
+
+pub mod core;
+pub mod abi;
+pub mod memory;
+pub mod text;
+pub mod collections;
+pub mod error;
+pub mod iter;
+pub mod io;
+pub mod fs;
+pub mod concurrency;
+pub mod serialization;
+pub mod time;
+pub mod net;
+pub mod introspection;
+pub mod platform;
+pub mod system;
+pub mod numeric;
+pub mod testing;
+pub mod cli;
+pub mod diagnostics;

@@ -1,0 +1,9 @@
+[package]
+name = "nova_http_tests"
+version = "0.1.0"
+entry = "src/main.nova"
+
+[dependencies]
+std = { builtin = "std" }
+nova_http = { path = "../../../packages/nova_http" }
+NB = { path = "../../../packages/NB" }

@@ -1,0 +1,42 @@
+use std::memory::raw;
+use std::core::types::Size;
+use std::memory::traits::ReferenceCounted;
+use std::core::value::Clone;
+
+pub class SharedPtr<T> { pointer: *mut T, references: *mut Size }
+
+impl<T> SharedPtr<T> {
+    [[unsafe]] static fn from_raw(pointer: *mut T) -> Self {
+        unsafe {
+            let references: *mut Size = raw::alloc_record::<Size>();
+            *references = 1;
+            return new SharedPtr<T> { pointer: pointer, references: references };
+        }
+    }
+    fn strong_count(self: &SharedPtr<T>) -> Size { unsafe { return *self.references; } }
+    fn clone(self: &SharedPtr<T>) -> SharedPtr<T> {
+        let references: *mut Size = self.references;
+        unsafe { *references = *references + 1; }
+        return new SharedPtr<T> { pointer: self.pointer, references: self.references };
+    }
+    fn drop(self: SharedPtr<T>) -> () {
+        unsafe {
+            let references: *mut Size = self.references;
+            *references = *references - 1;
+            if *references == 0 {
+                raw::drop_in_place::<T>(self.pointer);
+                raw::free_record::<T>(self.pointer);
+                raw::free_record::<Size>(self.references);
+            }
+        }
+        return;
+    }
+}
+
+impl<T> Clone for SharedPtr<T> {
+    fn clone(self: &SharedPtr<T>) -> SharedPtr<T> { return self.clone(); }
+}
+
+impl<T> ReferenceCounted for SharedPtr<T> {
+    fn strong_count(self: &SharedPtr<T>) -> Size { return self.strong_count(); }
+}

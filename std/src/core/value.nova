@@ -1,0 +1,14 @@
+use std::core::types::Size;
+
+pub trait Clone { fn clone(self: &Self) -> Self; }
+pub trait Eq { fn equals(self: &Self, other: &Self) -> bool; }
+pub trait Ord extends Eq { fn compare(self: &Self, other: &Self) -> i64; }
+pub trait Hash { fn hash(self: &Self) -> Size; }
+pub trait Display { fn to_string(self: &Self) -> str; }
+pub trait Debug { fn debug_string(self: &Self) -> str; }
+
+pub concept Cloneable<T> = implements<T,Clone>;
+pub concept Equatable<T> = implements<T,Eq>;
+pub concept Orderable<T> = implements<T,Ord>;
+pub concept Hashable<T> = implements<T,Hash>;
+pub concept Displayable<T> = implements<T,Display>;

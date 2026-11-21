@@ -1,0 +1,11 @@
+import std;
+use std::memory::raw;
+
+fn main() -> i32 {
+    // unsafe permits raw allocation, dereference, mutation, and manual release.
+    let pointer: *mut i32 = unsafe { raw::alloc_record::<i32>() as (*mut i32) };
+    unsafe { *pointer = 42; }
+    let result: i32 = unsafe { *pointer };
+    unsafe { raw::free_record::<i32>(pointer); }
+    return result - 42;
+}

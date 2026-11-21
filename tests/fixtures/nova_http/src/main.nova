@@ -1,0 +1,254 @@
+import std;
+import nova_http;
+
+// NB is loaded after nova_http to cover canonical dependency identity as well.
+@NB::RestController(path="/nb")
+class NBController {}
+impl NBController {
+    @NB::GetMapping("/ping")
+    static fn ping(response:&NB::http::Response,request:&NB::http::Request)->() {
+        NB::response::Reply::message(response,200,"NB uses nova_http"); return;
+    }
+    @NB::PostMapping("/json")
+    static fn json(response:&NB::http::Response,request:&NB::http::Request)->() {
+        match NB::http::RequestData::body::<i64>(request) {
+            Ok(value) => {NB::response::Reply::json(response,&value);}
+            Err(error) => {NB::response::Reply::bad_request(response,"Invalid JSON");}
+        }
+        return;
+    }
+}
+@NB::BootApplication
+class NBFixture {}
+impl NBFixture { static fn main()->i32 {return 0;} }
+fn nb_guard(response:&NB::http::Response,request:&NB::http::Request)->bool {
+    let policy=NB::security::Bearer::new("valid-token"); return policy.require(request,response);
+}
+
+fn expect(value: bool, label: str) -> i32 {
+    if !value { println!("FAIL {}",label); return 1; }
+    return 0;
+}
+fn route(writer: &nova_http::response::ResponseWriter, request: &nova_http::request::Request) -> () {
+    let value = request.path_value("id"); writer.text(value.as_str()); return;
+}
+fn fixed(writer: &nova_http::response::ResponseWriter, request: &nova_http::request::Request) -> () { writer.text("fixed"); return; }
+fn echo(writer: &nova_http::response::ResponseWriter, request: &nova_http::request::Request) -> () { writer.write_bytes(&request.body); return; }
+fn redirect(writer: &nova_http::response::ResponseWriter, request: &nova_http::request::Request) -> () { writer.redirect("/fixed",302); return; }
+fn cookies(writer: &nova_http::response::ResponseWriter, request: &nova_http::request::Request) -> () {
+    let a = nova_http::cookie::new_cookie("a","1"); let b = nova_http::cookie::new_cookie("b","2");
+    nova_http::cookie::set_cookie(writer,&a); nova_http::cookie::set_cookie(writer,&b); writer.text("cookies"); return;
+}
+fn form(writer: &nova_http::response::ResponseWriter, request: &nova_http::request::Request) -> () {
+    match request.form() {
+        Ok(values) => { let name = values.get("name"); writer.text(name.as_str()); }
+        Err(error) => { writer.error(400,error.as_str()); }
+    }
+    return;
+}
+fn before(writer: &nova_http::response::ResponseWriter, request: &nova_http::request::Request) -> bool {
+    writer.header.set("X-Before","yes"); return true;
+}
+fn after(writer: &nova_http::response::ResponseWriter, request: &nova_http::request::Request) -> () { writer.header.set("X-After","yes"); return; }
+fn fixture() -> nova_http::mux::ServeMux {
+    let mux = nova_http::new_serve_mux();
+    mux.use_before(before); mux.use_after(after);
+    mux.handle_func("GET /users/{id}",route); mux.handle_func("GET /users/fixed",fixed);
+    mux.handle_func("GET /files/{id...}",route); mux.handle_func("GET /fixed",fixed);
+    mux.handle_func("POST /echo",echo); mux.handle_func("GET /redirect",redirect);
+    mux.handle_func("GET /cookies",cookies); mux.handle_func("POST /form",form);
+    if NBFixture::nb_register_controllers(&mux)!=0 {std::panic::fail("NB registration failed");}
+    let group=NB::web::Group::new("/nb");
+    if group.guarded(&mux,1,"/secure",nb_guard,NBController::ping)!=0 {std::panic::fail("NB guarded route failed");}
+    return mux;
+}
+fn check_route(mux: &nova_http::mux::ServeMux, method: str, target: str, code: i32, expected: str) -> i32 {
+    match nova_http::httptest::perform(mux,method,target,"") {
+        Ok(response) => {
+            let a = response.header.get("X-Before"); let b = response.header.get("X-After");
+            let mut errors: i32 = expect(response.status_code == code && a.equals("yes") && b.equals("yes"),target);
+            match response.body_text() {
+                Ok(text) => { errors += expect(text.equals(expected),target); }
+                Err(error) => { return 1; }
+            }
+            return errors;
+        }
+        Err(error) => { println!("{}",error.as_str()); return 1; }
+    }
+}
+fn bad(text: str, eof: bool, response: bool, code: i32) -> i32 {
+    let bytes = nova_http::bytes::from_text(text); let limits = nova_http::wire::default_limits();
+    match nova_http::wire::decode(&bytes,eof,response,false,&limits) {
+        Ok(message) => { println!("Unexpected valid wire message: {}",text); return 1; }
+        Err(error) => { return expect(error.code() == code,error.as_str()); }
+    }
+}
+fn unit_tests() -> i32 {
+    let mut errors: i32 = 0;
+    let header = nova_http::header::new_header();
+    errors += expect(header.add("Set-Cookie","a=1") && header.add("set-cookie","b=2"),"header add");
+    errors += expect(header.count("SET-cookie") == 2,"header count");
+    let values = header.values("SET-COOKIE"); errors += expect(values.count() == 2,"header values");
+    errors += expect(!header.add("X-Bad\r\nInjected","value") && !header.add("X-Bad","value\r\nInjected: yes"),"header injection");
+    errors += expect(header.set("set-cookie","c=3") && header.count("Set-Cookie") == 1,"header set");
+    let first = header.get("Set-Cookie"); errors += expect(first.equals("c=3"),"header get");
+    let copy = header.clone(); header.del("Set-Cookie"); errors += expect(header.len() == 0 && copy.len() == 1,"header clone/delete");
+    match nova_http::url::parse("http://[::1]:8080/a%2Fb?q=hello+world&x=1&x=2#frag") {
+        Ok(url) => {
+            let authority = url.authority(); let uri = url.request_uri();
+            errors += expect(authority.equals("[::1]:8080") && uri.equals("/a%2Fb?q=hello+world&x=1&x=2"),"URL components");
+            match url.query() {
+                Ok(query) => {
+                    let value = query.get("q"); let all = query.all("x");
+                    errors += expect(value.equals("hello world") && all.count() == 2,"query decoding");
+                }
+                Err(error) => { errors += 1; }
+            }
+        }
+        Err(error) => { errors += 1; }
+    }
+    match nova_http::url::parse("http://example.test/a/b/c?old=1") {
+        Ok(base) => {
+            match base.resolve("../next?new=2") {
+                Ok(target) => { let text = target.string(); errors += expect(text.equals("http://example.test/a/next?new=2"),"relative redirect dot segments"); }
+                Err(error) => { errors += 1; }
+            }
+            match base.resolve("?new=2") {
+                Ok(target) => { let text = target.string(); errors += expect(text.equals("http://example.test/a/b/c?new=2"),"relative redirect query"); }
+                Err(error) => { errors += 1; }
+            }
+        }
+        Err(error) => { errors += 1; }
+    }
+    match nova_http::new_request("GET","/fixed") {
+        Ok(request) => {
+            let file_writer = nova_http::httptest::new_recorder();
+            nova_http::file::serve_file(&file_writer,&request,"/dev/null",10);
+            errors += expect(file_writer.status_code() == 200 && file_writer.body.len() == 0,"empty file");
+            let missing = nova_http::httptest::new_recorder();
+            nova_http::file::serve_file(&missing,&request,"/nova-http-missing-fixture",10);
+            errors += expect(missing.status_code() == 404,"missing file");
+        }
+        Err(error) => { errors += 1; }
+    }
+    let encoded = nova_http::url::escape("café +/="); errors += expect(encoded.equals("caf%C3%A9+%2B%2F%3D"),"UTF-8 query escaping");
+    match nova_http::url::parse_query("bad=%Q1") { Ok(value) => { errors += 1; } Err(error) => { } }
+    let writer = nova_http::response::new_writer();
+    errors += expect(!writer.write_header(99) && writer.write_header(201) && !writer.write_header(202),"writer first status wins");
+    writer.text("one"); writer.write("two");
+    let result = writer.result(); errors += expect(result.status_code == 201 && result.body.len() == 6,"buffered writer");
+    let empty = nova_http::response::new_writer(); empty.write_header(204); errors += expect(!empty.write("body"),"204 forbids body");
+    let mux = fixture();
+    errors += expect(!mux.handle_func("GET /users/{other}",fixed),"duplicate route shape");
+    errors += expect(!mux.handle_func("GET /bad/{x...}/tail",fixed),"invalid wildcard");
+    errors += expect(!mux.handle_func("GET /%ZZ",fixed),"invalid escaped route");
+    match nova_http::new_server("localhost:8080/path") { Ok(server) => { errors += 1; } Err(error) => { } }
+    errors += check_route(&mux,"GET","/users/Nova",200,"Nova");
+    errors += check_route(&mux,"HEAD","/users/Nova",200,"Nova");
+    errors += check_route(&mux,"GET","/users/fixed",200,"fixed");
+    errors += check_route(&mux,"GET","/users/a%2Fb",200,"a/b");
+    errors += check_route(&mux,"GET","/files/a/b/c",200,"a/b/c");
+    errors += check_route(&mux,"POST","/fixed",405,"Method Not Allowed\n");
+    errors += check_route(&mux,"GET","/missing",404,"Not Found\n");
+    errors += check_route(&mux,"GET","/actuator/health",200,"{\"status\":\"UP\"}");
+    errors += check_route(&mux,"GET","/nb/ping",200,"{\"message\":\"NB uses nova_http\"}");
+    errors += check_route(&mux,"POST","/nb/json",400,"{\"error\":\"bad_request\",\"message\":\"Invalid JSON\"}");
+    errors += check_route(&mux,"GET","/nb/secure",401,"{\"error\":\"unauthorized\",\"message\":\"Authentication is required\"}");
+    let cookie = nova_http::cookie::new_cookie("session","abc123");
+    match cookie.string() { Ok(value) => { errors += expect(value.contains("HttpOnly") && value.contains("SameSite=Lax"),"cookie flags"); } Err(error) => { errors += 1; } }
+    let invalid_cookie = nova_http::cookie::new_cookie("session","bad; injected");
+    match invalid_cookie.string() { Ok(value) => { errors += 1; } Err(error) => { } }
+    header.add("Cookie","a=1; session=abc123");
+    match nova_http::cookie::find(&header,"session") { Some(value) => { errors += expect(value.equals("abc123"),"read cookie"); } None => { errors += 1; } }
+    match nova_http::request::new_request("POST","http://localhost/echo") {
+        Ok(request) => {
+            request.body.push(0); request.body.push(255); request.body.push(195); request.body.push(169);
+            request.trailer.add("X-Checksum","yes");
+            let bytes = nova_http::wire::encode_request(&request,true); let limits = nova_http::wire::default_limits();
+            match nova_http::wire::decode(&bytes,false,false,false,&limits) {
+                Ok(message) => { errors += expect(message.body.len() == 4 && message.body.get(0) == 0 && message.body.get(1) == 255 && message.trailer.has("X-Checksum"),"binary chunked roundtrip with trailers"); }
+                Err(error) => { println!("{}",error.as_str()); errors += 1; }
+            }
+        }
+        Err(error) => { errors += 1; }
+    }
+    let raw = nova_http::bytes::from_text("POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 3\r\n\r\nabc");
+    let prefix = std::vec::new_byte_vector(); let limits = nova_http::wire::default_limits();
+    let mut index: u64 = 0;
+    while index < raw.len() {
+        match nova_http::wire::decode(&prefix,false,false,false,&limits) {
+            Ok(message) => { errors += 1; }
+            Err(error) => { errors += expect(error.code() == 2,"every fragmented prefix remains incomplete"); }
+        }
+        prefix.push(raw.get(index)); index += 1;
+    }
+    match nova_http::wire::decode(&prefix,true,false,false,&limits) {
+        Ok(message) => { errors += expect(message.body.len() == 3 && message.consumed == raw.len(),"fixed framing roundtrip"); }
+        Err(error) => { errors += 1; }
+    }
+    errors += bad("GET / HTTP/1.1\r\n\r\n",true,false,1);
+    errors += bad("GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n",true,false,1);
+    errors += bad("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 1\r\ncontent-length: 1\r\n\r\nx",true,false,1);
+    errors += bad("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\nx",true,false,1);
+    errors += bad("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: -1\r\n\r\n",true,false,1);
+    errors += bad("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 100000000\r\n\r\n",true,false,3);
+    errors += bad("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 4\r\n\r\nx",true,false,1);
+    errors += bad("GET / HTTP/2.0\r\nHost: a\r\n\r\n",true,false,6);
+    errors += bad("GET /#fragment HTTP/1.1\r\nHost: a\r\n\r\n",true,false,1);
+    errors += bad("GET / HTTP/1.1\nHost: a\n\n",true,false,1);
+    errors += bad("GET / HTTP/1.1\r\nHost : a\r\n\r\n",true,false,1);
+    errors += bad("GET / HTTP/1.1\r\nHost: a\r\n folded\r\n\r\n",true,false,1);
+    errors += bad("POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: gzip, chunked\r\n\r\n",true,false,6);
+    errors += bad("POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\nZ\r\n",true,false,1);
+    errors += bad("POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n1\r\naXX",true,false,1);
+    errors += bad("POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nContent-Length: 0\r\n\r\n",true,false,1);
+    println!("unit errors={}",errors);
+    return errors;
+}
+fn main() -> i32 {
+    let parser = std::arg::new_parser("http-tests","");
+    parser.add_flag("--chunked","","Send chunked with trailers");
+    parser.add_option("--server","","ADDR",""); parser.add_option("--client","","URL","");
+    parser.add_default("--method","","METHOD","","GET"); parser.add_default("--body","","BODY","","");
+    parser.add_default("--requests","","N","","0");
+    let options = parser.parse();
+    if options.has("--server") {
+        let address = options.value("--server"); let count = options.value("--requests"); let mux = fixture();
+        match nova_http::server::new_server(address.as_str()) {
+            Ok(server) => {
+                let mut configured = server; configured.max_requests = std::convert::parse_or(count.as_str(),0);
+                configured.read_timeout_millis = 300; configured.idle_timeout_millis = 300;
+                match configured.listen_and_serve(&mux) {
+                    Ok(served) => { println!("served={}",served); return 0; }
+                    Err(error) => { println!("server error: {}",error.as_str()); return 1; }
+                }
+            }
+            Err(error) => { return 1; }
+        }
+    }
+    if options.has("--client") {
+        let url = options.value("--client"); let verb = options.value("--method"); let body = options.value("--body");
+        let mut client = nova_http::client::new_client(); client.timeout_millis = 500; client.max_redirects = 2;
+        match nova_http::request::new_request(verb.as_str(),url.as_str()) {
+            Ok(request) => {
+                request.set_body(body.as_str());
+                if options.has("--chunked") { request.header.set("Transfer-Encoding","chunked"); request.trailer.add("X-Checksum","yes"); }
+                request.header.set("Authorization","secret"); request.header.set("Cookie","secret=1");
+                match client.do_request(&request) {
+                    Ok(response) => {
+                        println!("status={} length={}",response.status_code,response.body.len());
+                        println!("cookies={}",response.header.count("Set-Cookie"));
+                        let trailer = response.trailer.get("X-Checksum"); println!("trailer={}",trailer.as_str());
+                        match response.body_text() { Ok(text) => { println!("body={}",text.as_str()); } Err(error) => { println!("binary"); } }
+                        let mut index: u64 = 0;
+                        while index < response.body.len() && index < 4 { println!("byte={}",response.body.get(index)); index += 1; }
+                        return 0;
+                    }
+                    Err(error) => { println!("error={}:{}",error.code(),error.as_str()); return 1; }
+                }
+            }
+            Err(error) => { println!("error={}:{}",error.code(),error.as_str()); return 1; }
+        }
+    }
+    return unit_tests();
+}

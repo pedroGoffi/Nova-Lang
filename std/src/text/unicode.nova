@@ -1,0 +1,9 @@
+pub fn is_ascii(value: str) -> bool { return true; }
+pub fn is_ascii_digit(value: u8) -> bool { return value >= 48 && value <= 57; }
+pub fn is_ascii_letter(value: u8) -> bool {
+    return (value >= 65 && value <= 90) || (value >= 97 && value <= 122);
+}
+pub fn to_ascii_lower(value: u8) -> u8 {
+    if value >= 65 && value <= 90 { return value + 32; }
+    return value;
+}

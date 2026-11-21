@@ -15,7 +15,7 @@ pub enum Primitive {
     Str,
 }
 // Single source of truth for builtin scalar type names. A module named
-// `std::char` must never shadow the primitive `char` in type positions.
+// `std::old::char` must never shadow the primitive `char` in type positions.
 const PRIMITIVE_TYPE_DEFINITIONS: &[(&str, Primitive)] = &[
     ("()", Primitive::Unit),
     ("bool", Primitive::Bool),
@@ -33,6 +33,7 @@ const PRIMITIVE_TYPE_DEFINITIONS: &[(&str, Primitive)] = &[
     ("f32", Primitive::Float(32)),
     ("f64", Primitive::Float(64)),
     ("str", Primitive::Str),
+    ("String", Primitive::Str),
 ];
 
 pub(crate) fn is_primitive_type_name(name: &str) -> bool {
@@ -49,6 +50,8 @@ pub enum TypeKind {
     Pointer { element: TypeId, mutable: bool },
     Reference { element: TypeId, mutable: bool },
     Function { params: Vec<TypeId>, result: TypeId },
+    /// A two-word fat pointer: concrete data pointer plus trait vtable pointer.
+    TraitObject { trait_name: String },
 }
 #[derive(Debug, Clone)]
 pub struct Field {
@@ -161,6 +164,12 @@ impl Types {
             TypeRef::Named(n) if n == "auto" => {
                 Err("'auto' is only allowed for local declarations with an initializer".into())
             }
+            TypeRef::Named(n) if n.strip_prefix("dyn ").is_some() => {
+                let trait_name = n.strip_prefix("dyn ").unwrap().to_owned();
+                let object = self.intern(TypeKind::TraitObject { trait_name });
+                self.names.insert(n.clone(), object);
+                Ok(object)
+            }
             TypeRef::Named(n) => self.named(n).ok_or_else(|| format!("unknown type '{n}'")),
             TypeRef::Array(inner, len) => {
                 if *len > 1_000_000 {
@@ -198,6 +207,7 @@ impl Types {
         match self.kind(ty) {
             TypeKind::Reference { .. } => true,
             TypeKind::Array { element, .. } => self.contains_borrow(element),
+            TypeKind::TraitObject { .. } => false,
             _ => false,
         }
     }
@@ -214,6 +224,7 @@ impl Types {
             },
             TypeKind::Struct(s) => self.structs[s].name.clone(),
             TypeKind::Array { element, len } => format!("[{}; {len}]", self.display(element)),
+            TypeKind::TraitObject { trait_name } => format!("dyn {trait_name}"),
             TypeKind::Pointer { element, mutable } => format!(
                 "*{} {}",
                 if mutable { "mut" } else { "const" },
@@ -251,7 +262,14 @@ impl Types {
             TypeKind::Pointer { .. } | TypeKind::Reference { .. } | TypeKind::Function { .. } => {
                 "ptr".into()
             }
+            TypeKind::TraitObject { .. } => "{ ptr, ptr }".into(),
         }
+    }
+    /// An LLVM `void` can be a function return type, but is not a valid
+    /// field of an aggregate. Unit occupies no bytes in a struct/enum.
+    /// The empty aggregate is first-class and preserves field indices.
+    pub fn llvm_field(&self, id: TypeId) -> String {
+        if id == self.unit() { "{}".into() } else { self.llvm(id) }
     }
     pub fn integer(&self, ty: TypeId) -> Option<(u8, bool)> {
         match self.kind(ty) {
@@ -279,6 +297,22 @@ impl Types {
                 && matches!(self.kind(to), TypeKind::Function { .. }))
             || (matches!(self.kind(from), TypeKind::Pointer { .. })
                 && matches!(self.kind(to), TypeKind::Pointer { .. }))
+            || (matches!(self.kind(from), TypeKind::Reference { .. })
+                && matches!(self.kind(to), TypeKind::Pointer { .. }))
+            // Safe permission downgrade; no data conversion or ownership move.
+            || matches!(
+                (self.kind(from), self.kind(to)),
+                (
+                    TypeKind::Reference { element: a, mutable: true },
+                    TypeKind::Reference { element: b, mutable: false },
+                ) if a == b
+            )
+            // Explicit 64-bit pointer address conversion for compiler-backed
+            // allocators, only after HIR checks the required unsafe context.
+            || (matches!(self.kind(from), TypeKind::Pointer { .. })
+                && self.kind(to) == TypeKind::Primitive(Primitive::Unsigned(64)))
+            || (self.kind(from) == TypeKind::Primitive(Primitive::Unsigned(64))
+                && matches!(self.kind(to), TypeKind::Pointer { .. }))
     }
     pub fn scalar(&self, ty: TypeId) -> bool {
         matches!(
@@ -295,7 +329,7 @@ impl Types {
             let fields = s
                 .fields
                 .iter()
-                .map(|f| self.llvm(f.ty))
+                .map(|f| self.llvm_field(f.ty))
                 .collect::<Vec<_>>()
                 .join(", ");
             out.push_str(&format!("%struct.{} = type {{ {fields} }}\n", s.name));
@@ -322,6 +356,7 @@ impl Types {
                 TypeKind::Pointer { .. }
                 | TypeKind::Reference { .. }
                 | TypeKind::Function { .. }
+                | TypeKind::TraitObject { .. }
                 | TypeKind::Primitive(_) => {}
             }
             Ok(())
@@ -349,4 +384,31 @@ mod intern_tests {
         assert_eq!(first, second);
         assert_eq!(types.kind(first), function);
     }
+
+    #[test]
+    fn string_is_the_text_compatibility_alias() {
+        let types = Types::new();
+        assert_eq!(types.named("String"), Some(types.string()));
+        assert_eq!(types.named("str"), Some(types.string()));
+    }
+
+    #[test]
+    fn unit_payload_is_zero_sized_in_llvm_aggregate() {
+        let mut types = Types::new();
+        let sid = types.register_struct("UnitEnvelope", false, false, false).unwrap();
+        let unit = types.unit();
+        let number = types.i64();
+        types.structs[sid].fields.push(super::Field {
+            name: "empty".into(), ty: unit,
+        });
+        types.structs[sid].fields.push(super::Field {
+            name: "number".into(), ty: number,
+        });
+        assert_eq!(types.llvm(types.unit()), "void");
+        assert_eq!(types.llvm_field(types.unit()), "{}");
+        assert!(types.llvm_declarations().contains(
+            "%struct.UnitEnvelope = type { {}, i64 }"
+        ));
+    }
+
 }

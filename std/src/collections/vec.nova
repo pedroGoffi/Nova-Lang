@@ -1,0 +1,104 @@
+use std::memory::storage::Storage;
+use std::memory::traits::Storable;
+use std::memory::raw;
+use std::core::panic;
+use std::core::types::Size;
+use std::collections::traits::Collection;
+
+pub concept VectorElement<T> = Storable<T>;
+
+// Vec is a collection over Storage<T>; data and capacity are inherited from
+// the memory base class. Vec owns only the initialized prefix (`length`).
+pub class Vec<T> : Storage<T> { length: Size }
+
+impl<T> Vec<T> {
+    static fn new() -> Self {
+        return new Vec<T> { length: 0 };
+    }
+    fn len(self: &Vec<T>) -> Size { return self.length; }
+    fn count(self: &Vec<T>) -> i64 { return self.length as i64; }
+    fn is_empty(self: &Vec<T>) -> bool { return self.length == 0; }
+    fn reserve(self: &Vec<T>, requested: Size) -> () {
+        unsafe { self.grow(requested); }
+        return;
+    }
+    fn push(self: &Vec<T>, value: T) -> () {
+        unsafe {
+            let max: Size = -1 as Size;
+            if self.length == max { panic::fail("vector length overflow"); }
+            self.grow(self.length + 1);
+            let slot: *mut T = raw::element_at::<T>(self.data, self.length);
+            *slot = value;
+            self.length += 1;
+        }
+        return;
+    }
+    fn append(self: &Vec<T>, value: T) -> () { self.push(value); return; }
+    fn get(self: &Vec<T>, index: i64) -> T {
+        if index < 0 || index as Size >= self.length {
+            panic::fail("vector index out of bounds");
+        }
+        unsafe {
+            let slot: *mut T = raw::element_at::<T>(self.data, index as Size);
+            return *slot;
+        }
+    }
+    fn at(self: &Vec<T>, index: i64) -> T { return self.get(index); }
+    fn set(self: &Vec<T>, index: i64, value: T) -> () {
+        if index < 0 || index as Size >= self.length {
+            panic::fail("vector index out of bounds");
+        }
+        unsafe {
+            let slot: *mut T = raw::element_at::<T>(self.data, index as Size);
+            raw::drop_in_place::<T>(slot);
+            *slot = value;
+        }
+        return;
+    }
+    fn pop(self: &Vec<T>) -> T {
+        if self.length == 0 { panic::fail("pop from empty vector"); }
+        unsafe {
+            self.length -= 1;
+            let slot: *mut T = raw::element_at::<T>(self.data, self.length);
+            return raw::take_from::<T>(slot);
+        }
+    }
+    fn try_pop(self: &Vec<T>) -> std::core::option::Option<T> {
+        if self.length == 0 { return None; }
+        return Some(self.pop());
+    }
+    fn swap_remove(self: &Vec<T>, index: i64) -> T {
+        if index < 0 || index as Size >= self.length {
+            panic::fail("vector index out of bounds");
+        }
+        unsafe {
+            self.length -= 1;
+            let last: *mut T = raw::element_at::<T>(self.data, self.length);
+            let current: *mut T = raw::element_at::<T>(self.data, index as Size);
+            if index as Size == self.length { return raw::take_from::<T>(last); }
+            let removed: T = raw::take_from::<T>(current);
+            *current = raw::take_from::<T>(last);
+            return removed;
+        }
+    }
+    fn clear(self: &Vec<T>) -> () {
+        unsafe {
+            while self.length > 0 {
+                self.length -= 1;
+                let slot: *mut T = raw::element_at::<T>(self.data, self.length);
+                raw::drop_in_place::<T>(slot);
+            }
+        }
+        return;
+    }
+    fn drop(self: Vec<T>) -> () {
+        self.clear();
+        unsafe { raw::deallocate_bytes(self.data as (*mut u8)); }
+        return;
+    }
+}
+
+impl<T> Collection for Vec<T> {
+    fn len(self: &Vec<T>) -> Size { return self.len(); }
+    fn is_empty(self: &Vec<T>) -> bool { return self.is_empty(); }
+}

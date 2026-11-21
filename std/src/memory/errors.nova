@@ -1,0 +1,9 @@
+pub class AllocError { code: i32, message: str }
+
+impl AllocError {
+    static fn new(code: i32, message: str) -> Self {
+        return new AllocError { code: code, message: message };
+    }
+    fn code(self: &AllocError) -> i32 { return self.code; }
+    fn message(self: &AllocError) -> str { return self.message; }
+}

@@ -1,0 +1,3 @@
+use std::text::string::String;
+pub fn text(value: str) -> std::text::string::String { return String::from(value); }
+pub fn append(output: &mut std::text::string::String, value: str) -> () { output.append(value); return; }

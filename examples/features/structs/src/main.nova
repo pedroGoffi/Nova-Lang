@@ -1,0 +1,14 @@
+import std;
+
+// Structs hold data; impl adds methods without changing their layout.
+struct Point { x: i32, y: i32 }
+
+impl Point {
+    fn sum(self: &Point) -> i32 { return self.x + self.y; }
+}
+
+fn main() -> i32 {
+    // new initializes every field by name.
+    let point = new Point { x: 20, y: 22 };
+    return point.sum() - 42;
+}

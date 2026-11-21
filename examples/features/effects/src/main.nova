@@ -1,0 +1,20 @@
+import std;
+
+// Effects are source-defined capabilities checked by the compiler.
+#[meta_effect]
+trait telemetry {}
+
+// The signature publishes that calling this function requires telemetry.
+fn record(value: i32) -> i32 requires(telemetry) {
+    return value;
+}
+
+// Effect requirements propagate: a caller must declare every effect required
+// by the functions it invokes.
+fn compute() -> i32 requires(telemetry) {
+    return record(42);
+}
+
+fn main() -> i32 requires(telemetry) {
+    return compute() - 42;
+}

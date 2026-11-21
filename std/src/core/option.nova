@@ -1,0 +1,58 @@
+use std::core::control::Optional;
+
+pub enum Option<T> { Some(T), None }
+
+impl<T> Option<T> {
+    static fn some(value: T) -> Option<T> { return Some(value); }
+    static fn none() -> Option<T> { return None; }
+    fn is_some(self: Option<T>) -> bool {
+        match self { Some(value) => { return true; } None => { return false; } }
+    }
+    fn is_none(self: Option<T>) -> bool {
+        match self { Some(value) => { return false; } None => { return true; } }
+    }
+    fn unwrap(self: Option<T>) -> T {
+        match self {
+            Some(value) => { return value; }
+            None => { std::core::panic::fail("called Option::unwrap on None"); }
+        }
+    }
+    fn unwrap_or(self: Option<T>, fallback: T) -> T {
+        match self { Some(value) => { return value; } None => { return fallback; } }
+    }
+    fn unwrap_or_else(self: Option<T>, fallback: fn() -> T) -> T {
+        match self { Some(value) => { return value; } None => { return fallback(); } }
+    }
+    fn expect(self: Option<T>, message: str) -> T {
+        match self { Some(value) => { return value; } None => { std::core::panic::fail(message); } }
+    }
+    fn map<U>(self: Option<T>, transform: fn(T) -> U) -> Option<U> {
+        match self { Some(value) => { return Some(transform(value)); } None => { return None; } }
+    }
+    fn map_or<U>(self: Option<T>, fallback: U, transform: fn(T) -> U) -> U {
+        match self { Some(value) => { return transform(value); } None => { return fallback; } }
+    }
+    fn map_or_else<U>(self: Option<T>, fallback: fn() -> U, transform: fn(T) -> U) -> U {
+        match self { Some(value) => { return transform(value); } None => { return fallback(); } }
+    }
+    fn and<U>(self: Option<T>, alternate: Option<U>) -> Option<U> {
+        match self { Some(value) => { return alternate; } None => { return None; } }
+    }
+    fn and_then<U>(self: Option<T>, transform: fn(T) -> Option<U>) -> Option<U> {
+        match self { Some(value) => { return transform(value); } None => { return None; } }
+    }
+    fn or(self: Option<T>, fallback: Option<T>) -> Option<T> {
+        match self { Some(value) => { return Some(value); } None => { return fallback; } }
+    }
+    fn or_else(self: Option<T>, fallback: fn() -> Option<T>) -> Option<T> {
+        match self { Some(value) => { return Some(value); } None => { return fallback(); } }
+    }
+    fn ok_or<E>(self: Option<T>, error: E) -> std::error::result::Result<T,E> {
+        match self { Some(value) => { return Ok(value); } None => { return Err(error); } }
+    }
+}
+
+impl<T> Optional for Option<T> {
+    fn is_some(self: &Option<T>) -> bool { return self.is_some(); }
+    fn is_none(self: &Option<T>) -> bool { return self.is_none(); }
+}

@@ -1,0 +1,17 @@
+import std;
+
+// This structural contract requires `left + right` to compile and return T.
+concept Addable<T> = requires(T left, T right) {
+    { left + right } -> T;
+};
+
+// The compiler checks Addable when this function is specialized.
+fn add<T: Addable>(left: T, right: T) -> T {
+    return left + right;
+}
+
+static_assert(Addable<i32>);
+
+fn main() -> i32 {
+    return add::<i32>(20, 22) - 42;
+}

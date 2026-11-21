@@ -1,0 +1,6 @@
+use std::error::error::Error;
+use std::error::result::Result;
+
+pub fn failure<T>(code: i32, message: str) -> Result<T,Error> {
+    return Err(Error::new(code, message));
+}

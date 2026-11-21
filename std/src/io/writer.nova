@@ -1,0 +1,45 @@
+use std::abi::llvm::write_bytes;
+use std::core::address;
+use std::core::text_size;
+use std::io::traits::Write;
+use std::core::types::Size;
+use std::error::error::Error;
+use std::error::result::Result;
+
+pub class Writer { descriptor: i32 }
+
+impl Writer {
+    static fn new(descriptor: i32) -> Self {
+        return new Writer { descriptor: descriptor };
+    }
+    [[unsafe]] fn write_raw(self: &Writer, value: str) -> i64 {
+        unsafe { return write_bytes(self.descriptor, address(value), text_size(value)); }
+    }
+    fn write_line(self: &Writer, value: str) -> Result<Size,Error> {
+        let mut count: i64 = 0;
+        unsafe { count = self.write_raw(value); }
+        if count < 0 { return Err(Error::new(count as i32, "could not write to stream")); }
+        unsafe { write_bytes(self.descriptor, address("\n"), text_size("\n")); }
+        return Ok(count as Size);
+    }
+    // Allows direct chaining on io::stdout()/io::stderr() temporaries.
+    fn write_line(self: Writer, value: str) -> Result<Size,Error> {
+        let mut count: i64 = 0;
+        unsafe { count = self.write_raw(value); }
+        if count < 0 { return Err(Error::new(count as i32, "could not write to stream")); }
+        unsafe { write_bytes(self.descriptor, address("\n"), text_size("\n")); }
+        return Ok(count as Size);
+    }
+}
+
+impl Write for Writer {
+    fn write(self: &Writer, value: str) -> Result<Size,Error> {
+        let mut count: i64 = 0;
+        unsafe { count = self.write_raw(value); }
+        if count < 0 { return Err(Error::new(count as i32, "could not write to stream")); }
+        return Ok(count as Size);
+    }
+}
+
+pub fn stdout() -> Writer { return Writer::new(1); }
+pub fn stderr() -> Writer { return Writer::new(2); }

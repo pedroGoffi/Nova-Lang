@@ -1,0 +1,18 @@
+use std::collections::vec::Vec;
+use std::core::types::Size;
+use std::collections::traits::Collection;
+
+pub concept ListElement<T> = integer<T> || boolean<T>;
+
+pub class List<T> : Vec<T> {}
+
+impl<T> List<T> {
+    static fn new() -> Self {
+        return new List<T> { length: 0 };
+    }
+}
+
+impl<T> Collection for List<T> {
+    fn len(self: &List<T>) -> Size { return self.len(); }
+    fn is_empty(self: &List<T>) -> bool { return self.is_empty(); }
+}

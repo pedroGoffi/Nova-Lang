@@ -1,0 +1,10 @@
+import std;
+
+fn main() -> i32 {
+    // for iterates over a range; while repeats until its condition is false.
+    let mut total: i32 = 0;
+    for value in 0..5 { total += value; }
+    while total < 15 { total += 1; }
+    if total == 15 { return 0; }
+    return 1;
+}

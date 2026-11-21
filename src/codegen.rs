@@ -50,6 +50,59 @@ struct Emitter<'a> {
     lines: Vec<String>,
     needs_trap: bool,
 }
+fn dyn_name_part(value: &str) -> String { value.replace("::", "__") }
+fn dyn_method_info(name: &str) -> Option<(String, usize, String)> {
+    let rest = name.strip_prefix("__nova_dyn__")?;
+    let parts = rest.rsplitn(3, "__").collect::<Vec<_>>();
+    Some((parts.get(2)?.to_string(), parts.get(1)?.parse().ok()?, parts.first()?.to_string()))
+}
+fn dyn_impl<'a>(program: &'a mir::Program, concrete: TypeId, method: &str) -> Option<&'a mir::Function> {
+    program.functions.iter().find(|function| {
+        if !matches!(function.kind, FunctionKind::Defined) || !function.name.ends_with(&format!("__{method}")) {
+            return false;
+        }
+        let Some(first) = function.params.first() else { return false; };
+        match program.types.kind(function.locals[*first]) {
+            TypeKind::Reference { element, .. } | TypeKind::Pointer { element, .. } => element == concrete,
+            _ => false,
+        }
+    })
+}
+fn dyn_slot_count(program: &mir::Program, trait_name: &str) -> usize {
+    program.functions.iter().filter_map(|function| {
+        let (key, slot, _) = dyn_method_info(&function.name)?;
+        (key == dyn_name_part(trait_name)).then_some(slot + 1)
+    }).max().unwrap_or(1)
+}
+fn dyn_vtables(program: &mir::Program) -> String {
+    let mut output = String::new();
+    let mut seen = std::collections::HashSet::new();
+    for function in &program.functions {
+        for block in &function.blocks {
+            for instruction in &block.instructions {
+                let mir::Instruction::Assign { value: mir::Rvalue::DynObjectRef(value, trait_name), .. } = instruction else { continue; };
+                let source = mir::operand_ty(value, function, &program.types).ok();
+                let Some(TypeKind::Reference { element: concrete, .. } | TypeKind::Pointer { element: concrete, .. }) = source.map(|ty| program.types.kind(ty)) else { continue; };
+                let key = format!("{}::{}", trait_name, concrete);
+                if !seen.insert(key) { continue; }
+                let methods = program.functions.iter().filter_map(|candidate| {
+                    let (trait_key, slot, method) = dyn_method_info(&candidate.name)?;
+                    if trait_key == dyn_name_part(trait_name) { Some((slot, method)) } else { None }
+                }).collect::<Vec<_>>();
+                let Some(max_slot) = methods.iter().map(|(slot, _)| *slot).max() else { continue; };
+                let global = format!("@__nova_vtable_{}_{}", dyn_name_part(trait_name), dyn_name_part(&program.types.display(concrete)));
+                let mut entries = vec!["ptr null".to_owned(); max_slot + 1];
+                for (slot, method) in methods {
+                    if let Some(implementation) = dyn_impl(program, concrete, &method) {
+                        entries[slot] = format!("ptr @{}", function_link_symbol(program, implementation));
+                    }
+                }
+                output.push_str(&format!("{global} = private constant [{} x ptr] [{}]\n", entries.len(), entries.join(", ")));
+            }
+        }
+    }
+    output
+}
 impl<'a> Emitter<'a> {
     fn temp(&mut self) -> String {
         let v = format!("%t{}", self.next);
@@ -92,6 +145,27 @@ impl<'a> Emitter<'a> {
     fn value(&mut self, rv: &Rvalue, target: Option<TypeId>) -> Option<String> {
         match rv {
             Rvalue::Use(op) => Some(self.operand(op)),
+            Rvalue::DynObjectRef(value, trait_name) => {
+                let source = self.operand_ty(value);
+                let concrete = match self.program.types.kind(source) {
+                    TypeKind::Reference { element, .. } | TypeKind::Pointer { element, .. } => element,
+                    _ => unreachable!("verified dyn object source"),
+                };
+                let global = format!("@__nova_vtable_{}_{}", dyn_name_part(trait_name), dyn_name_part(&self.program.types.display(concrete)));
+                let slots = dyn_slot_count(self.program, trait_name);
+                let object = self.temp();
+                self.lines.push(format!("  {object} = alloca {{ ptr, ptr }}"));
+                let data = self.operand(value);
+                let data_slot = self.temp();
+                self.lines.push(format!("  {data_slot} = getelementptr {{ ptr, ptr }}, ptr {object}, i32 0, i32 0"));
+                self.lines.push(format!("  store ptr {data}, ptr {data_slot}"));
+                let table = self.temp();
+                self.lines.push(format!("  {table} = getelementptr [{slots} x ptr], ptr {global}, i32 0, i32 0"));
+                let table_slot = self.temp();
+                self.lines.push(format!("  {table_slot} = getelementptr {{ ptr, ptr }}, ptr {object}, i32 0, i32 1"));
+                self.lines.push(format!("  store ptr {table}, ptr {table_slot}"));
+                Some(object)
+            }
             Rvalue::Cast(src, dest) => {
                 let source = self.operand_ty(src);
                 let from = self.ty(source);
@@ -162,6 +236,17 @@ impl<'a> Emitter<'a> {
                         TypeKind::Primitive(Primitive::Unsigned(_)),
                     ) => "fptoui",
                     (TypeKind::Pointer { .. }, TypeKind::Pointer { .. }) => return Some(value),
+                    (TypeKind::Reference { .. }, TypeKind::Pointer { .. }) => return Some(value),
+                    (TypeKind::Reference { element: a, mutable: true },
+                     TypeKind::Reference { element: b, mutable: false }) if a == b => {
+                        return Some(value);
+                    }
+                    (TypeKind::Pointer { .. }, TypeKind::Primitive(Primitive::Unsigned(64))) => {
+                        "ptrtoint"
+                    }
+                    (TypeKind::Primitive(Primitive::Unsigned(64)), TypeKind::Pointer { .. }) => {
+                        "inttoptr"
+                    }
                     (TypeKind::Function { .. }, TypeKind::Primitive(Primitive::Unsigned(64))) => {
                         "ptrtoint"
                     }
@@ -311,6 +396,163 @@ impl<'a> Emitter<'a> {
             }
             Rvalue::Call(id, args) => {
                 let called = &self.program.functions[*id];
+                if let FunctionKind::DynMethod { slot } = called.kind {
+                    let object = self.operand(&args[0]);
+                    let object_value = self.temp();
+                    self.lines.push(format!("  {object_value} = load {{ ptr, ptr }}, ptr {object}"));
+                    let data = self.temp();
+                    let table = self.temp();
+                    self.lines.push(format!("  {data} = extractvalue {{ ptr, ptr }} {object_value}, 0"));
+                    self.lines.push(format!("  {table} = extractvalue {{ ptr, ptr }} {object_value}, 1"));
+                    let entry = self.temp();
+                    self.lines.push(format!("  {entry} = getelementptr ptr, ptr {table}, i64 {slot}"));
+                    let target_fn = self.temp();
+                    self.lines.push(format!("  {target_fn} = load ptr, ptr {entry}"));
+                    let ret = self.ty(called.result);
+                    let mut values = vec![format!("ptr {data}")];
+                    for (arg, param) in args.iter().skip(1).zip(called.params.iter().skip(1)) {
+                        values.push(format!("{} {}", self.ty(called.locals[*param]), self.operand(arg)));
+                    }
+                    let call = format!("call {ret} {target_fn}({})", values.join(", "));
+                    if called.result == self.program.types.unit() {
+                        self.lines.push(format!("  {call}"));
+                        return None;
+                    }
+                    let result = self.temp();
+                    self.lines.push(format!("  {result} = {call}"));
+                    return Some(result);
+                }
+                // Pointer offset is a compiler intrinsic. Its hidden declaration
+                // exists only so the typed pipeline can carry the call; emit LLVM
+                // directly and never expose a STD or C symbol.
+                // Check the same invariants as the former C implementation.
+                if matches!(
+                    called.kind,
+                    FunctionKind::CompilerIntrinsic(crate::intrinsics::Intrinsic::ByteOffset)
+                )
+                {
+                    assert_eq!(args.len(), 2, "verified raw offset ABI");
+                    // The typed compiler ABI carries addresses as u64 so the
+                    // intrinsic remains representable in Nova's scalar HIR.
+                    // LLVM GEP, however, requires an actual pointer value.
+                    let raw_address = self.operand(&args[0]);
+                    let address = self.temp();
+                    self.lines.push(format!("  {address} = inttoptr i64 {raw_address} to ptr"));
+                    let distance = self.operand(&args[1]);
+                    let missing = self.temp();
+                    let too_far = self.temp();
+                    let invalid = self.temp();
+                    self.lines.push("  ; compiler intrinsic: byte_offset".into());
+                    self.lines.push(format!("  {missing} = icmp eq ptr {address}, null"));
+                    self.lines.push(format!("  {too_far} = icmp ugt i64 {distance}, 9223372036854775807"));
+                    self.lines.push(format!("  {invalid} = or i1 {missing}, {too_far}"));
+                    let ordinal = self.next;
+                    self.next += 1;
+                    let rejected = format!("raw_pointer_invalid_{ordinal}");
+                    let valid = format!("raw_pointer_valid_{ordinal}");
+                    self.lines.push(format!("  br i1 {invalid}, label %{rejected}, label %{valid}"));
+                    self.lines.push(format!("{rejected}:"));
+                    self.lines.push("  call void @llvm.trap()".into());
+                    self.lines.push("  unreachable".into());
+                    self.lines.push(format!("{valid}:"));
+                    let result_pointer = self.temp();
+                    self.lines.push(format!("  {result_pointer} = getelementptr i8, ptr {address}, i64 {distance}"));
+                    let result = self.temp();
+                    self.lines.push(format!("  {result} = ptrtoint ptr {result_pointer} to i64"));
+                    self.needs_trap = true;
+                    return Some(result);
+                }
+                if let FunctionKind::CompilerIntrinsic(intrinsic) = called.kind {
+                    let llvm_name = match intrinsic {
+                        crate::intrinsics::Intrinsic::CopyBytes => "llvm.memcpy.p0.p0.i64",
+                        crate::intrinsics::Intrinsic::MoveBytes => "llvm.memmove.p0.p0.i64",
+                        crate::intrinsics::Intrinsic::SetBytes => "llvm.memset.p0.i64",
+                        crate::intrinsics::Intrinsic::LoadByte => "load_byte",
+                        crate::intrinsics::Intrinsic::HeapAllocate => "aligned_alloc",
+                        crate::intrinsics::Intrinsic::HeapFree => "free",
+                        crate::intrinsics::Intrinsic::TextLength => "__nova_internal_text_length",
+                        crate::intrinsics::Intrinsic::TextAddress => "__nova_internal_text_address",
+                        crate::intrinsics::Intrinsic::BorrowText => "__nova_internal_borrow_text",
+                        _ => "",
+                    };
+                    if !llvm_name.is_empty() {
+                        let values = args.iter().map(|arg| self.operand(arg)).collect::<Vec<_>>();
+                        let result = self.temp();
+                        match intrinsic {
+                            crate::intrinsics::Intrinsic::CopyBytes => {
+                                let destination = self.temp();
+                                let source = self.temp();
+                                self.lines.push(format!("  {destination} = inttoptr i64 {} to ptr", values[0]));
+                                self.lines.push(format!("  {source} = inttoptr i64 {} to ptr", values[1]));
+                                self.lines.push(format!("  call void @llvm.memcpy.p0.p0.i64(ptr {destination}, ptr {source}, i64 {}, i1 false)", values[2]));
+                                return None;
+                            }
+                            crate::intrinsics::Intrinsic::MoveBytes => {
+                                let destination = self.temp();
+                                let source = self.temp();
+                                self.lines.push(format!("  {destination} = inttoptr i64 {} to ptr", values[0]));
+                                self.lines.push(format!("  {source} = inttoptr i64 {} to ptr", values[1]));
+                                self.lines.push(format!("  call void @llvm.memmove.p0.p0.i64(ptr {destination}, ptr {source}, i64 {}, i1 false)", values[2]));
+                                return None;
+                            }
+                            crate::intrinsics::Intrinsic::SetBytes => {
+                                let destination = self.temp();
+                                self.lines.push(format!("  {destination} = inttoptr i64 {} to ptr", values[0]));
+                                self.lines.push(format!("  call void @llvm.memset.p0.i64(ptr {destination}, i8 {}, i64 {}, i1 false)", values[1], values[2]));
+                                return None;
+                            }
+                            crate::intrinsics::Intrinsic::LoadByte => {
+                                let pointer = self.temp();
+                                self.lines.push(format!("  {pointer} = inttoptr i64 {} to ptr", values[0]));
+                                self.lines.push(format!("  {result} = load i8, ptr {pointer}"));
+                                return Some(result);
+                            }
+                            crate::intrinsics::Intrinsic::HeapAllocate => {
+                                self.lines.push(format!("  {result} = call ptr @aligned_alloc(i64 {}, i64 {})", values[0], values[1]));
+                                let address = self.temp();
+                                self.lines.push(format!("  {address} = ptrtoint ptr {result} to i64"));
+                                return Some(address);
+                            }
+                            crate::intrinsics::Intrinsic::HeapFree => {
+                                let pointer = self.temp();
+                                self.lines.push(format!("  {pointer} = inttoptr i64 {} to ptr", values[0]));
+                                self.lines.push(format!("  call void @free(ptr {pointer})"));
+                                return None;
+                            }
+                            crate::intrinsics::Intrinsic::TextLength => {
+                                self.lines.push(format!("  {result} = call i64 @__nova_internal_text_length(ptr {})", values[0]));
+                                return Some(result);
+                            }
+                            crate::intrinsics::Intrinsic::TextAddress => {
+                                self.lines.push(format!("  {result} = ptrtoint ptr {} to i64", values[0]));
+                                return Some(result);
+                            }
+                            crate::intrinsics::Intrinsic::BorrowText => {
+                                self.lines.push(format!("  {result} = inttoptr i64 {} to ptr", values[0]));
+                                return Some(result);
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                }
+                if let FunctionKind::CompilerIntrinsic(intrinsic) = called.kind {
+                    let llvm_name = match intrinsic {
+                        crate::intrinsics::Intrinsic::SqrtF64 => "llvm.sqrt.f64",
+                        crate::intrinsics::Intrinsic::AbsF64 => "llvm.fabs.f64",
+                        crate::intrinsics::Intrinsic::FloorF64 => "llvm.floor.f64",
+                        crate::intrinsics::Intrinsic::CeilF64 => "llvm.ceil.f64",
+                        _ => "",
+                    };
+                    if !llvm_name.is_empty() {
+                        assert_eq!(args.len(), 1, "verified unary f64 intrinsic ABI");
+                        let value = self.operand(&args[0]);
+                        let result = self.temp();
+                        self.lines.push(format!(
+                            "  {result} = call double @{llvm_name}(double {value})"
+                        ));
+                        return Some(result);
+                    }
+                }
                 let c_variadic = called.c_variadic;
                 let fixed_count = called.params.len();
                 let result_ty = called.result;
@@ -385,8 +627,15 @@ impl<'a> Emitter<'a> {
                 let ty = self.ty(target.expect("struct assign destination"));
                 let mut aggregate = "poison".to_string();
                 for (index, operand) in values.iter().enumerate() {
-                    let val = self.operand(operand);
-                    let field_ty = self.ty(self.program.types.structs[*id].fields[index].ty);
+                    let field_id = self.program.types.structs[*id].fields[index].ty;
+                    let field_ty = self.program.types.llvm_field(field_id);
+                    // A unit payload has no runtime value; LLVM still needs
+                    // a typed zero-sized initializer for its aggregate slot.
+                    let val = if field_id == self.program.types.unit() {
+                        "zeroinitializer".into()
+                    } else {
+                        self.operand(operand)
+                    };
                     let dst = self.temp();
                     self.lines.push(format!(
                         "  {dst} = insertvalue {ty} {aggregate}, {field_ty} {val}, {index}"
@@ -466,6 +715,15 @@ impl<'a> Emitter<'a> {
                 for projection in &place.projections {
                     let aggregate_ty = self.ty(current_ty);
                     match projection {
+                        PlaceProjection::Deref => {
+                            let new_addr = self.temp();
+                            self.lines.push(format!("  {new_addr} = load ptr, ptr {addr}"));
+                            addr = new_addr;
+                            current_ty = match self.program.types.kind(current_ty) {
+                                TypeKind::Pointer { element, .. } | TypeKind::Reference { element, .. } => element,
+                                _ => unreachable!("verified dereference place"),
+                            };
+                        }
                         PlaceProjection::Field(field) => {
                             let TypeKind::Struct(sid) = self.program.types.kind(current_ty) else {
                                 unreachable!("verified struct place")
@@ -570,8 +828,13 @@ impl<'a> Emitter<'a> {
                     let gep = self.temp();
                     let struct_llvm = self.ty(struct_ty);
                     self.lines.push(format!("  {gep} = getelementptr inbounds {struct_llvm}, ptr {base}, i32 0, i32 {index}"));
-                    let value_ty = self.ty(self.program.types.structs[sid].fields[*index].ty);
-                    let val = self.operand(value);
+                    let field_id = self.program.types.structs[sid].fields[*index].ty;
+                    let value_ty = self.program.types.llvm_field(field_id);
+                    let val = if field_id == self.program.types.unit() {
+                        "zeroinitializer".into()
+                    } else {
+                        self.operand(value)
+                    };
                     self.lines
                         .push(format!("  store {value_ty} {val}, ptr {gep}"));
                 }
@@ -775,7 +1038,6 @@ fn serializer(program: &mir::Program, sid: usize, pool: &mut Strings) -> String 
     ));
     out
 }
-
 // Derived `toJson` builds a string, instead of redirecting stdout. A private
 // recursive appender is emitted for every serializable struct, so nested values
 // are encoded into the SAME buffer (no intermediate process-lifetime strings).
@@ -858,7 +1120,6 @@ fn json_string_serializer(program: &mir::Program, sid: usize, pool: &mut Strings
     );
     out
 }
-
 // The public T_from_json(str)->T wrapper owns the temporary JSON DOM.
 // A private decoder is reused recursively by nested structs. `str` fields are
 // copied into runtime-managed, process-lifetime storage before the DOM is freed.
@@ -961,35 +1222,49 @@ fn function_link_symbol<'a>(
         std::borrow::Cow::Borrowed(&function.name)
     }
 }
-
-// `std::libc::<header>::name` resolves directly to libc's ELF symbol `name`.
+// `std::abi::native::libc::<header>::name` resolves directly to libc's ELF symbol `name`.
 // Standard-library external entrypoints use a distinct private ABI namespace.
 // Native C symbols are implementation details, not names exposed by Nova APIs.
 // Ordinary Nova functions and libc imports retain their normal link symbols.
 fn c_link_symbol(name: &str) -> std::borrow::Cow<'_, str> {
     // The built-in STD has one global C ABI, regardless of which Nova package
     // loaded it. For example, the dependency loader can emit the same extern
-    // as `std__vec__native_byte_vector_append` or as
-    // `nexo__std__vec__native_byte_vector_append`. Both must link to
-    // `__nova_std__vec____byte_vector_append` in runtime/nova_rt.c.
+    // as `std__abi__native__net__native_tcp_close` or as
+    // `nexo__std__abi__native__net__native_tcp_close`. Both must use the same
+    // private runtime symbol after dependency alias normalization.
     //
     // Only normalize complete namespace components; an unrelated name like
-    // `my_std__vec__native_*` is not a reference to the built-in STD.
+    // `my_std__old__vec__native_*` is not a reference to the built-in STD.
     let std_name = if name.starts_with("std__") {
         Some(name)
     } else {
         name.find("__std__").map(|start| &name[start + 2..])
     };
     if let Some(std_name) = std_name {
-        // `std::libc::<header>::symbol` always uses the system C ABI,
+        // ABI modules are physically under std/abi/. Do not change the
+        // existing C symbol names: __nova_std__old__raw____..., libc printf, etc.
+        // Nested package aliases are canonicalized before this point.
+        let std_name = if let Some(rest) = std_name.strip_prefix("std__abi__native__") {
+            std::borrow::Cow::Owned(format!("std__{rest}"))
+        } else {
+            std::borrow::Cow::Borrowed(std_name)
+        };
+        let std_name = std_name.as_ref();
+        // `std::abi::native::libc::<header>::symbol` always uses the system C ABI,
         // including when imported through a package's nested STD namespace.
         if let Some(rest) = std_name.strip_prefix("std__libc__") {
             if let Some((header, symbol)) = rest.split_once("__") {
                 if header == "errno" && symbol == "errno_location" {
                     return std::borrow::Cow::Borrowed("__errno_location");
                 }
-                return std::borrow::Cow::Borrowed(symbol);
+                return std::borrow::Cow::Owned(symbol.to_owned());
             }
+        }
+        if let Some(rest) = std_name.strip_prefix("std__sdl2__") {
+            return std::borrow::Cow::Owned(rest.replace("__", "_"));
+        }
+        if let Some(rest) = std_name.strip_prefix("std__opengl__") {
+            return std::borrow::Cow::Owned(rest.to_owned());
         }
         // Runtime symbols are not package-local. Do not prepend `nexo__`.
         if let Some((module, operation)) = std_name.rsplit_once("__") {
@@ -1004,7 +1279,120 @@ fn c_link_symbol(name: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Borrowed(name)
 }
 
+// The atomics are LLVM IR compiler builtins, not external runtime functions.
+// llvm/atomic_i64.ll is the low-level backend implementation; std::old::atomic
+// continues to own the public API, policies and typed resource wrapper.
+// Delimit each built-in so unused operations never enter the object file.
+/// Return the MIR function ids that can be reached from the executable entry
+/// point. Calls and function references are the only edges needed here because
+/// MIR has already resolved overloads, methods and generic specializations.
+///
+/// If there is no `main` (for example, a compiler-only codegen test), all
+/// functions are retained so the standalone backend API keeps its historical
+/// behavior.
+fn reachable_functions(program: &mir::Program) -> std::collections::HashSet<usize> {
+    use std::collections::{HashMap, HashSet};
+    let Some(root) = program
+        .functions
+        .iter()
+        .position(|function| function.name == "main" && matches!(function.kind, FunctionKind::Defined))
+    else {
+        return (0..program.functions.len()).collect();
+    };
+    let by_name: HashMap<&str, usize> = program
+        .functions
+        .iter()
+        .enumerate()
+        .map(|(id, function)| (function.name.as_str(), id))
+        .collect();
+    let mut live = HashSet::from([root]);
+    let mut work = vec![root];
+    while let Some(id) = work.pop() {
+        let function = &program.functions[id];
+        for block in &function.blocks {
+            for instruction in &block.instructions {
+                let rvalue = match instruction {
+                    mir::Instruction::Assign { value, .. } | mir::Instruction::Eval(value) => value,
+                    mir::Instruction::StoreField { .. }
+                    | mir::Instruction::StoreDeref { .. } => continue,
+                };
+                if let mir::Rvalue::DynObjectRef(value, trait_name) = rvalue {
+                    let Some(source) = mir::operand_ty(value, function, &program.types).ok() else { continue; };
+                    let Some(concrete) = (match program.types.kind(source) {
+                        TypeKind::Reference { element, .. } | TypeKind::Pointer { element, .. } => Some(element),
+                        _ => None,
+                    }) else { continue; };
+                    for candidate in &program.functions {
+                        let Some((trait_key, _, method)) = dyn_method_info(&candidate.name) else { continue; };
+                        if trait_key != dyn_name_part(trait_name) { continue; }
+                        if let Some(implementation) = dyn_impl(program, concrete, &method) {
+                            if let Some(target) = by_name.get(implementation.name.as_str()).copied() {
+                                if live.insert(target) { work.push(target); }
+                            }
+                        }
+                    }
+                }
+                let dependency = match rvalue {
+                    mir::Rvalue::Call(target, ..) | mir::Rvalue::FnRef(target, ..) => Some(*target),
+                    mir::Rvalue::CallIndirect(_, ..)
+                    | mir::Rvalue::Use(_)
+                    | mir::Rvalue::Unary(_, _)
+                    | mir::Rvalue::Binary(_, _, _)
+                    | mir::Rvalue::StructInit(_, _)
+                    | mir::Rvalue::Field(_, _)
+                    | mir::Rvalue::Array(_)
+                    | mir::Rvalue::Index(_, _)
+                    | mir::Rvalue::AddressOf(_)
+                    | mir::Rvalue::Deref(_)
+                    | mir::Rvalue::DynObjectRef(_, _)
+                    | mir::Rvalue::Cast(_, _) => None,
+                };
+                if let Some(target) = dependency {
+                    if live.insert(target) { work.push(target); }
+                }
+            }
+        }
+        // Coroutine factories are declared as external in MIR, but their
+        // adapter calls the generated body by symbol name rather than through
+        // an MIR Call edge.
+        if crate::coroutine_codegen::is_factory(program, &function.name) {
+            let body = function.name.strip_prefix("__nova_make_")
+                .map(|name| format!("__nova_body_{name}"));
+            if let Some(body) = body.and_then(|name| by_name.get(name.as_str()).copied()) {
+                if live.insert(body) { work.push(body); }
+            }
+        }
+    }
+    // Generated JSON entrypoints contain direct symbol calls that are emitted
+    // by the serializer backend rather than represented as MIR instructions.
+    // Once one generated JSON function is live, retain the generated JSON
+    // family so nested serializers/readers remain linkable.
+    if live.iter().any(|id| matches!(program.functions[*id].kind,
+        FunctionKind::JsonWriter(_) | FunctionKind::JsonReader(_) | FunctionKind::JsonToString(_))) {
+        for (id, function) in program.functions.iter().enumerate() {
+            if matches!(function.kind,
+                FunctionKind::JsonWriter(_) | FunctionKind::JsonReader(_) | FunctionKind::JsonToString(_)) {
+                live.insert(id);
+            }
+        }
+    }
+    live
+}
+
+/// Generate all functions. This remains the backend's compatibility API for
+/// compiler tests and tools that intentionally inspect unreachable symbols.
 pub fn generate(program: &mir::Program) -> String {
+    generate_impl(program, None)
+}
+
+/// Generate only functions reachable from `main`, unless explicitly disabled.
+pub fn generate_reachable(program: &mir::Program, keep_all_functions: bool) -> String {
+    let live = (!keep_all_functions).then(|| reachable_functions(program));
+    generate_impl(program, live.as_ref())
+}
+
+fn generate_impl(program: &mir::Program, live: Option<&std::collections::HashSet<usize>>) -> String {
+    let emit = |id: usize| live.map_or(true, |set| set.contains(&id));
     let mut pool = Strings::default();
     let mut functions = String::new();
     let mut need_trap = false;
@@ -1014,8 +1402,10 @@ pub fn generate(program: &mir::Program) -> String {
     // symbol, so deduplicate by *link symbol*, not by Nova function name.
     // Keep the ABI signatures to reject incompatible collisions explicitly.
     let mut external_abi: HashMap<String, (String, Vec<String>)> = HashMap::new();
-    let json = program.types.structs.iter().any(|s| s.serialize);
-    for f in &program.functions {
+    let json = program.functions.iter().enumerate().any(|(id, f)| emit(id) &&
+        matches!(f.kind, FunctionKind::JsonWriter(_) | FunctionKind::JsonReader(_) | FunctionKind::JsonToString(_)));
+    for (id, f) in program.functions.iter().enumerate() {
+        if !emit(id) { continue; }
         match f.kind {
             FunctionKind::External if crate::coroutine_codegen::is_factory(program, &f.name) => {
                 functions.push_str(
@@ -1023,8 +1413,21 @@ pub fn generate(program: &mir::Program) -> String {
                         .expect("verified coroutine trampoline"),
                 );
             }
+            FunctionKind::CompilerIntrinsic(_) => {
+                // Compiler intrinsics have no declaration and no body. Their
+                // Rvalue::Call is emitted inline by Emitter::value.
+            }
+            FunctionKind::DynMethod { .. } => {
+                // This is a vtable slot descriptor, not a callable body.
+            }
             FunctionKind::External => {
                 let symbol = function_link_symbol(program, f).into_owned();
+                if f.name == "__nova_internal_byte_offset" {
+                    continue; // emitted inline, never declare a C symbol
+                }
+                if f.name.starts_with("__nova_internal_") {
+                    continue; // compiler-owned intrinsic, emitted inline
+                }
                 let result = program.types.llvm(f.result);
                 let mut types = f
                     .params
@@ -1048,6 +1451,10 @@ pub fn generate(program: &mir::Program) -> String {
                     ));
                     external_abi.insert(symbol, (result, types));
                 }
+            }
+            FunctionKind::LlvmIntrinsic(kind) => {
+                if kind.is_atomic() { need_trap = true; }
+                functions.push_str(&kind.definition(&f.name));
             }
             FunctionKind::Defined => {
                 let emitter = Emitter {
@@ -1074,15 +1481,72 @@ pub fn generate(program: &mir::Program) -> String {
     if json {
         functions.push_str(&json_escape_helper(&mut pool));
     }
+    // LLVM declarations are not extern Nova functions or C runtime ABI.
+    // Deduplicate declarations, including aliases imported by other packages.
+    let mut llvm_builtin_decls = String::new();
+    let mut llvm_intrinsics_seen = std::collections::HashSet::new();
+    let mut llvm_libc_declarations_seen = std::collections::HashSet::new();
+    for (id, f) in program.functions.iter().enumerate() {
+        if !emit(id) { continue; }
+        if let FunctionKind::LlvmIntrinsic(kind) = f.kind {
+            if !llvm_intrinsics_seen.insert(kind.label()) { continue; }
+            // Several distinct intrinsics can legitimately reference the
+            // same libc symbol, e.g. typed and untyped pthread_create.
+            // Deduplicate EACH declaration by ABI symbol name.
+            for declaration in kind.declaration().lines() {
+                let c_symbol = declaration.split_once('@')
+                    .and_then(|(_, tail)| tail.split_once('('))
+                    .map(|(name, _)| name);
+                if c_symbol.is_some_and(|name| external_abi.contains_key(name)
+                    || !llvm_libc_declarations_seen.insert(name.to_owned())) {
+                    continue;
+                }
+                llvm_builtin_decls.push_str(declaration);
+                llvm_builtin_decls.push('\n');
+            }
+        }
+    }
+    for function in &program.functions {
+        let declaration = match function.kind {
+            FunctionKind::CompilerIntrinsic(crate::intrinsics::Intrinsic::CopyBytes) =>
+                Some("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n"),
+            FunctionKind::CompilerIntrinsic(crate::intrinsics::Intrinsic::MoveBytes) =>
+                Some("declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1)\n"),
+            FunctionKind::CompilerIntrinsic(crate::intrinsics::Intrinsic::SetBytes) =>
+                Some("declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n"),
+            FunctionKind::CompilerIntrinsic(crate::intrinsics::Intrinsic::HeapAllocate) =>
+                Some("declare ptr @aligned_alloc(i64, i64)\n"),
+            FunctionKind::CompilerIntrinsic(crate::intrinsics::Intrinsic::HeapFree) =>
+                Some("declare void @free(ptr)\n"),
+            FunctionKind::CompilerIntrinsic(crate::intrinsics::Intrinsic::TextLength) =>
+                Some("define i64 @__nova_internal_text_length(ptr %text) {\nentry:\n  br label %test\ntest:\n  %index = phi i64 [0, %entry], [%next, %step]\n  %address = getelementptr i8, ptr %text, i64 %index\n  %byte = load i8, ptr %address, align 1\n  %zero = icmp eq i8 %byte, 0\n  br i1 %zero, label %finished, label %step\nstep:\n  %next = add i64 %index, 1\n  br label %test\nfinished:\n  ret i64 %index\n}\n"),
+            FunctionKind::CompilerIntrinsic(crate::intrinsics::Intrinsic::SqrtF64) =>
+                Some("declare double @llvm.sqrt.f64(double)\n"),
+            FunctionKind::CompilerIntrinsic(crate::intrinsics::Intrinsic::AbsF64) =>
+                Some("declare double @llvm.fabs.f64(double)\n"),
+            FunctionKind::CompilerIntrinsic(crate::intrinsics::Intrinsic::FloorF64) =>
+                Some("declare double @llvm.floor.f64(double)\n"),
+            FunctionKind::CompilerIntrinsic(crate::intrinsics::Intrinsic::CeilF64) =>
+                Some("declare double @llvm.ceil.f64(double)\n"),
+            _ => None,
+        };
+        if let Some(declaration) = declaration {
+            llvm_builtin_decls.push_str(declaration);
+        }
+    }
     let mut out =
         String::from("; Nova compiler: checked MIR -> LLVM IR\nsource_filename = \"nova\"\n\n");
     out.push_str(&program.types.llvm_declarations());
+    out.push_str(&dyn_vtables(program));
     out.push_str(&pool.definitions());
+    out.push_str(&llvm_builtin_decls);
     let has_c_symbol = |symbol: &str| {
         program
             .functions
             .iter()
-            .any(|f| matches!(f.kind, FunctionKind::External) && c_link_symbol(&f.name) == symbol)
+            .enumerate()
+            .any(|(id, f)| emit(id) && matches!(f.kind, FunctionKind::External)
+                && c_link_symbol(&f.name) == symbol)
     };
     if json {
         if !has_c_symbol("printf") {
@@ -1117,7 +1581,8 @@ pub fn generate(program: &mir::Program) -> String {
     if program
         .functions
         .iter()
-        .any(|f| crate::coroutine_codegen::is_factory(program, &f.name))
+        .enumerate()
+        .any(|(id, f)| emit(id) && crate::coroutine_codegen::is_factory(program, &f.name))
     {
         if !has_c_symbol("malloc") {
             out.push_str("declare ptr @malloc(i64)\n");
@@ -1134,28 +1599,37 @@ mod std_linkage_regression_tests {
     use std::path::Path;
 
     #[test]
+    fn reachable_codegen_discards_unreferenced_functions_by_default() {
+        let source = "fn live()->i32{return 41;} fn dead()->i32{return 99;} fn main()->i32{return live()+1;}";
+        let parsed = crate::grammar::ProgramParser::new()
+            .parse(&crate::strip_comments(source))
+            .expect("parse reachability fixture");
+        let surface = crate::surface::lower(&parsed).expect("lower reachability fixture");
+        let hir = crate::hir::lower(&surface).expect("type-check reachability fixture");
+        let mir = crate::mir::lower(&hir).expect("lower reachability fixture to MIR");
+        let compact = super::generate_reachable(&mir, false);
+        assert!(compact.contains("define i32 @live("), "{compact}");
+        assert!(compact.contains("define i32 @main("), "{compact}");
+        assert!(!compact.contains("define i32 @dead("), "{compact}");
+        let preserved = super::generate_reachable(&mir, true);
+        assert!(preserved.contains("define i32 @dead("), "{preserved}");
+    }
+
+    #[test]
     fn nested_builtin_std_external_abi_is_global() {
         // Calls AND extern declarations use c_link_symbol through the same
         // function_link_symbol/codegen path. Nested dependency namespaces may
         // not leak into the C symbol name.
         assert_eq!(
-            super::c_link_symbol("std__vec__native_byte_vector_append"),
-            "__nova_std__vec____byte_vector_append"
-        );
-        assert_eq!(
-            super::c_link_symbol("nexo__std__vec__native_byte_vector_append"),
-            "__nova_std__vec____byte_vector_append"
-        );
-        assert_eq!(
-            super::c_link_symbol("vendor__nexo__std__net__native_tcp_close"),
+            super::c_link_symbol("vendor__nexo__std__abi__native__net__native_tcp_close"),
             "__nova_std__net____tcp_close"
         );
         assert_eq!(
-            super::c_link_symbol("nexo__std__libc__stdio__printf"),
+            super::c_link_symbol("nexo__std__abi__native__libc__stdio__printf"),
             "printf"
         );
         assert_eq!(
-            super::c_link_symbol("nexo__std__libc__errno__errno_location"),
+            super::c_link_symbol("nexo__std__abi__native__libc__errno__errno_location"),
             "__errno_location"
         );
         assert_eq!(
@@ -1163,8 +1637,8 @@ mod std_linkage_regression_tests {
             "some__native_user_entry"
         );
         assert_eq!(
-            super::c_link_symbol("my_std__vec__native_unrelated"),
-            "my_std__vec__native_unrelated"
+            super::c_link_symbol("my_std__old__vec__native_unrelated"),
+            "my_std__old__vec__native_unrelated"
         );
     }
 
@@ -1177,17 +1651,17 @@ mod std_linkage_regression_tests {
         let mir = crate::mir::lower(&hir).expect("verify Nexo MIR");
         let llvm = super::generate(&mir);
         assert!(
-            llvm.contains("@__nova_std__vec____byte_vector_append("),
-            "{llvm}"
+            llvm.contains("define i64 @std__abi__llvm__pointer_offset("),
+            "Nexo LLVM symbol or ABI contract missing"
         );
-        assert!(llvm.contains("@__nova_std__net____tcp_close("), "{llvm}");
+        assert!(llvm.contains("@std__abi__llvm__close_fd("), "Nexo LLVM symbol or ABI contract missing");
         assert!(
-            !llvm.contains("@nexo__std__vec__native_byte_vector_append("),
-            "{llvm}"
+            !llvm.contains("@nexo__std__abi__native__raw__native_byte_offset("),
+            "Nexo LLVM symbol or ABI contract missing"
         );
         assert!(
-            !llvm.contains("@nexo__std__net__native_tcp_close("),
-            "{llvm}"
+            !llvm.contains("@nexo__std__abi__native__net__native_tcp_close("),
+            "Nexo LLVM symbol or ABI contract missing"
         );
         // Both the application and the Nexo dependency import the built-in
         // STD. Their extern declarations must still be unique after ABI
@@ -1205,25 +1679,25 @@ mod std_linkage_regression_tests {
             );
         }
         assert_eq!(
-            llvm.matches("declare i64 @__nova_std__string____string_create_from_text(ptr)")
+            llvm.matches("define %struct.std__old__string__String @std__old__string__from_text(")
                 .count(),
             1
         );
         // A wait() on a task inside Nexo's async server would attempt a
         // blocking scheduler operation while a coroutine is active.
         assert!(
-            llvm.contains("call i64 @__nova_std__task____await_value("),
+            llvm.contains("call i64 @__nova_std__old__task____await_value("),
             "Nexo must cooperatively await pending socket retries"
         );
         // The compiler now loads one canonical std for the entire package
         // graph. Its RAII methods are defined only once under std::, not
         // copied under a transitive `nexo::std` namespace.
         assert!(
-            llvm.contains("define void @std__vec__ByteVector__drop("),
-            "{llvm}"
+            llvm.contains("define void @std__old__vec__ByteVector__drop("),
+            "Nexo LLVM symbol or ABI contract missing"
         );
         assert!(
-            !llvm.contains("define void @nexo__std__vec__ByteVector__drop("),
+            !llvm.contains("define void @nexo__std__old__vec__ByteVector__drop("),
             "nested std must not define another destructor: {llvm}"
         );
     }
@@ -1234,38 +1708,48 @@ mod std_linkage_regression_tests {
         // a use-after-scope cleanup must call each Nova-defined drop method.
         let root =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/packages/stdlib_contracts_017");
-        let ast = crate::package::load(&root).expect("load stdlib owner fixture");
-        let surface = crate::surface::lower(&ast).expect("surface specialization");
-        let hir = crate::hir::lower(&surface).expect("RAII lowering");
-        let mir = crate::mir::lower(&hir).expect("verified MIR");
-        let llvm = super::generate(&mir);
+        let llvm = std::thread::Builder::new()
+            .name("codegen-stdlib-contracts".into())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || {
+                let ast = crate::package::load(&root).expect("load stdlib owner fixture");
+                let surface = crate::surface::lower(&ast).expect("surface specialization");
+                let hir = crate::hir::lower(&surface).expect("RAII lowering");
+                let mir = crate::mir::lower(&hir).expect("verified MIR");
+                super::generate(&mir)
+            })
+            .expect("spawn stdlib contract test")
+            .join()
+            .expect("stdlib contract test thread");
 
         // The generated definition and every call must use the same symbol.
         assert!(
-            llvm.contains("define void @std__builder__StringBuilder__drop("),
-            "{llvm}"
+            llvm.contains("define void @std__old__builder__StringBuilder__drop("),
+            "Nova-owned destructor or String contract missing"
         );
         assert!(
-            llvm.contains("call void @std__builder__StringBuilder__drop("),
-            "{llvm}"
+            llvm.contains("call void @std__old__builder__StringBuilder__drop("),
+            "Nova-owned destructor or String contract missing"
         );
         assert!(
-            !llvm.contains("@__nova_std__builder__StringBuilder__drop("),
-            "{llvm}"
+            !llvm.contains("@__nova_std__old__builder__StringBuilder__drop("),
+            "Nova-owned destructor or String contract missing"
         );
         assert!(
-            llvm.contains("define %struct.std__string__String @std__string__from_text("),
-            "{llvm}"
+            llvm.contains("define %struct.std__old__string__String @std__old__string__from_text("),
+            "Nova-owned destructor or String contract missing"
         );
         assert!(
-            llvm.contains("call %struct.std__string__String @std__string__from_text("),
-            "{llvm}"
+            llvm.contains("call %struct.std__old__string__String @std__old__string__from_text("),
+            "Nova-owned destructor or String contract missing"
         );
 
-        // The native C runtime is a different ABI and must remain prefixed.
-        assert!(
-            llvm.contains("@__nova_std__string____string_destroy("),
-            "{llvm}"
-        );
+        // String's owning destructor is written in Nova, not a legacy C handle.
+        assert!(llvm.contains("call void @std__old__string__String__drop("),
+            "missing call to Nova String destructor");
+        assert!(llvm.contains("call void @std__old__raw__deallocate_bytes("),
+            "missing Nova-owned allocation cleanup");
+        assert!(!llvm.contains("@__nova_std__old__string____string_destroy("),
+            "legacy native string handle reintroduced");
     }
 }

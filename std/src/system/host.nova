@@ -1,0 +1,37 @@
+use std::abi::native::libc::unistd::getpid;
+use std::abi::native::libc::unistd::getppid;
+use std::abi::native::libc::unistd::usleep;
+use std::core::types::Size;
+use std::error::error::Error;
+use std::error::result::Result;
+
+pub struct ProcessId { value: i32 }
+
+impl ProcessId {
+    static fn new(value: i32) -> Self { return new ProcessId { value: value }; }
+    fn value(self: &ProcessId) -> i32 { return self.value; }
+}
+
+pub fn process_id() -> Result<ProcessId,Error> {
+    let mut value: i32 = 0;
+    unsafe { value = getpid(); }
+    if value < 0 { return Err(Error::new(value, "could not read process id")); }
+    return Ok(ProcessId::new(value));
+}
+
+pub fn parent_process_id() -> Result<ProcessId,Error> {
+    let mut value: i32 = 0;
+    unsafe { value = getppid(); }
+    if value < 0 { return Err(Error::new(value, "could not read parent process id")); }
+    return Ok(ProcessId::new(value));
+}
+
+pub fn sleep_millis(milliseconds: Size) -> Result<(),Error> {
+    if milliseconds > (-1 as Size) / 1000 {
+        return Err(Error::new(-75, "sleep duration overflow"));
+    }
+    let mut status: i32 = 0;
+    unsafe { status = usleep((milliseconds * 1000) as u32); }
+    if status != 0 { return Err(Error::new(status, "sleep was interrupted")); }
+    return Ok(());
+}

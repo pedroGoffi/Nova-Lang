@@ -1,0 +1,382 @@
+use std::memory::raw;
+
+// Safe SDL2 facade. Raw pointers and foreign calls remain confined to std::abi.
+typedef WindowHandle = *mut u8;
+
+pub const INIT_VIDEO: u32 = 32;
+pub const INIT_AUDIO: u32 = 16;
+pub const INIT_EVENTS: u32 = 16384;
+pub const INIT_GAME_CONTROLLER: u32 = 8192;
+pub const INIT_JOYSTICK: u32 = 512;
+pub const INIT_EVERYTHING: u32 = 29233;
+pub const WINDOW_SHOWN: u32 = 4;
+pub const WINDOW_OPENGL: u32 = 2;
+pub const WINDOW_FULLSCREEN: u32 = 1;
+pub const WINDOW_RESIZABLE: u32 = 32;
+pub const WINDOW_BORDERLESS: u32 = 16;
+pub const RENDERER_SOFTWARE: u32 = 1;
+pub const RENDERER_ACCELERATED: u32 = 2;
+pub const RENDERER_PRESENT_VSYNC: u32 = 4;
+pub const RENDERER_TARGET_TEXTURE: u32 = 8;
+pub const RENDERER_DRIVER_AUTOMATIC: i32 = -1;
+pub const BLEND_NONE: i32 = 0;
+pub const BLEND_BLEND: i32 = 1;
+pub const BLEND_ADD: i32 = 2;
+pub const BLEND_MOD: i32 = 4;
+pub const ENABLED: i32 = 1;
+pub const DISABLED: i32 = 0;
+pub const WINDOWPOS_UNDEFINED: i32 = 536805376;
+pub const DEFAULT_WIDTH: i32 = 800;
+pub const DEFAULT_HEIGHT: i32 = 600;
+pub const EVENT_QUIT: u32 = 256;
+pub const EVENT_KEY_DOWN: u32 = 768;
+pub const EVENT_KEY_UP: u32 = 769;
+pub const EVENT_TEXT_INPUT: u32 = 771;
+pub const EVENT_MOUSE_MOTION: u32 = 1024;
+pub const EVENT_MOUSE_BUTTON_DOWN: u32 = 1025;
+pub const EVENT_MOUSE_BUTTON_UP: u32 = 1026;
+pub const EVENT_WINDOW: u32 = 512;
+pub const EVENT_NONE: u32 = 0;
+pub const EVENT_BUFFER_SIZE: u64 = 128;
+pub const KEY_BACKSPACE: i32 = 8;
+pub const KEY_RETURN: i32 = 13;
+pub const KEY_DELETE: i32 = 127;
+pub const KEY_LEFT: i32 = 1073741904;
+pub const KEY_RIGHT: i32 = 1073741903;
+pub const KEY_HOME: i32 = 1073741898;
+pub const KEY_END: i32 = 1073741901;
+pub const KEY_ESCAPE: i32 = 27;
+pub const KEY_I: i32 = 105;
+pub const KEY_A: i32 = 97;
+pub const KEY_O: i32 = 111;
+pub const KEY_V: i32 = 118;
+pub const KEY_H: i32 = 104;
+pub const KEY_J: i32 = 106;
+pub const KEY_K: i32 = 107;
+pub const KEY_L: i32 = 108;
+pub const KEY_X: i32 = 120;
+pub const KEY_W: i32 = 119;
+pub const KEY_TAB: i32 = 9;
+pub const KEY_N: i32 = 110;
+pub const KEY_Q: i32 = 113;
+pub const KEY_UP: i32 = 1073741906;
+pub const KEY_DOWN: i32 = 1073741905;
+pub const KEY_B: i32 = 98;
+pub const KEY_D: i32 = 100;
+pub const KEY_E: i32 = 101;
+pub const KEY_F: i32 = 102;
+pub const KEY_G: i32 = 103;
+pub const KEY_P: i32 = 112;
+pub const KEY_S: i32 = 115;
+pub const KEY_Y: i32 = 121;
+pub const KEY_SPACE: i32 = 32;
+// SDL_Keymod bit masks used by editor-style applications.
+pub const KMOD_SHIFT: i32 = 3;
+pub const KMOD_CTRL: i32 = 192;
+pub const KMOD_ALT: i32 = 768;
+pub const MAX_DEMO_FRAMES: u32 = 600;
+pub const PIXELFORMAT_RGBA8888: u32 = 376840196;
+pub const TEXTUREACCESS_STATIC: i32 = 0;
+pub const TEXTUREACCESS_STREAMING: i32 = 1;
+pub const TEXTUREACCESS_TARGET: i32 = 2;
+
+pub struct Window { handle: WindowHandle }
+pub struct Renderer { handle: *mut u8 }
+pub struct Texture { handle: *mut u8 }
+pub struct Joystick { handle: *mut u8 }
+pub struct GameController { handle: *mut u8 }
+pub struct EventBuffer { data: *mut u8 }
+pub struct GLContext { handle: *mut u8 }
+pub struct Rect { x: i32, y: i32, width: i32, height: i32 }
+pub struct Color { red: u8, green: u8, blue: u8, alpha: u8 }
+pub struct Surface { handle: *mut u8 }
+
+pub class Font {
+    handle: *mut u8,
+    point_size: i32
+}
+
+pub fn rect(x: i32, y: i32, width: i32, height: i32) -> Rect {
+    return new Rect { x: x, y: y, width: width, height: height };
+}
+
+pub fn color(red: u8, green: u8, blue: u8, alpha: u8) -> Color {
+    return new Color { red: red, green: green, blue: blue, alpha: alpha };
+}
+
+pub fn initialize(flags: u32) -> i32 {
+    unsafe { return std::abi::native::sdl2::SDL_Init(flags); }
+}
+
+pub fn initialize_video() -> i32 {
+    unsafe { return std::abi::native::sdl2::SDL_Init(INIT_VIDEO); }
+}
+
+pub fn initialize_ttf() -> i32 {
+    unsafe { return std::abi::native::sdl2::TTF_Init(); }
+}
+
+pub fn ttf_error() -> str {
+    unsafe { return std::abi::native::sdl2::TTF_GetError(); }
+}
+
+impl Font {
+    static fn open(path: str, point_size: i32) -> Self {
+        let handle: *mut u8 = unsafe { std::abi::native::sdl2::TTF_OpenFont(path, point_size) };
+        return new Font { handle: handle, point_size: point_size };
+    }
+
+    fn valid(self: &Font) -> bool { return true; }
+    fn size(self: &Font) -> i32 { return self.point_size; }
+
+    fn measure(self: &Font, text: str) -> Rect {
+        let mut width: i32 = 0;
+        let mut height: i32 = 0;
+        unsafe {
+            std::abi::native::sdl2::TTF_SizeUTF8(
+                self.handle, text, &mut width as (*mut i32), &mut height as (*mut i32)
+            );
+        }
+        return rect(0, 0, width, height);
+    }
+
+    fn render(self: &Font, text: str, red: u8, green: u8, blue: u8, alpha: u8) -> Surface {
+        let packed: u32 = (red as u32)
+            | ((green as u32) << 8)
+            | ((blue as u32) << 16)
+            | ((alpha as u32) << 24);
+        let surface: *mut u8 = unsafe {
+            std::abi::native::sdl2::TTF_RenderUTF8_Blended(self.handle, text, packed)
+        };
+        return surface_from_handle(surface);
+    }
+
+    fn render_wrapped(self: &Font, text: str, width: i32, red: u8, green: u8, blue: u8, alpha: u8) -> Surface {
+        let packed: u32 = (red as u32)
+            | ((green as u32) << 8)
+            | ((blue as u32) << 16)
+            | ((alpha as u32) << 24);
+        let surface: *mut u8 = unsafe {
+            std::abi::native::sdl2::TTF_RenderUTF8_Blended_Wrapped(self.handle, text, packed, width as u32)
+        };
+        return surface_from_handle(surface);
+    }
+
+    fn close(self: &mut Font) -> () {
+        unsafe { std::abi::native::sdl2::TTF_CloseFont(self.handle); }
+        return;
+    }
+}
+
+pub fn shutdown_ttf() -> () {
+    unsafe { std::abi::native::sdl2::TTF_Quit(); }
+    return;
+}
+
+pub fn open(title: str, width: i32, height: i32) -> Window {
+    return open_with_flags(title, width, height, WINDOW_SHOWN);
+}
+
+pub fn open_opengl(title: str, width: i32, height: i32) -> Window {
+    return open_with_flags(title, width, height, WINDOW_OPENGL | WINDOW_SHOWN);
+}
+
+pub fn open_with_flags(title: str, width: i32, height: i32, flags: u32) -> Window {
+    unsafe {
+        return new Window { handle: std::abi::native::sdl2::SDL_CreateWindow(
+            title, WINDOWPOS_UNDEFINED, WINDOWPOS_UNDEFINED, width, height, flags
+        ) };
+    }
+}
+
+pub fn create_gl_context(window: &Window) -> GLContext {
+    unsafe { return new GLContext { handle: std::abi::native::sdl2::SDL_GL_CreateContext(window.handle) }; }
+}
+
+impl GLContext {
+    fn swap(self: &GLContext, window: &Window) -> () { unsafe { std::abi::native::sdl2::SDL_GL_SwapWindow(window.handle); } return; }
+    fn close(self: &GLContext) -> () { unsafe { std::abi::native::sdl2::SDL_GL_DeleteContext(self.handle); } return; }    
+}
+
+pub fn create_renderer(window: &Window, flags: u32) -> Renderer {
+    unsafe { return new Renderer { handle: std::abi::native::sdl2::SDL_CreateRenderer(window.handle, RENDERER_DRIVER_AUTOMATIC, flags) }; }
+}
+
+pub fn ticks() -> u32 { unsafe { return std::abi::native::sdl2::SDL_GetTicks(); } }
+pub fn performance_counter() -> u64 { unsafe { return std::abi::native::sdl2::SDL_GetPerformanceCounter(); } }
+pub fn performance_frequency() -> u64 { unsafe { return std::abi::native::sdl2::SDL_GetPerformanceFrequency(); } }
+pub fn poll_event(event: *mut u8) -> i32 { unsafe { return std::abi::native::sdl2::SDL_PollEvent(event); } }
+pub fn wait_event(event: *mut u8, timeout: i32) -> i32 { unsafe { return std::abi::native::sdl2::SDL_WaitEventTimeout(event, timeout); } }
+pub fn delay(milliseconds: u32) -> () { unsafe { std::abi::native::sdl2::SDL_Delay(milliseconds); } return; }
+pub fn start_text_input() -> () { unsafe { std::abi::native::sdl2::SDL_StartTextInput(); } return; }
+pub fn stop_text_input() -> () { unsafe { std::abi::native::sdl2::SDL_StopTextInput(); } return; }
+
+pub fn new_event_buffer() -> EventBuffer {
+    unsafe { return new EventBuffer { data: raw::alloc_elements::<u8>(EVENT_BUFFER_SIZE) }; }
+}
+
+impl EventBuffer {
+    fn poll(self: &EventBuffer) -> u32 {
+        let mut status: i32 = 0;
+        unsafe { status = std::abi::native::sdl2::SDL_PollEvent(self.data); }
+        if status == 0 { return EVENT_NONE; }
+        let mut event_type: u32 = EVENT_NONE;
+        unsafe { event_type = *(self.data as (*mut u32)); }
+        return event_type;
+    }
+    fn kind(self: &EventBuffer) -> u32 {
+        let mut event_type: u32 = EVENT_NONE;
+        unsafe { event_type = *(self.data as (*mut u32)); }
+        return event_type;
+    }
+    fn key_scancode(self: &EventBuffer) -> i32 {
+        let mut value: i32 = 0;
+        unsafe { value = *raw::element_at::<i32>(self.data as (*mut i32), 4); }
+        return value;
+    }
+    fn key_pressed(self: &EventBuffer) -> bool {
+        let mut state: u8 = 0;
+        // SDL_KeyboardEvent.state is byte 12; byte 13 is the repeat flag.
+        unsafe { state = *raw::element_at::<u8>(self.data, 12); }
+        return state != 0;
+    }
+    fn key_code(self: &EventBuffer) -> i32 {
+        unsafe { return *raw::element_at::<i32>(self.data as (*mut i32), 5); }
+    }
+    fn key_mod(self: &EventBuffer) -> i32 {
+        unsafe { return *raw::element_at::<i32>(self.data as (*mut i32), 6); }
+    }
+    fn text(self: &EventBuffer) -> str {
+        unsafe { return std::core::borrow((self.data as u64) + 12); }
+    }
+    fn release(self: &EventBuffer) -> () {
+        unsafe { raw::deallocate_bytes(self.data); }
+        return;
+    }
+}
+pub fn set_relative_mouse_mode(enabled: bool) -> i32 {
+    let value: i32 = if enabled { ENABLED } else { DISABLED };
+    unsafe { return std::abi::native::sdl2::SDL_SetRelativeMouseMode(value); }
+}
+
+impl Renderer {
+    fn set_draw_color(self: &Renderer, red: u8, green: u8, blue: u8, alpha: u8) -> i32 {
+        unsafe { return std::abi::native::sdl2::SDL_SetRenderDrawColor(self.handle, red, green, blue, alpha); }
+    }
+    fn set_blend_mode(self: &Renderer, mode: i32) -> i32 {
+        unsafe { return std::abi::native::sdl2::SDL_SetRenderDrawBlendMode(self.handle, mode); }
+    }
+    fn clear(self: &Renderer) -> i32 { unsafe { return std::abi::native::sdl2::SDL_RenderClear(self.handle); } }
+    fn draw_point(self: &Renderer, x: i32, y: i32) -> i32 {
+        unsafe { return std::abi::native::sdl2::SDL_RenderDrawPoint(self.handle, x, y); }
+    }
+    fn draw_line(self: &Renderer, x1: i32, y1: i32, x2: i32, y2: i32) -> i32 {
+        unsafe { return std::abi::native::sdl2::SDL_RenderDrawLine(self.handle, x1, y1, x2, y2); }
+    }
+    fn draw_rect(self: &Renderer, value: &Rect) -> i32 {
+        unsafe { return std::abi::native::sdl2::SDL_RenderDrawRect(self.handle, &value.x as (*const i32)); }
+    }
+    fn fill_rect(self: &Renderer, value: &Rect) -> i32 {
+        unsafe { return std::abi::native::sdl2::SDL_RenderFillRect(self.handle, &value.x as (*const i32)); }
+    }
+    fn copy(self: &Renderer, texture: &Texture, source: &Rect, destination: &Rect) -> i32 {
+        unsafe { return std::abi::native::sdl2::SDL_RenderCopy(self.handle, texture.handle, &source.x as (*const i32), &destination.x as (*const i32)); }
+    }
+    fn present(self: &Renderer) -> () { unsafe { std::abi::native::sdl2::SDL_RenderPresent(self.handle); } return; }
+    fn set_target(self: &Renderer, texture: &Texture) -> i32 { unsafe { return std::abi::native::sdl2::SDL_SetRenderTarget(self.handle, texture.handle); } }
+    fn set_logical_size(self: &Renderer, width: i32, height: i32) -> i32 { unsafe { return std::abi::native::sdl2::SDL_RenderSetLogicalSize(self.handle, width, height); } }
+    fn set_scale(self: &Renderer, x: f32, y: f32) -> i32 { unsafe { return std::abi::native::sdl2::SDL_RenderSetScale(self.handle, x, y); } }
+    fn close(self: &Renderer) -> () { unsafe { std::abi::native::sdl2::SDL_DestroyRenderer(self.handle); } return; }
+}
+
+pub fn texture_from_surface(renderer: &Renderer, surface: &Surface) -> Texture {
+    unsafe { return new Texture { handle: std::abi::native::sdl2::SDL_CreateTextureFromSurface(renderer.handle, surface.handle) }; }
+}
+
+
+pub fn new_surface(width: i32, height: i32, depth: i32) -> Surface {
+    unsafe { return new Surface { handle: std::abi::native::sdl2::SDL_CreateRGBSurface(0, width, height, depth, 16711680, 65280, 255, 4278190080) }; }
+}
+pub fn surface_from_handle(handle: *mut u8) -> Surface {
+    return new Surface { handle: handle };
+}
+pub fn load_bmp(path: str) -> Surface {
+    unsafe { return new Surface { handle: std::abi::native::sdl2::SDL_LoadBMP(path) }; }
+}
+
+impl Surface {
+    fn width(self: &Surface) -> i32 {
+        unsafe { return *raw::element_at::<i32>(self.handle as (*mut i32), 4); }
+    }
+    fn height(self: &Surface) -> i32 {
+        unsafe { return *raw::element_at::<i32>(self.handle as (*mut i32), 5); }
+    }
+    fn pixels(self: &Surface) -> *const u8 {
+        unsafe { return *raw::element_at::<*mut u8>(self.handle as (*mut *mut u8), 4) as (*const u8); }
+    }
+    fn lock(self: &Surface) -> i32 { unsafe { return std::abi::native::sdl2::SDL_LockSurface(self.handle); } }
+    fn unlock(self: &Surface) -> () { unsafe { std::abi::native::sdl2::SDL_UnlockSurface(self.handle); } return; }
+    fn fill(self: &Surface, rect: *const i32, color: u32) -> i32 { unsafe { return std::abi::native::sdl2::SDL_FillRect(self.handle, rect, color); } }
+    fn close(self: Surface) -> () { unsafe { std::abi::native::sdl2::SDL_FreeSurface(self.handle); } return; }
+}
+
+pub fn rgb(red: u8, green: u8, blue: u8, alpha: u8) -> Color {
+    return new Color { red: red, green: green, blue: blue, alpha: alpha };
+}
+
+impl Window {
+    fn set_title(self: &Window, title: str) -> () {
+        unsafe { std::abi::native::sdl2::SDL_SetWindowTitle(self.handle, title); }
+        return;
+    }
+    fn set_size(self: &Window, width: i32, height: i32) -> () {
+        unsafe { std::abi::native::sdl2::SDL_SetWindowSize(self.handle, width, height); }
+        return;
+    }
+    fn set_fullscreen(self: &Window, enabled: bool) -> i32 {
+        let flags: u32 = if enabled { WINDOW_FULLSCREEN } else { 0 };
+        unsafe { return std::abi::native::sdl2::SDL_SetWindowFullscreen(self.handle, flags); }
+    }
+    fn set_resizable(self: &Window, enabled: bool) -> () {
+        let value: i32 = if enabled { ENABLED } else { DISABLED };
+        unsafe { std::abi::native::sdl2::SDL_SetWindowResizable(self.handle, value); }
+        return;
+    }
+    fn hide(self: &Window) -> () { unsafe { std::abi::native::sdl2::SDL_HideWindow(self.handle); } return; }
+    fn show(self: &Window) -> () { unsafe { std::abi::native::sdl2::SDL_ShowWindow(self.handle); } return; }
+    fn show_for(self: &Window, milliseconds: u32) -> () {
+        unsafe { std::abi::native::sdl2::SDL_Delay(milliseconds); }
+        return;
+    }
+    fn close(self: &Window) -> () {
+        unsafe { std::abi::native::sdl2::SDL_DestroyWindow(self.handle); }
+        unsafe { std::abi::native::sdl2::SDL_Quit(); }
+        return;
+    }
+}
+
+impl Texture {
+    fn close(self: &Texture) -> () { unsafe { std::abi::native::sdl2::SDL_DestroyTexture(self.handle); } return; }
+}
+
+impl Joystick {
+    fn axis(self: &Joystick, index: i32) -> i16 { unsafe { return std::abi::native::sdl2::SDL_JoystickGetAxis(self.handle, index); } }
+    fn button(self: &Joystick, index: i32) -> u8 { unsafe { return std::abi::native::sdl2::SDL_JoystickGetButton(self.handle, index); } }
+    fn close(self: &Joystick) -> () { unsafe { std::abi::native::sdl2::SDL_JoystickClose(self.handle); } return; }
+}
+
+pub fn open_joystick(index: i32) -> Joystick {
+    unsafe { return new Joystick { handle: std::abi::native::sdl2::SDL_JoystickOpen(index) }; }
+}
+
+impl GameController {
+    fn axis(self: &GameController, index: i32) -> i16 { unsafe { return std::abi::native::sdl2::SDL_GameControllerGetAxis(self.handle, index); } }
+    fn button(self: &GameController, index: i32) -> u8 { unsafe { return std::abi::native::sdl2::SDL_GameControllerGetButton(self.handle, index); } }
+    fn close(self: &GameController) -> () { unsafe { std::abi::native::sdl2::SDL_GameControllerClose(self.handle); } return; }
+}
+
+pub fn open_game_controller(index: i32) -> GameController {
+    unsafe { return new GameController { handle: std::abi::native::sdl2::SDL_GameControllerOpen(index) }; }
+}
+
+pub fn last_error() -> str { unsafe { return std::abi::native::sdl2::SDL_GetError(); } }

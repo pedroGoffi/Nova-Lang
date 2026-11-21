@@ -1,0 +1,18 @@
+use std::core;
+use std::core::types::Size;
+pub concept Hashable<T> = integer<T> || boolean<T> || has_method<T,hash>;
+pub fn integer(value: i64) -> Size {
+    let mut result: Size = value as Size;
+    result = (result ^ (result >> 30)) * 13787848793156543929;
+    result = (result ^ (result >> 27)) * 10723151780598845931;
+    return result ^ (result >> 31);
+}
+pub fn text(value: str) -> Size {
+    let mut result: Size = 14695981039346656037;
+    let mut index: Size = 0;
+    while index < core::text_size(value) {
+        result = (result ^ (core::load(core::offset(core::address(value), index)) as Size)) * 1099511628211;
+        index += 1;
+    }
+    return result;
+}

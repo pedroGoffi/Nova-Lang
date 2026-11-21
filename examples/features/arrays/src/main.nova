@@ -1,0 +1,7 @@
+import std;
+
+fn main() -> i32 {
+    // Arrays have a fixed length and use zero-based indexing.
+    let values: [i32; 3] = [10, 20, 12];
+    return values[0] + values[1] + values[2] - 42;
+}

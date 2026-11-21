@@ -1,7 +1,0 @@
-[package]
-name = "nova_meta_duplicate_impl_024"
-version = "0.1.0"
-entry = "src/main.nova"
-
-[dependencies]
-std = { builtin = "std" }

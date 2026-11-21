@@ -1,0 +1,15 @@
+import std;
+
+// A generator can suspend more than once; each next resumes the same state.
+gen fn counter() -> i64 {
+    yield 10;
+    yield 32;
+    return 0;
+}
+
+fn main() -> i32 {
+    // The first next consumes only the first yielded value.
+    let coroutine = counter();
+    let first: i64 = next coroutine;
+    return first as i32 - 10;
+}

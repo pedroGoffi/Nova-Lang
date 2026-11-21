@@ -1,0 +1,11 @@
+use std::core::types::Size;
+pub fn valid(value: str) -> bool {
+    let mut index: Size = 0;
+    while index < std::core::text_size(value) {
+        let byte: u8 = std::core::load(std::core::offset(std::core::address(value), index));
+        if byte == 0 { return false; }
+        index += 1;
+    }
+    return true;
+}
+pub fn byte_length(value: str) -> Size { return std::core::text_size(value); }

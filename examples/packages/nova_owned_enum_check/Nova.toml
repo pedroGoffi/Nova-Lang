@@ -1,7 +1,0 @@
-[package]
-name = "nova_owned_enum_check"
-version = "0.1.0"
-entry = "src/main.nova"
-
-[dependencies]
-std = { builtin = "std" }

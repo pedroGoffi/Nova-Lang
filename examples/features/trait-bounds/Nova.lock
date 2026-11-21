@@ -1,0 +1,4 @@
+# Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
+trait_bounds 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/features/trait-bounds hash=9abe935b63ccae99
+std 0.20.0 builtin hash=99a226b8e30e7093
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/features/trait-bounds/src/main.nova hash=9abe935b63ccae99

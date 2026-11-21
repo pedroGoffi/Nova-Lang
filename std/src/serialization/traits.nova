@@ -1,0 +1,2 @@
+pub trait Serialize { fn serialize(self: &Self) -> str; }
+pub trait Deserialize { fn deserialize(value: str) -> Self; }

@@ -1,0 +1,9 @@
+use std::core::types::Size;
+
+pub class Metadata { size: Size, directory: bool, regular: bool }
+
+impl Metadata {
+    fn size(self: &Metadata) -> Size { return self.size; }
+    fn is_directory(self: &Metadata) -> bool { return self.directory; }
+    fn is_file(self: &Metadata) -> bool { return self.regular; }
+}

@@ -1,0 +1,10 @@
+use std::core::panic;
+
+pub fn assert(condition: bool, message: str) -> () {
+    if !condition { panic::fail(message); }
+    return;
+}
+pub fn assert_equal(left: i64, right: i64, message: str) -> () {
+    if left != right { panic::fail(message); }
+    return;
+}

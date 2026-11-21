@@ -1,0 +1,10 @@
+import std;
+
+struct Pair { left: i32, right: i32 }
+
+fn main() -> i32 {
+    // with exposes the receiver as it inside a scoped expression.
+    let pair = new Pair { left: 20, right: 22 };
+    let total: i32 = with(pair) { return it.left + it.right; };
+    return total - 42;
+}

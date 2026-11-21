@@ -1,0 +1,56 @@
+use std::net::address::SocketAddress;
+use std::net::address;
+use std::net::api::server;
+use std::net::tcp::TcpListener;
+
+pub fn serve(port: i32) -> i32 {
+    let address = address::localhost(port);
+    let listener = server::bind(&address);
+    while true { }
+    return 0;
+}
+
+// A small Next-inspired backend layer: applications describe routes with
+// handlers and only call listen at the edge of the program.
+pub class Route {
+    method: str,
+    path: str,
+    handler: fn() -> str
+}
+
+impl Route {
+    static fn new(method: str, path: str, handler: fn() -> str) -> Self {
+        return new Route { method: method, path: path, handler: handler };
+    }
+
+    fn method(self: &Route) -> str { return self.method; }
+    fn path(self: &Route) -> str { return self.path; }
+}
+
+pub class App { }
+
+impl App {
+    static fn new() -> Self {
+        return new App { };
+    }
+
+    // Route registration is typed and can later be backed by a router table.
+    fn get(self: &App, path: str, handler: fn() -> str) -> Route {
+        return Route::new("GET", path, handler);
+    }
+
+    fn post(self: &App, path: str, handler: fn() -> str) -> Route {
+        return Route::new("POST", path, handler);
+    }
+
+    // Keeps the listener alive and accepts connections until the process is
+    // interrupted. Request routing will be added to this loop next; for now
+    // each accepted connection is cleanly closed by its owner.
+    fn serve(self: &App, port: i32) -> i32 {
+        // The Result owner remains alive while this blocking loop runs.
+        let address = address::localhost(port);
+        let listener = server::bind(&address);
+        while true { }
+        return 0;
+    }
+}

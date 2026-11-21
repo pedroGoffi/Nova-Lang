@@ -53,6 +53,7 @@ pub struct Place {
 }
 #[derive(Debug, Clone)]
 pub enum PlaceProjection {
+    Deref,
     Field(usize),
     Index(Operand),
 }
@@ -71,6 +72,7 @@ pub enum Rvalue {
     AddressOf(Place),
     Deref(Operand),
     Cast(Operand, TypeId),
+    DynObjectRef(Operand, String),
 }
 #[derive(Debug, Clone)]
 pub enum Operand {
@@ -108,6 +110,9 @@ struct Builder {
     cleanups: Vec<Vec<Cleanup>>,
     /// Owner local -> bool local holding its initialized/not-moved state.
     drop_flags: std::collections::HashMap<LocalId, LocalId>,
+    /// Fixed-array owner slots get independent flags. A moved slot is skipped
+    /// while sibling elements still receive their destructor calls.
+    slot_drop_flags: std::collections::HashMap<(LocalId, usize), LocalId>,
 }
 impl Builder {
     fn new(f: &hir::Function, types: &Types) -> Self {
@@ -126,6 +131,7 @@ impl Builder {
             loops: Vec::new(),
             cleanups: Vec::new(),
             drop_flags: std::collections::HashMap::new(),
+            slot_drop_flags: std::collections::HashMap::new(),
         }
     }
     fn new_block(&mut self) -> BlockId {
@@ -156,6 +162,12 @@ impl Builder {
                 let val = self.expression(inner);
                 let dst = self.temp(e.ty);
                 self.assign(dst, Rvalue::Cast(val, e.ty));
+                Operand::Local(dst)
+            }
+            ExprKind::DynObjectRef { value, trait_key } => {
+                let value = self.expression(value);
+                let dst = self.temp(e.ty);
+                self.assign(dst, Rvalue::DynObjectRef(value, trait_key.clone()));
                 Operand::Local(dst)
             }
             ExprKind::Int(n) => Operand::Int(*n, e.ty),
@@ -273,9 +285,15 @@ impl Builder {
             }
             ExprKind::Field(value, index) => {
                 let base = self.expression(value);
-                let dst = self.temp(e.ty);
-                self.assign(dst, Rvalue::Field(base, *index));
-                Operand::Local(dst)
+                // Zero-sized unit fields can be selected for their evaluation
+                // effects, but must not allocate an LLVM `void` local.
+                if e.ty == self.types.unit() {
+                    Operand::Unit
+                } else {
+                    let dst = self.temp(e.ty);
+                    self.assign(dst, Rvalue::Field(base, *index));
+                    Operand::Local(dst)
+                }
             }
             ExprKind::TakeMatchField(parent, index) => {
                 let ExprKind::Local(owner) = &parent.kind else {
@@ -304,17 +322,56 @@ impl Builder {
                 self.assign(dst, Rvalue::Index(array, index));
                 Operand::Local(dst)
             }
+            ExprKind::MoveIndex(array, index) => {
+                let slot = match (&array.kind, &index.kind) {
+                    (ExprKind::Local(root), ExprKind::Int(value)) if *value >= 0 => {
+                        usize::try_from(*value).ok().map(|slot| (*root, slot))
+                    }
+                    _ => None,
+                };
+                let array = self.expression(array);
+                let index = self.expression(index);
+                let dst = self.temp(e.ty);
+                self.assign(dst, Rvalue::Index(array, index));
+                if let Some(key) = slot {
+                    if let Some(flag) = self.slot_drop_flags.get(&key).copied() {
+                        self.assign(flag, Rvalue::Use(Operand::Bool(false)));
+                    }
+                }
+                Operand::Local(dst)
+            }
             ExprKind::DropArray { root, element, len, drop_fn } => {
                 for index in (0..*len).rev() {
-                    // The root remains the sole owner; each element is passed
-                    // to its destructor once, without an aggregate Drop call.
-                    let element_tmp = self.temp(*element);
-                    self.assign(element_tmp, Rvalue::Index(
-                        Operand::Local(*root), Operand::Int(index as i128, self.types.i32())
-                    ));
-                    self.function.blocks[self.current].instructions.push(
-                        Instruction::Eval(Rvalue::Call(*drop_fn, vec![Operand::Local(element_tmp)]))
-                    );
+                    if let Some(flag) = self.slot_drop_flags.get(&(*root, index)).copied() {
+                        let drop_block = self.new_block();
+                        let next_block = self.new_block();
+                        self.end(Terminator::Branch {
+                            condition: Operand::Local(flag),
+                            then_bb: drop_block,
+                            else_bb: next_block,
+                        });
+                        self.current = drop_block;
+                        self.assign(flag, Rvalue::Use(Operand::Bool(false)));
+                        // The root remains the sole owner; each live slot is
+                        // passed to its destructor without reading moved slots.
+                        let element_tmp = self.temp(*element);
+                        self.assign(element_tmp, Rvalue::Index(
+                            Operand::Local(*root), Operand::Int(index as i128, self.types.i32())
+                        ));
+                        self.function.blocks[self.current].instructions.push(
+                            Instruction::Eval(Rvalue::Call(*drop_fn, vec![Operand::Local(element_tmp)]))
+                        );
+                        self.end(Terminator::Goto(next_block));
+                        self.current = next_block;
+                    } else {
+                        let element_tmp = self.temp(*element);
+                        self.assign(element_tmp, Rvalue::Index(
+                            Operand::Local(*root), Operand::Int(index as i128, self.types.i32())
+                        ));
+                        self.function.blocks[self.current].instructions.push(
+                            Instruction::Eval(Rvalue::Call(*drop_fn, vec![Operand::Local(element_tmp)]))
+                        );
+                    }
                 }
                 Operand::Unit
             }
@@ -322,6 +379,7 @@ impl Builder {
                 let mut projections = Vec::with_capacity(place.projections.len());
                 for projection in &place.projections {
                     match projection {
+                        hir::PlaceProjection::Deref => projections.push(PlaceProjection::Deref),
                         hir::PlaceProjection::Field(index) => projections.push(PlaceProjection::Field(*index)),
                         hir::PlaceProjection::Index(index) => {
                             let operand = self.expression(index);
@@ -415,6 +473,13 @@ impl Builder {
                         });
                 }
                 Stmt::Defer { expr, owner } => {
+                    if let (Some(owner), ExprKind::DropArray { len, .. }) = (owner, &expr.kind) {
+                        for slot in 0..*len {
+                            let flag = self.temp(self.types.boolean());
+                            self.assign(flag, Rvalue::Use(Operand::Bool(true)));
+                            self.slot_drop_flags.insert((*owner, slot), flag);
+                        }
+                    }
                     if let Some(owner) = owner {
                         if !self.drop_flags.contains_key(owner) {
                             let flag = self.temp(self.types.boolean());
@@ -650,6 +715,7 @@ pub fn rvalue_ty(rv: &Rvalue, f: &Function, p: &Program) -> Result<TypeId, Strin
             _ => Err("indexing a non-array".into()),
         },
         Rvalue::AddressOf(_) => Err("address-of requires destination pointer context".into()),
+        Rvalue::DynObjectRef(_, _) => Err("dyn object construction requires destination context".into()),
         Rvalue::Deref(ptr) => match types.kind(operand_ty(ptr, f, types)?) {
             TypeKind::Pointer { element, .. } | TypeKind::Reference { element, .. } => Ok(element),
             _ => Err("dereferencing non-pointer".into()),
@@ -679,6 +745,10 @@ fn place_type(place: &Place, f: &Function, types: &Types) -> Result<TypeId, Stri
         .ok_or_else(|| format!("invalid place root {}", place.root))?;
     for projection in &place.projections {
         current = match projection {
+            PlaceProjection::Deref => match types.kind(current) {
+                TypeKind::Reference { element, .. } | TypeKind::Pointer { element, .. } => element,
+                _ => return Err("dereferencing a non-pointer place".into()),
+            },
             PlaceProjection::Field(field) => {
                 let TypeKind::Struct(id) = types.kind(current) else {
                     return Err("field address on non-struct".into());
@@ -714,6 +784,7 @@ fn read_operands(rv: &Rvalue) -> Vec<&Operand> {
         Rvalue::CallIndirect(ptr, args) => std::iter::once(ptr).chain(args.iter()).collect(),
         Rvalue::AddressOf(place) => place.projections.iter().filter_map(|projection|
             match projection { PlaceProjection::Index(op) => Some(op), _ => None }).collect(),
+        Rvalue::DynObjectRef(value, _) => vec![value],
         Rvalue::FnRef(..) => vec![],
     }
 }
@@ -969,6 +1040,17 @@ pub fn verify(program: &Program) -> Result<(), String> {
                                 return Err("invalid address-of destination type".into());
                             }
                         }
+                        Rvalue::DynObjectRef(value, _) => {
+                            let source = operand_ty(value, f, &program.types)?;
+                            let valid = matches!(
+                                (program.types.kind(source), program.types.kind(f.locals[*dst])),
+                                (TypeKind::Reference { .. }, TypeKind::Reference { element, .. })
+                                    if matches!(program.types.kind(element), TypeKind::TraitObject { .. })
+                            );
+                            if !valid {
+                                return Err("invalid dyn trait object destination type".into());
+                            }
+                        }
                         Rvalue::Array(v) => match program.types.kind(f.locals[*dst]) {
                             TypeKind::Array { len, element } if len == v.len() => {
                                 for item in v {
@@ -1113,7 +1195,15 @@ pub fn lower(hir: &hir::Program) -> Result<Program, String> {
             b.statements(&f.body);
             for block in &mut b.function.blocks {
                 if block.terminator.is_none() {
-                    block.terminator = Some(Terminator::Unreachable);
+                    // A unit function may omit the final `return;`. Treat the
+                    // implicit end of its body as a normal void return. For
+                    // value-returning functions, reaching the end remains a
+                    // verified unreachable path.
+                    block.terminator = Some(if f.result == hir.types.unit() {
+                        Terminator::Return(None)
+                    } else {
+                        Terminator::Unreachable
+                    });
                 }
             }
         } else {

@@ -1,0 +1,4 @@
+# Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
+scope_also 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/features/scope-also hash=ced4809fa4aa0e63
+std 0.20.0 builtin hash=99a226b8e30e7093
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/features/scope-also/src/main.nova hash=ced4809fa4aa0e63

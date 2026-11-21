@@ -1,7 +1,0 @@
-[package]
-name = "nexo"
-version = "0.3.0"
-entry = "src/lib.nova"
-
-[dependencies]
-std = { builtin = "std" }

@@ -1,3 +1,0 @@
-#[meta_attribute(struct)] trait audited {}
-#[audited] fn invalid() -> i32 { return 1; }
-fn main() -> i32 { return invalid(); }

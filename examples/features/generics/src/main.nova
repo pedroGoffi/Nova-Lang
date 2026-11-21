@@ -1,0 +1,9 @@
+import std;
+
+// T is inferred or supplied explicitly at the call site.
+fn identity<T>(value: T) -> T { return value; }
+
+fn main() -> i32 {
+    let value: i32 = identity::<i32>(42);
+    return value - 42;
+}

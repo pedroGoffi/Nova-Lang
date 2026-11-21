@@ -1,0 +1,9 @@
+pub class Permissions { readable: bool, writable: bool, executable: bool }
+impl Permissions {
+    static fn new(readable: bool, writable: bool, executable: bool) -> Self {
+        return new Permissions { readable: readable, writable: writable, executable: executable };
+    }
+    fn can_read(self: &Permissions) -> bool { return self.readable; }
+    fn can_write(self: &Permissions) -> bool { return self.writable; }
+    fn can_execute(self: &Permissions) -> bool { return self.executable; }
+}

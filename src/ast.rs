@@ -29,6 +29,9 @@ pub enum Item {
     Struct(Struct),
     Enum(Enum),
     TypeAlias(TypeAlias),
+    /// Module-scope immutable constant. CTFE replaces references with literals;
+    /// this declaration is never emitted as a runtime global or linked symbol.
+    CompileTimeConst(CompileTimeConst),
     Trait(Trait),
     Concept(Concept),
     ConceptAssert(ConceptExpr),
@@ -52,6 +55,12 @@ pub enum Item {
     },
     /// Visibility marker. Package loader enforces it before lowering.
     Public(Box<Item>),
+}
+#[derive(Debug, Clone)]
+pub struct CompileTimeConst {
+    pub name: String,
+    pub ty: TypeRef,
+    pub value: Expr,
 }
 #[derive(Debug, Clone)]
 pub struct TypeAlias {
@@ -105,6 +114,7 @@ pub enum ConceptExpr {
 }
 #[derive(Debug, Clone)]
 pub enum Requirement {
+    AssociatedType { owner: String, item: String },
     Field {
         variable: String,
         field: String,
@@ -113,6 +123,14 @@ pub enum Requirement {
     Method {
         variable: String,
         method: String,
+        arguments: Vec<TypeRef>,
+        result: TypeRef,
+    },
+    /// A static method's full signature, checked before monomorphization.
+    StaticMethod {
+        owner: String,
+        method: String,
+        arguments: Vec<TypeRef>,
         result: TypeRef,
     },
     Binary {
@@ -195,6 +213,9 @@ pub fn function_is_unsafe(attributes: &[Attribute], context: &str) -> Result<boo
                     "unsafe attribute on {context} accepts no arguments"
                 ))
             }
+            ("derive", _) => {
+                return Err(format!("unsupported function attribute 'derive' on {context}; derive applies to types"));
+            }
             ("pure" | "io" | "async" | "const", []) => {}
             ("pure" | "io" | "async" | "const", _) => {
                 return Err(format!(
@@ -212,6 +233,7 @@ pub fn function_is_unsafe(attributes: &[Attribute], context: &str) -> Result<boo
 pub struct Struct {
     pub name: String,
     pub generics: Vec<String>,
+    pub concept_bounds: Vec<ConceptBound>,
     pub fields: Vec<Field>,
     pub attributes: Vec<Attribute>,
     pub is_class: bool,
@@ -221,6 +243,7 @@ pub struct Struct {
 pub struct Enum {
     pub name: String,
     pub generics: Vec<String>,
+    pub concept_bounds: Vec<ConceptBound>,
     pub variants: Vec<Variant>,
     pub attributes: Vec<Attribute>,
 }
@@ -241,6 +264,10 @@ pub struct Impl {
 pub struct Field {
     pub name: String,
     pub ty: TypeRef,
+    /// Optional field initializer, checked and emitted at the construction site.
+    pub default: Option<Expr>,
+    /// Compile-time validation annotations (never part of runtime object layout).
+    pub attributes: Vec<Attribute>,
 }
 #[derive(Debug, Clone)]
 pub enum FunctionMode {
@@ -281,6 +308,7 @@ pub struct Param {
     pub name: String,
     pub ty: TypeRef,
     pub default: Option<Expr>,
+    pub attributes: Vec<Attribute>,
 }
 #[derive(Debug, Clone)]
 pub enum Stmt {
@@ -387,7 +415,9 @@ pub enum Expr {
         value: Box<Expr>,
     },
     Deref(Box<Expr>),
-    MethodCall(Box<Expr>, String, Vec<Expr>),
+    /// Receiver, method name, value arguments, explicit method type arguments.
+    /// An empty type list means normal inference (e.g. `obj.map(value)`).
+    MethodCall(Box<Expr>, String, Vec<Expr>, Vec<TypeRef>),
     GenericCall(String, Vec<TypeRef>, Vec<Expr>),
     GenericStructInit(String, Vec<TypeRef>, Vec<(String, Expr)>),
     Zero(TypeRef),
@@ -467,6 +497,187 @@ pub fn valid_operator_key(key: &str) -> bool {
 /// For now the language supports only direct locals and one-level fields.
 /// Invalid targets are preserved for a semantic diagnostic rather than being
 /// silently transformed into valid statements or panicking in the parser.
+/// Compile-time pipeline sugar: `value |> f(a)` becomes `f(value, a)`.
+/// No temporary, dynamic dispatch or runtime helper is introduced.
+pub fn pipeline_call(value: Expr, target: Expr) -> Expr {
+    match target {
+        Expr::Call(name, mut args) => {
+            args.insert(0, value);
+            Expr::Call(name, args)
+        }
+        Expr::GenericCall(name, types, mut args) => {
+            args.insert(0, value);
+            Expr::GenericCall(name, types, args)
+        }
+        Expr::MacroCall(name, mut args) => {
+            args.insert(0, value);
+            Expr::MacroCall(name, args)
+        }
+        Expr::Var(name) => Expr::Call(name, vec![value]),
+        other => Expr::CallIndirect(Box::new(other), vec![value]),
+    }
+}
+
+/// Desugars `[map_expr for item in collection if predicate]` into the
+/// standard collection comprehension helper. The helper is deliberately an
+/// ordinary generic Nova function, so comprehension keeps the same typing,
+/// ownership and generator/iterator rules as an explicit pipeline.
+pub fn list_comprehension(
+    item: String,
+    item_ty: TypeRef,
+    collection: Expr,
+    mapped: Expr,
+    predicate: Option<Expr>,
+) -> Expr {
+    let map = Expr::Lambda {
+        params: vec![Param {
+            name: item.clone(),
+            ty: item_ty.clone(),
+            default: None,
+            attributes: vec![],
+        }],
+        result: TypeRef::Named("auto".into()),
+        body: vec![Stmt::Return(Some(mapped))],
+    };
+    let predicate = predicate.unwrap_or(Expr::Bool(true));
+    let predicate = Expr::Lambda {
+        params: vec![Param {
+            name: item,
+            ty: item_ty,
+            default: None,
+            attributes: vec![],
+        }],
+        result: TypeRef::Named("bool".into()),
+        body: vec![Stmt::Return(Some(predicate))],
+    };
+    Expr::Call(
+        "std::old::algorithm::comprehend".into(),
+        vec![collection, map, predicate],
+    )
+}
+
+/// Kotlin-style trailing lambda sugar. `call(args) { it }` is represented as
+/// an ordinary call whose final argument is a one-parameter lambda. Keeping
+/// the rewrite in the source AST means the existing lambda lifter and ABI do
+/// not need a special calling convention.
+pub fn implicit_lambda(body: Vec<Stmt>) -> Expr {
+    Expr::Lambda {
+        params: vec![Param {
+            name: "it".into(),
+            ty: TypeRef::Named("auto".into()),
+            default: None,
+            attributes: vec![],
+        }],
+        result: TypeRef::Named("auto".into()),
+        body,
+    }
+}
+
+pub fn trailing_lambda(target: Expr, body: Vec<Stmt>) -> Expr {
+    let lambda = implicit_lambda(body);
+    match target {
+        Expr::Call(name, mut args) => {
+            args.push(lambda);
+            Expr::Call(name, args)
+        }
+        Expr::GenericCall(name, types, mut args) => {
+            args.push(lambda);
+            Expr::GenericCall(name, types, args)
+        }
+        Expr::MethodCall(receiver, name, mut args, types) => {
+            args.push(lambda);
+            Expr::MethodCall(receiver, name, args, types)
+        }
+        other => Expr::CallIndirect(Box::new(other), vec![lambda]),
+    }
+}
+
+/// Kotlin-inspired scope-function lowering. The receiver is evaluated once
+/// and exposed as `it`. `apply`/`also` return the receiver, while
+/// `let`/`run`/`with` return the block's final value.
+pub fn scope_expr(base: Expr, kind: &str, mut body: Vec<Stmt>) -> Expr {
+    // Scope blocks own their local return. Lower the direct `return` form to
+    // the block tail before the normal scope-function result rule runs; this
+    // prevents it from escaping to the enclosing Nova function.
+    let mut local_body = Vec::with_capacity(body.len());
+    for statement in body {
+        match statement {
+            Stmt::Return(value) => {
+                local_body.push(Stmt::Tail(value.unwrap_or(Expr::Unit)));
+                break;
+            }
+            other => local_body.push(other),
+        }
+    }
+    body = local_body;
+    let returns_receiver = matches!(kind, "apply" | "also");
+    if let Some(Stmt::Tail(value)) = body.last().cloned() {
+        if returns_receiver {
+            body.pop();
+            body.push(Stmt::Expr(value));
+        }
+    }
+    if returns_receiver {
+        body.push(Stmt::Tail(Expr::Var("it".into())));
+    }
+    let mut statements = vec![Stmt::Let {
+        name: "it".into(),
+        mutable: true,
+        ty: None,
+        init: base,
+        defer: None,
+    }];
+    statements.extend(body);
+    Expr::Block(statements)
+}
+
+pub fn apply_expr(base: Expr, body: Vec<Stmt>) -> Expr {
+    scope_expr(base, "apply", body)
+}
+
+/// Cascade initialization sugar. `new User { id: 1 }..active = true` becomes
+/// a lexical block that evaluates the base once, mutates it, and returns it.
+/// A fresh-looking hidden name is scoped to the generated block, so cascades
+/// can be nested without changing the runtime representation.
+pub fn cascade_expr(
+    base: Expr,
+    assignments: Vec<(String, Option<BinaryOp>, Expr)>,
+    ty: Option<TypeRef>,
+) -> Expr {
+    let base = match (base, ty.as_ref()) {
+        // Resolve a target-typed constructor before putting it inside the
+        // generated block. The surface pass can resolve a concrete static
+        // constructor directly; keeping the marker nested in a block loses
+        // that expected-type context in the bootstrap pipeline.
+        (Expr::Call(marker, args), Some(TypeRef::Named(name)))
+            if marker == "__nova_target_new" => Expr::Call(format!("{name}::new"), args),
+        (Expr::Call(marker, args), Some(TypeRef::Applied(name, types)))
+            if marker == "__nova_target_new" => {
+            Expr::GenericCall(format!("{name}::new"), types.clone(), args)
+        }
+        (base, _) => base,
+    };
+    let root = "__nova_cascade_value".to_owned();
+    let mut statements = vec![Stmt::Let {
+        name: root.clone(),
+        mutable: true,
+        // Preserve the declared type of the destination local. This is what
+        // lets a bare `new()` resolve against `let mut value: Config`.
+        ty,
+        init: base,
+        defer: None,
+    }];
+    for (field, op, value) in assignments {
+        statements.push(assignment_stmt(
+            Expr::Field(Box::new(Expr::Var(root.clone())), field),
+            op,
+            value,
+        ));
+    }
+    statements.push(Stmt::Tail(Expr::Var(root)));
+    Expr::Block(statements)
+}
+
 pub fn assignment_stmt(target: Expr, op: Option<BinaryOp>, value: Expr) -> Stmt {
     match target {
         Expr::Var(name) => match op {
@@ -493,6 +704,17 @@ pub fn assignment_stmt(target: Expr, op: Option<BinaryOp>, value: Expr) -> Stmt 
             op,
             value,
         },
+    }
+}
+
+/// Internal spelling for ownership-aware replacement. It remains a Set in
+/// the source AST and is expanded only after the concrete owner type is known.
+pub const REPLACE_PREFIX: &str = "__nova_internal_replace__\u{1f}";
+
+pub fn replace_stmt(name: String, value: Expr) -> Stmt {
+    Stmt::Set {
+        name: format!("{REPLACE_PREFIX}{name}"),
+        value,
     }
 }
 
@@ -533,6 +755,63 @@ fn final_if_as_expression(stmt: Stmt) -> Expr {
     }
 }
 
+// The marker only lives in the grammar AST until normalize_block_tail runs.
+// Keeping the lowering in one place avoids a new runtime/HIR statement kind.
+const REFUTABLE_LET_CONTINUATION: &str = "__nova_internal_refutable_let_continuation";
+
+/// Build the source-level representation for:
+/// `let Some(value) = optional else { return fallback; };`
+/// This works for other enum variants too, without making Option special.
+pub fn refutable_let_else(
+    path: String,
+    bindings: Vec<String>,
+    value: Expr,
+    failure: Vec<Stmt>,
+) -> Stmt {
+    Stmt::Match {
+        value,
+        arms: vec![
+            MatchArm {
+                pattern: Pattern::Variant { path, bindings },
+                body: vec![Stmt::Expr(Expr::Var(REFUTABLE_LET_CONTINUATION.into()))],
+            },
+            MatchArm { pattern: Pattern::Wildcard, body: failure },
+        ],
+    }
+}
+
+// A refutable let-else must not leave its failure branch and then continue
+// with an uninitialized binding. `return`, `break` and `continue` are
+// sufficient exits; nested exhaustive control-flow can also qualify.
+fn branch_exits(body: &[Stmt]) -> bool {
+    match body.last() {
+        Some(Stmt::Return(_) | Stmt::Break | Stmt::Continue) => true,
+        Some(Stmt::If { then_body, else_body: Some(other), .. }) =>
+            branch_exits(then_body) && branch_exits(other),
+        Some(Stmt::Match { arms, .. }) if !arms.is_empty() =>
+            arms.iter().all(|arm| branch_exits(&arm.body)),
+        _ => false,
+    }
+}
+
+fn is_refutable_let_marker(stmt: &Stmt) -> bool {
+    let Stmt::Match { arms, .. } = stmt else { return false };
+    matches!(arms.as_slice(), [success, failure]
+        if matches!(&success.body[..], [Stmt::Expr(Expr::Var(name))] if name == REFUTABLE_LET_CONTINUATION)
+        && matches!(&failure.pattern, Pattern::Wildcard))
+}
+
+// Destructuring is a compile-time rewrite; a single hidden binding evaluates
+// the initializer once. The ordinary field/index type checker does the rest.
+const DESTRUCTURE_PREFIX: &str = "__nova_internal_destructure__";
+pub fn destructure_binding(owner: Option<String>, names: Vec<String>, init: Expr) -> Stmt {
+    let shape = if let Some(owner) = owner { format!("struct:{owner}") } else { "array".into() };
+    Stmt::Let {
+        name: format!("{DESTRUCTURE_PREFIX}{shape}\u{1f}{}", names.join("\u{1f}")),
+        mutable: false, ty: None, init, defer: None,
+    }
+}
+
 pub fn normalize_block_tail(mut statements: Vec<Stmt>) -> Vec<Stmt> {
     if let Some(last) = statements.pop() {
         if value_if_chain(&last) {
@@ -540,6 +819,50 @@ pub fn normalize_block_tail(mut statements: Vec<Stmt>) -> Vec<Stmt> {
         } else {
             statements.push(last);
         }
+    }
+    // Expand destructuring before continuation normalization so the declared
+    // names become visible to subsequent statements in the same block.
+    let mut expanded = Vec::with_capacity(statements.len());
+    for (idx, statement) in statements.into_iter().enumerate() {
+        match statement {
+            Stmt::Let {name, init, ..} if name.starts_with(DESTRUCTURE_PREFIX) => {
+                let body = &name[DESTRUCTURE_PREFIX.len()..];
+                let (shape, members) = body.split_once('\u{1f}').unwrap_or((body,""));
+                let members: Vec<&str> = members.split('\u{1f}').filter(|s| !s.is_empty()).collect();
+                let unique=format!("__nova_destructure_{idx}");
+                let ty=shape.strip_prefix("struct:").map(|t| TypeRef::Named(t.to_string()));
+                expanded.push(Stmt::Let {name:unique.clone(),mutable:false,ty,init,defer:None});
+                for (index,member) in members.iter().enumerate() {
+                    // Duplicate names are rejected by normal local checking.
+                    let access=if shape=="array" {
+                        Expr::Index(Box::new(Expr::Var(unique.clone())),Box::new(Expr::Int(index.to_string())))
+                    } else {
+                        Expr::Field(Box::new(Expr::Var(unique.clone())),(*member).to_string())
+                    };
+                    expanded.push(Stmt::Let {name:(*member).into(),mutable:false,ty:None,init:access,defer:None});
+                }
+            }
+            other => expanded.push(other),
+        }
+    }
+    let mut statements=expanded;
+    // Right-to-left continuation lowering gives each binding lexical scope
+    // over the remainder of its enclosing block. The underlying match already
+    // evaluates its subject once and checks enum variants and payload types.
+    for index in (0..statements.len()).rev() {
+        if !is_refutable_let_marker(&statements[index]) { continue; }
+        let rest = statements.split_off(index + 1);
+        let Stmt::Match { arms, .. } = &mut statements[index] else { unreachable!() };
+        if !branch_exits(&arms[1].body) {
+            // Produce a precise diagnostic through the ordinary semantic
+            // checker rather than silently falling through with an unbound
+            // payload (the AST's existing unknown-local diagnostic applies).
+            arms[1].body.push(Stmt::Set {
+                name: "__nova_let_else_must_diverge__".into(),
+                value: Expr::Unit,
+            });
+        }
+        arms[0].body = rest;
     }
     statements
 }

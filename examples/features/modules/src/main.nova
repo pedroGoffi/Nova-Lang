@@ -1,0 +1,5 @@
+import std;
+// mod loads another Nova file; its public functions are addressed by module path.
+mod math;
+
+fn main() -> i32 { return math::answer() - 42; }

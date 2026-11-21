@@ -1,0 +1,18 @@
+use std::core::option::Option;
+use std::error::error::Error;
+use std::error::result::Result;
+use std::system::env::Variable;
+use std::system::process::ExitCode;
+
+pub trait EnvironmentAccess {
+    fn get(self: &Self, key: str) -> Option<Variable>;
+    fn set(self: &Self, key: str, value: str) -> Result<(),Error>;
+    fn remove(self: &Self, key: str) -> Result<(),Error>;
+}
+
+pub trait ProcessControl {
+    fn run(self: &Self, command: str) -> Result<ExitCode,Error>;
+}
+
+pub concept EnvironmentLike<T> = implements<T,EnvironmentAccess>;
+pub concept ProcessLike<T> = implements<T,ProcessControl>;

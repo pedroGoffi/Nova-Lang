@@ -1,0 +1,46 @@
+use std::core;
+use std::memory::raw;
+
+// Linux sockaddr_in: family, network-order port, IPv4 bytes and padding.
+pub class SocketAddress { data: *mut u8, length: i32 }
+
+impl SocketAddress {
+    static fn ipv4(a: i32, b: i32, c: i32, d: i32, port: i32) -> Self {
+        let data: *mut u8 = unsafe { raw::alloc_elements::<u8>(16) };
+        write_byte(data, 0, 2 as u8);
+        write_byte(data, 1, 0 as u8);
+        write_byte(data, 2, (port / 256) as u8);
+        write_byte(data, 3, (port % 256) as u8);
+        write_byte(data, 4, a as u8);
+        write_byte(data, 5, b as u8);
+        write_byte(data, 6, c as u8);
+        write_byte(data, 7, d as u8);
+        unsafe { core::fill(raw::element_at(data, 8), 0 as u8, 8); }
+        return new SocketAddress { data: data, length: 16 };
+    }
+    fn pointer(self: &SocketAddress) -> *const u8 { return unsafe { self.data as (*const u8) }; }
+    fn length(self: &SocketAddress) -> i32 { return self.length; }
+    fn clone(self: &SocketAddress) -> SocketAddress {
+        let copy: *mut u8 = unsafe { raw::alloc_elements::<u8>(16) };
+        unsafe { core::copy(copy, self.data as (*const u8), 16); }
+        return new SocketAddress { data: copy, length: self.length };
+    }
+    fn drop(self: SocketAddress) -> () {
+        unsafe { raw::deallocate_bytes(self.data); }
+        return;
+    }
+}
+
+fn write_byte(data: *mut u8, index: u64, value: u8) -> () {
+    let slot: *mut u8 = unsafe { raw::element_at(data, index) };
+    unsafe { *slot = value; }
+    return;
+}
+
+pub fn localhost(port: i32) -> SocketAddress {
+    return SocketAddress::ipv4(127, 0, 0, 1, port);
+}
+
+pub fn any_local(port: i32) -> SocketAddress {
+    return SocketAddress::ipv4(0, 0, 0, 0, port);
+}

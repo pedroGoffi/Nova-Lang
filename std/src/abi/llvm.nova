@@ -1,0 +1,187 @@
+// Direct, typed LLVM intrinsics implemented by the Nova compiler.
+// No extern function and no C runtime symbol. This is a *closed* binding:
+// arbitrary inline IR/assembly is deliberately not allowed by std::abi::llvm.
+// The annotated body is purely a source-level declaration marker; the
+// compiler verifies its ABI and substitutes the LLVM implementation.
+use std::core::types::Size;
+use std::core::types::Word;
+
+// Source/destination must be valid for byte_count bytes. For copy_bytes,
+// ranges may NOT overlap. These functions do not move Nova owning values.
+#[llvm_intrinsic(memcpy)]
+[[unsafe]] pub fn copy_bytes(destination: *mut u8, source: *const u8, byte_count: Size) -> () {return;}
+
+// Overlapping ranges are permitted. Works on byte buffers, not owned T slots.
+#[llvm_intrinsic(memmove)]
+[[unsafe]] pub fn move_bytes(destination: *mut u8, source: *const u8, byte_count: Size) -> () {return;}
+
+// Fill raw memory with a repeated byte. Callers must initialize ownership
+// metadata before reading T values from this memory.
+#[llvm_intrinsic(memset)]
+[[unsafe]] pub fn set_bytes(destination: *mut u8, value: u8, byte_count: Size) -> () {return;}
+
+#[llvm_intrinsic(ctpop)]
+pub fn popcount64(value: Word) -> Word {return 0;}
+#[llvm_intrinsic(ctlz)]
+pub fn leading_zeros64(value: Word) -> Word {return 0;}
+#[llvm_intrinsic(cttz)]
+pub fn trailing_zeros64(value: Word) -> Word {return 0;}
+#[llvm_intrinsic(bswap)]
+pub fn byte_swap64(value: Word) -> Word {return 0;}
+#[llvm_intrinsic(bitreverse)]
+pub fn reverse_bits64(value: Word) -> Word {return 0;}
+
+// IEEE-754 f64 LLVM operations. Domain/NaN behavior follows LLVM/target.
+#[llvm_intrinsic(sqrt)]
+pub fn square_root_f64(value: f64) -> f64 {return 0.0;}
+#[llvm_intrinsic(fabs)]
+pub fn absolute_f64(value: f64) -> f64 {return 0.0;}
+#[llvm_intrinsic(floor)]
+pub fn floor_f64(value: f64) -> f64 {return 0.0;}
+#[llvm_intrinsic(ceil)]
+pub fn ceil_f64(value: f64) -> f64 {return 0.0;}
+
+// Compiler-approved platform heap boundary. These are NOT Nova runtime C
+// exports. The LLVM backend calls the host allocator's stable C ABI.
+// All size/overflow/alignment policy remains in Nova (std::abi::native::raw).
+#[llvm_intrinsic(aligned_alloc)]
+[[unsafe]] pub fn heap_allocate(alignment: Size, rounded_bytes: Size) -> Word {return 0;}
+#[llvm_intrinsic(free)]
+[[unsafe]] pub fn heap_free(address: Word) -> () {return;}
+// Checked offset policy belongs to std::memory::raw; LLVM emits GEP (no C pointer ABI).
+#[llvm_intrinsic(gep)]
+[[unsafe]] pub fn pointer_offset(address: Word, bytes: Size) -> Word {return 0;}
+
+// POSIX ABI boundary is generated in LLVM, never through a Nova C module.
+// The borrowed `str` must remain NUL-terminated and alive for the call.
+#[llvm_intrinsic(strlen)]
+pub fn text_length(text: str) -> Size {return 0;}
+#[llvm_intrinsic(ptrtoint)]
+pub fn text_address(text: str) -> Word {return 0;}
+#[llvm_intrinsic(write)]
+[[unsafe]] pub fn write_bytes(descriptor: i32, address: Word, count: Size) -> i64 {return 0;}
+#[llvm_intrinsic(_Exit)]
+[[unsafe]] pub fn process_exit(status: i32) -> () {return;}
+#[llvm_intrinsic(errno)]
+pub fn last_errno() -> i32 {return 0;}
+
+// POSIX clock_gettime ABI; time conversion/overflow policy lives in Nova.
+#[llvm_intrinsic(clock_gettime)]
+[[unsafe]] pub fn clock_gettime(clock_id: i32, destination: *mut u8) -> i32 {return 0;}
+
+// Fixed-size POSIX openat/close ABI. Flags, permissions and cleanup are Nova.
+#[llvm_intrinsic(openat)]
+[[unsafe]] pub fn open_at(directory_fd: i32, path: str, flags: i32, mode: i32) -> i32 {return 0;}
+#[llvm_intrinsic(close)]
+[[unsafe]] pub fn close_fd(descriptor: i32) -> i32 {return 0;}
+
+// Read exactly one initialized byte. Raw pointer lifetime is caller-owned.
+#[llvm_intrinsic(load8)]
+[[unsafe]] pub fn load_byte(address: Word) -> u8 {return 0;}
+
+// Thread API uses compiler-generated LLVM wrappers around POSIX pthread ABI.
+// No Nova runtime C entrypoints and no opaque thread-ID lookup table.
+// Supported ABI: Linux 64-bit pthread_t represented by a machine word.
+// The callback must be a pure, noncapturing fn() -> () (checked at spawn).
+#[llvm_intrinsic(pthread_create)]
+[[unsafe]] pub fn thread_start(callback: fn() -> (), thread_id_out: *mut i64) -> i32 {return 0;}
+#[llvm_intrinsic(pthread_join)]
+[[unsafe]] pub fn thread_join(thread_id: Word) -> i32 {return 0;}
+#[llvm_intrinsic(sched_yield)]
+pub fn thread_yield() -> i32 {return 0;}
+// Linux POSIX one-shot nanosleep boundary. Time policy and retries stay in Nova.
+#[llvm_intrinsic(nanosleep)]
+pub fn sleep_millis(milliseconds: Size) -> i32 {return 0;}
+#[llvm_intrinsic(pthread_self)]
+pub fn thread_current() -> Word {return 0;}
+
+// Callback's LLVM ABI exactly matches pthread's ptr(ptr). T-specific
+// trampolines can therefore be authored and monomorphized in Nova itself.
+#[llvm_intrinsic(pthread_create_arg)]
+[[unsafe]] pub fn thread_start_arg(
+    callback: fn(*mut u8) -> *mut u8,
+    context: *mut u8,
+    thread_id_out: *mut i64
+) -> i32 {return 0;}
+
+// Windows x86_64 target ABI. LLVM emits imports from kernel32; no Nova C shim.
+// These symbols are intentionally separate from POSIX intrinsics. The compiler
+// must select the Windows target and link against kernel32 (toolchain needed).
+#[llvm_intrinsic(GetStdHandle)]
+pub fn win_std_handle(kind: i32) -> Word {return 0;}
+#[llvm_intrinsic(WriteFile)]
+[[unsafe]] pub fn win_write_file(handle: Word, address: Word, count: u32, written: *mut u32) -> i32 {return 0;}
+#[llvm_intrinsic(ExitProcess)]
+[[unsafe]] pub fn win_exit_process(status: i32) -> () {return;}
+
+// Network system boundary. The compiler emits the OS ABI; socket lifecycle,
+// addressing, retries, ownership and protocol behavior are entirely Nova.
+// These POSIX intrinsics are deliberately separate from WinSock.
+#[llvm_intrinsic(socket)]
+[[unsafe]] pub fn net_socket(family: i32, socket_type: i32, protocol: i32) -> i32 {return 0;}
+#[llvm_intrinsic(setsockopt)]
+[[unsafe]] pub fn net_set_option(fd: i32, level: i32, name: i32, option: *const i32, bytes: i32) -> i32 {return 0;}
+#[llvm_intrinsic(bind)]
+[[unsafe]] pub fn net_bind(fd: i32, address: *const u8, address_bytes: i32) -> i32 {return 0;}
+#[llvm_intrinsic(listen)]
+[[unsafe]] pub fn net_listen(fd: i32, backlog: i32) -> i32 {return 0;}
+#[llvm_intrinsic(accept)]
+[[unsafe]] pub fn net_accept(fd: i32) -> i32 {return 0;}
+#[llvm_intrinsic(recv)]
+[[unsafe]] pub fn net_recv(fd: i32, buffer: *mut u8, bytes: Size, flags: i32) -> i64 {return 0;}
+#[llvm_intrinsic(send)]
+[[unsafe]] pub fn net_send(fd: i32, buffer: *const u8, bytes: Size, flags: i32) -> i64 {return 0;}
+#[llvm_intrinsic(fcntl_getfl)]
+[[unsafe]] pub fn net_get_flags(fd: i32, operation: i32) -> i32 {return 0;}
+#[llvm_intrinsic(fcntl_setfl)]
+[[unsafe]] pub fn net_set_flags(fd: i32, operation: i32, flags: i32) -> i32 {return 0;}
+
+// Additional POSIX boundaries used by Nova-authored HTTP transports.
+// Address/descriptor records are opaque bytes; the caller owns their ABI layout.
+#[llvm_intrinsic(connect)]
+[[unsafe]] pub fn net_connect(fd: i32, address: *const u8, length: u32) -> i32 {return 0;}
+#[llvm_intrinsic(getaddrinfo)]
+[[unsafe]] pub fn net_resolve(host: str, service: str, hints: *const u8, result: *mut *mut u8) -> i32 {return 0;}
+#[llvm_intrinsic(freeaddrinfo)]
+[[unsafe]] pub fn net_free_addresses(result: *mut u8) -> () {return;}
+#[llvm_intrinsic(getsockopt)]
+[[unsafe]] pub fn net_get_option(fd: i32, level: i32, option: i32, value: *mut i32, length: *mut u32) -> i32 {return 0;}
+#[llvm_intrinsic(poll)]
+[[unsafe]] pub fn net_poll(descriptors: *mut u8, count: Size, timeout: i32) -> i32 {return 0;}
+
+// POSIX read and environment ABI. The owning buffers and all policies live
+// in std::fs and the platform environment layer; the compiler emits these as typed LLVM functions.
+#[llvm_intrinsic(read)]
+[[unsafe]] pub fn read_fd(descriptor: i32, destination: *mut u8, capacity: Size) -> i64 {return 0;}
+#[llvm_intrinsic(getenv)]
+[[unsafe]] pub fn getenv_address(key: str) -> Word {return 0;}
+// A borrowed str view, NOT ownership transfer. A non-null, NUL-terminated
+// pointer is required, and the source must outlive all uses of the result.
+#[llvm_intrinsic(inttoptr)]
+[[unsafe]] pub fn borrow_text(address: Word) -> str {return 0;}
+
+// Compiler-checked atomic operations. Ordering is validated by LLVM IR
+// switches; invalid order combinations trap rather than silently weaken safety.
+// No extern declaration, no C module, and no resource lookup table.
+#[llvm_intrinsic(atomic_load_i64)]
+[[unsafe]] pub fn atomic_load_i64(pointer: *mut i64, ordering: i32) -> i64 {return 0;}
+#[llvm_intrinsic(atomic_store_i64)]
+[[unsafe]] pub fn atomic_store_i64(pointer: *mut i64, value: i64, ordering: i32) -> () {return;}
+#[llvm_intrinsic(atomic_swap_i64)]
+[[unsafe]] pub fn atomic_swap_i64(pointer: *mut i64, value: i64, ordering: i32) -> i64 {return 0;}
+#[llvm_intrinsic(atomic_fetch_add_i64)]
+[[unsafe]] pub fn atomic_fetch_add_i64(pointer: *mut i64, value: i64, ordering: i32) -> i64 {return 0;}
+#[llvm_intrinsic(atomic_fetch_sub_i64)]
+[[unsafe]] pub fn atomic_fetch_sub_i64(pointer: *mut i64, value: i64, ordering: i32) -> i64 {return 0;}
+#[llvm_intrinsic(atomic_fetch_and_i64)]
+[[unsafe]] pub fn atomic_fetch_and_i64(pointer: *mut i64, value: i64, ordering: i32) -> i64 {return 0;}
+#[llvm_intrinsic(atomic_fetch_or_i64)]
+[[unsafe]] pub fn atomic_fetch_or_i64(pointer: *mut i64, value: i64, ordering: i32) -> i64 {return 0;}
+#[llvm_intrinsic(atomic_fetch_xor_i64)]
+[[unsafe]] pub fn atomic_fetch_xor_i64(pointer: *mut i64, value: i64, ordering: i32) -> i64 {return 0;}
+#[llvm_intrinsic(atomic_compare_exchange_i64)]
+[[unsafe]] pub fn atomic_compare_exchange_i64(pointer: *mut i64, expected: i64, desired: i64, success_order: i32, failure_order: i32) -> i32 {return 0;}
+
+// Linux OS entropy boundary; only the syscall ABI is generated by LLVM.
+#[llvm_intrinsic(getrandom)]
+[[unsafe]] pub fn random_bytes(destination: *mut u8, byte_count: Size, flags: i32) -> i64 {return 0;}

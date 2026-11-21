@@ -1,0 +1,656 @@
+// Nova Meta: marker traits define attribute schemas / effect vocabulary.
+// Compiler verifies placement and contracts; the meaning of an attribute is
+// provided by the service that consumes it. These markers generate no LLVM code.
+#[meta_attribute(struct, enum, function, lint_unused)]
+pub trait must_use {}
+#[meta_attribute(function, lint_call)]
+pub trait deprecated {}
+#[meta_effect]
+pub trait network {}
+#[meta_effect]
+pub trait filesystem {}
+#[meta_effect]
+pub trait database {}
+#[meta_effect]
+pub trait allocation {}
+#[meta_effect]
+pub trait blocking {}
+#[meta_effect]
+pub trait authentication {}
+#[meta_effect]
+pub trait reflection {}
+#[meta_effect]
+pub trait compiletime_io {}
+#[meta_effect]
+pub trait compiletime_spawn {}
+#[meta_effect]
+pub trait cancellation {}
+// The existing foreach AST lowering now reads these method names from .nova.
+// Receiver and cursor types are verified by ordinary method typechecking.
+#[meta_protocol(foreach_begin, begin)]
+pub trait ForeachBegin { fn begin(self: Self) -> Self; }
+#[meta_protocol(foreach_end, end)]
+pub trait ForeachEnd { fn end(self: Self) -> Self; }
+#[meta_protocol(foreach_equals, equals)]
+pub trait ForeachEquals { fn equals(self: Self, rhs: Self) -> bool; }
+#[meta_protocol(foreach_value, value)]
+pub trait ForeachValue { fn value(self: Self) -> Self; }
+#[meta_protocol(foreach_advance, next)]
+pub trait ForeachAdvance { fn next(self: Self) -> Self; }
+
+// Higher-level derive recipes are authored here, not in the Rust codegen.
+// Only the underlying, already safe derives are materialized by the compiler.
+#[meta_derive(Clone, Debug)]
+pub trait AutoInspectable {}
+
+#[meta_derive(Default, Clone)]
+pub trait AutoRecord {}
+
+// Reusable schema: libraries can attach #[entity_record] to structs with
+// the correct shape. The field name/type rules are compiler-checked AST queries.
+#[meta_attribute(struct, fields_min_1, field_id, type_id_i64)]
+pub trait entity_record {}
+
+// A stricter, parameterized attribute with a dependency on entity_record.
+#[meta_attribute(struct, args_exact_1, requires_entity_record)]
+pub trait entity_table {}
+
+// Framework-style decorator vocabulary. These are intentionally only schemas;
+// a package can attach its own procedural processor to give them behavior.
+#[meta_attribute(struct, phase_discover, priority_100)]
+pub trait Component {}
+#[meta_attribute(struct, phase_discover, priority_101)]
+pub trait MonoBehaviour {}
+#[meta_attribute(struct, phase_validate, repeatable)]
+pub trait RequireComponent {}
+#[meta_attribute(struct, phase_generate, priority_205)]
+pub trait ExecuteAlways {}
+#[meta_attribute(field, phase_validate)]
+pub trait SerializeField {}
+#[meta_attribute(field, phase_validate)]
+pub trait HideInInspector {}
+#[meta_attribute(struct, phase_discover, priority_110)]
+pub trait sdlefGame {}
+#[meta_attribute(struct, phase_discover, priority_111)]
+pub trait sdlefGame2D {}
+#[meta_attribute(function, phase_generate, priority_210)]
+pub trait sdlefStart {}
+#[meta_attribute(function, phase_generate, priority_220)]
+pub trait sdlefLoop {}
+#[meta_attribute(function, phase_generate, priority_220)]
+pub trait sdlefUpdate {}
+#[meta_attribute(function, phase_generate, priority_230)]
+pub trait sdlefRender {}
+#[meta_attribute(function, phase_generate, priority_200)]
+pub trait otherComponent {}
+#[meta_attribute(parameter, phase_validate, repeatable)]
+pub trait Valid {}
+#[meta_attribute(parameter, phase_validate, repeatable)]
+pub trait OtherOne {}
+#[meta_attribute(return_type)]
+pub trait More {}
+
+#[meta_attribute(struct, conflicts_entity_table)]
+pub trait transient_entity {}
+
+// Derive implementations are normal Nova trait defaults. Their optional
+// concept requirements are verified by the same solver used for generics.
+// A package may #[derive(HasNumericId)] on a struct with an `id` field.
+pub concept HasIdentifier<T> = has_field<T, id>;
+#[meta_derive_impl(HasIdentifier)]
+pub trait HasNumericId {
+    fn identifier(self: &Self) -> i64 { return self.id; }
+}
+
+// Reflection primitives are declared here. Their bodies are never used:
+// the compile-time interpreter must replace every call before codegen.
+// This is the minimal trusted introspection ABI; higher-level derive logic
+// is written in Nova libraries, not as a new Rust intrinsic per derive.
+#[pure]
+#[meta_intrinsic(field_count)]
+pub fn field_count<T>() -> i64 { return 0; }
+#[pure]
+#[meta_intrinsic(has_field)]
+pub fn has_field<T>(name: str) -> bool { return false; }
+#[pure]
+#[meta_intrinsic(type_name)]
+pub fn type_name<T>() -> str { return ""; }
+#[pure]
+#[meta_intrinsic(field_type)]
+pub fn field_type<T>(name: str) -> str { return ""; }
+
+// Enum and kind reflection use the same read-only compile-time protocol.
+#[pure]
+#[meta_intrinsic(type_kind)]
+pub fn type_kind<T>() -> str { return ""; }
+#[pure]
+#[meta_intrinsic(variant_count)]
+pub fn variant_count<T>() -> i64 { return 0; }
+#[pure]
+#[meta_intrinsic(has_variant)]
+pub fn has_variant<T>(name: str) -> bool { return false; }
+
+// Typed procedural macro AST ABI. All functions below are compile-time-only
+// intrinsics; their implementations live in the compiler's generic AST VM,
+// never in the native executable. Packages implement *transformations* in Nova.
+// The marker types are not runtime reflection objects.
+pub struct MetaType {}
+// Whole-program compile-time capability. This is a read-only compiler handle
+// to the current package/dependency source graph; it never becomes a runtime
+// value and it cannot perform host I/O or arbitrary source-string execution.
+pub struct MetaProgram {}
+// Compiler-backed class description. It is a compile-time value, never a
+// runtime object; its methods are implemented by the typed metadata VM.
+pub struct MetaClass {}
+pub struct MetaField {}
+pub struct MetaFields {}
+pub struct MetaMethods {}
+pub struct MetaTypes {}
+pub struct MetaMethod {}
+pub struct MetaTypeRef {}
+pub struct MetaExpr {}
+pub struct MetaDecl {}
+pub struct MetaDecls {}
+
+// High-level class editing: no manual AST assembly for a simple field.
+// A decorator returning this declaration replaces its annotated class, and
+// subsequent decorators observe the updated field list.
+#[comptime]
+#[meta_proc_intrinsic(add_field)]
+pub fn add_field(target: MetaType, name: str, type_name: str) -> MetaDecl { return 0; }
+
+#[comptime]
+#[meta_proc_intrinsic(fields)]
+pub fn fields(target: MetaType) -> MetaFields { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(class_info)]
+pub fn class_info(target: MetaType) -> MetaClass { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(class_name)]
+pub fn class_name(target: MetaClass) -> str { return ""; }
+#[comptime]
+#[meta_proc_intrinsic(class_fields)]
+pub fn class_fields(target: MetaClass) -> MetaFields { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(class_methods)]
+pub fn class_methods(target: MetaClass) -> MetaMethods { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(class_field_count)]
+pub fn class_field_count(target: MetaClass) -> i64 { return 0; }
+// Jai-style program control primitives. A macro can discover declarations
+// across the compilation and then return MetaDecl/MetaDecls to extend it.
+// Emission remains typed: generated items re-enter normal parsing, effects,
+// ownership and type checking in the next generation phase.
+#[comptime]
+#[meta_proc_intrinsic(program)]
+pub fn program() -> MetaProgram { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(program_types)]
+pub fn program_types(program: MetaProgram, annotation: str) -> MetaTypes { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(program_type_count)]
+pub fn program_type_count(program: MetaProgram, annotation: str) -> i64 { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(program_phase)]
+pub fn program_phase(program: MetaProgram) -> i64 { return 0; }
+// Read-only class/method reflection for Nova-authored annotation processors.
+// `impl` methods are collected before procedural expansion (including other
+// source files in the same package). No runtime reflection is emitted.
+#[comptime]
+#[meta_proc_intrinsic(methods)]
+pub fn methods(target: MetaType) -> MetaMethods { return 0; }
+// Enumerate annotated classes across the loaded package dependency graph.
+// Available only during procedural expansion: no runtime scanning or reflection.
+#[comptime]
+#[meta_proc_intrinsic(types_with_annotation)]
+pub fn types_with_annotation(annotation: str) -> MetaTypes { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(target_qualified_name)]
+pub fn target_qualified_name(target: MetaType) -> str { return ""; }
+// Read named arguments from an annotated class. This is reflection metadata,
+// not a runtime attribute value or unsafe source-string evaluation.
+#[comptime]
+#[meta_proc_intrinsic(type_annotation_string)]
+pub fn type_annotation_string(target: MetaType, annotation: str, key: str) -> str { return ""; }
+#[comptime]
+#[meta_proc_intrinsic(method_name)]
+pub fn method_name(method: MetaMethod) -> str { return ""; }
+// Structural precheck for HTTP callbacks; HIR validates concrete argument types.
+#[comptime]
+#[meta_proc_intrinsic(method_is_http_handler)]
+pub fn method_is_http_handler(method: MetaMethod) -> bool { return false; }
+#[comptime]
+#[meta_proc_intrinsic(method_has_annotation)]
+pub fn method_has_annotation(method: MetaMethod, name: str) -> bool { return false; }
+#[comptime]
+#[meta_proc_intrinsic(method_annotation_string)]
+pub fn method_annotation_string(method: MetaMethod, annotation: str, index: i64) -> str { return ""; }
+#[comptime]
+#[meta_proc_intrinsic(field_has_annotation)]
+pub fn field_has_annotation(field: MetaField, name: str) -> bool { return false; }
+#[comptime]
+#[meta_proc_intrinsic(field_annotation_string)]
+pub fn field_annotation_string(field: MetaField, name: str, index: i64) -> str { return ""; }
+
+#[comptime]
+#[meta_proc_intrinsic(field_name)]
+pub fn field_name(field: MetaField) -> str { return ""; }
+#[comptime]
+#[meta_proc_intrinsic(field_type_ref)]
+pub fn field_type_ref(field: MetaField) -> MetaTypeRef { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(field_type_matches)]
+pub fn field_type_matches(field: MetaField, target: MetaType) -> bool { return false; }
+#[comptime]
+#[meta_proc_intrinsic(field_count)]
+pub fn meta_field_count(target: MetaType) -> i64 { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(target_name)]
+pub fn target_name(target: MetaType) -> str { return ""; }
+#[comptime]
+#[meta_proc_intrinsic(type_ref)]
+pub fn type_ref(target: MetaType) -> MetaTypeRef { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(type_named)]
+pub fn type_named(name: str) -> MetaTypeRef { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(reference)]
+pub fn reference(target: MetaTypeRef) -> MetaTypeRef { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(mutable_reference)]
+pub fn mutable_reference(target: MetaTypeRef) -> MetaTypeRef { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(unit_type)]
+pub fn unit_type() -> MetaTypeRef { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(assign)]
+pub fn assign(target: MetaExpr, value: MetaExpr) -> MetaExpr { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(variable)]
+pub fn variable(name: str) -> MetaExpr { return 0; }
+// Validated qualified function name, for a typed function-pointer expression.
+#[comptime]
+#[meta_proc_intrinsic(path_expr)]
+pub fn path_expr(path: str) -> MetaExpr { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(int_expr)]
+pub fn int_expr(value: i64) -> MetaExpr { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(access)]
+pub fn access(owner: MetaExpr, field: str) -> MetaExpr { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(binary)]
+pub fn binary(op: str, left: MetaExpr, right: MetaExpr) -> MetaExpr { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(call)]
+pub fn call(name: str, argument: MetaExpr) -> MetaExpr { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(method_call0)]
+pub fn method_call0(receiver: MetaExpr, name: str) -> MetaExpr { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(method_call1)]
+pub fn method_call1(receiver: MetaExpr, name: str, argument: MetaExpr) -> MetaExpr { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(sequence)]
+pub fn sequence(first: MetaExpr, second: MetaExpr) -> MetaExpr { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(unit_expr)]
+pub fn unit_expr() -> MetaExpr { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(impl_for)]
+pub fn impl_for(target: MetaType) -> MetaDecl { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(function)]
+pub fn function(name: str, result: MetaTypeRef, body: MetaExpr) -> MetaDecl { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(parameter)]
+pub fn parameter(func: MetaDecl, name: str, ty: MetaTypeRef) -> MetaDecl { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(method)]
+pub fn method(block: MetaDecl, method: MetaDecl) -> MetaDecl { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(struct_decl)]
+pub fn struct_decl(name: str) -> MetaDecl { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(struct_field)]
+pub fn struct_field(decl: MetaDecl, name: str, ty: MetaTypeRef) -> MetaDecl { return 0; }
+// Attach one typed metadata attribute to a generated declaration. The
+// declaration is re-entered into procedural expansion, allowing generated
+// types to compose with derives and decorators without source templates.
+#[comptime]
+#[meta_proc_intrinsic(annotate)]
+pub fn annotate(decl: MetaDecl, name: str, argument: str) -> MetaDecl { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(declarations)]
+pub fn declarations() -> MetaDecls { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(append)]
+pub fn append(decls: MetaDecls, item: MetaDecl) -> MetaDecls { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(has_field)]
+pub fn proc_has_field(target: MetaType, name: str) -> bool { return false; }
+#[comptime]
+#[meta_proc_intrinsic(require)]
+pub fn require(condition: bool, message: str) -> bool { return false; }
+
+// Optional metadata arguments for procedural attribute macros.
+pub struct MetaArgs {}
+#[comptime]
+#[meta_proc_intrinsic(argument_count)]
+pub fn argument_count(args: MetaArgs) -> i64 { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(argument)]
+pub fn argument(args: MetaArgs, index: i64) -> str { return ""; }
+
+
+// Reusable pure-Nova procedural-macro recipes.  A package can expose its own
+// #[proc_derive(...)] / #[proc_attribute(...)] wrapper that calls these helpers.
+// They run in the bounded compile-time AST interpreter: no native runtime code.
+
+// Generates `set_<field>(&mut self, value: FieldType)` for every struct field.
+// No implicit copies, raw pointers or unchecked ABI word casts are emitted.
+#[comptime]
+pub fn generate_setters(target: MetaType) -> MetaDecl {
+    let mut block = impl_for(target);
+    for field in fields(target) {
+        let name = field_name(field);
+        let mut setter = function(
+            "set_" + name,
+            unit_type(),
+            assign(access(variable("self"), name), variable("value"))
+        );
+        setter = parameter(setter, "self", mutable_reference(type_ref(target)));
+        setter = parameter(setter, "value", field_type_ref(field));
+        block = method(block, setter);
+    }
+    return block;
+}
+
+// Validates an arbitrary field list supplied to an attribute macro, entirely
+// at compile time.  Empty MetaDecls means no runtime artifacts are emitted.
+#[comptime]
+pub fn require_fields(target: MetaType, args: MetaArgs) -> MetaDecls {
+    let amount: i64 = argument_count(args);
+    require(amount != 0, "RequireFields expects one or more field names");
+    for index in 0..amount {
+        let name = argument(args, index);
+        require(proc_has_field(target, name), "missing required field: " + name);
+    }
+    return declarations();
+}
+
+// Derive recipe: compile-time field count as a constant-returning instance
+// method. Generated impl and method are ordinary Nova; no runtime reflection.
+#[comptime]
+pub fn generate_field_count(target: MetaType) -> MetaDecl {
+    let mut block = impl_for(target);
+    let mut getter = function("nova_field_count", type_named("i64"), int_expr(meta_field_count(target)));
+    getter = parameter(getter, "self", reference(type_ref(target)));
+    block = method(block, getter);
+    return block;
+}
+
+// Compile-time contract for consumers of a generated static-schema method.
+pub concept HasStaticFieldCount<T> = has_method<T,nova_field_count>;
+
+// AST builders used by derives. The compiler emits ordinary Nova methods.
+#[comptime]
+#[meta_proc_intrinsic(struct_init)]
+pub fn struct_init(target: MetaType) -> MetaExpr { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(init_field)]
+pub fn init_field(init: MetaExpr, name: str, value: MetaExpr) -> MetaExpr { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(static_method)]
+pub fn static_method(decl: MetaDecl) -> MetaDecl { return 0; }
+
+// One derive eliminates repetitive field assignments and constructor parameters.
+// All generated code is checked by the ordinary Nova type checker.
+#[comptime]
+pub fn generate_constructor(target: MetaType) -> MetaDecl {
+    let mut initializer = struct_init(target);
+    for field in fields(target) {
+        let name = field_name(field);
+        initializer = init_field(initializer, name, variable(name));
+    }
+    let mut ctor = function("new", type_ref(target), initializer);
+    for field in fields(target) {
+        ctor = parameter(ctor, field_name(field), field_type_ref(field));
+    }
+    ctor = static_method(ctor);
+    return method(impl_for(target),ctor);
+}
+
+#[comptime]
+#[proc_derive(Constructor)]
+pub fn derive_constructor(target: MetaType) -> MetaDecl {
+    return generate_constructor(target);
+}
+
+#[comptime]
+#[proc_derive(Setters)]
+pub fn derive_setters(target: MetaType) -> MetaDecl {
+    return generate_setters(target);
+}
+
+#[comptime]
+#[proc_derive(FieldCount)]
+pub fn derive_count(target: MetaType) -> MetaDecl {
+    return generate_field_count(target);
+}
+
+// Safe-by-default read accessors: the returned field must be Copyable.
+// For an owning field prefer a manually written borrow method until lifetimes
+// and returned field references are verified by the ownership checker.
+#[comptime]
+pub fn generate_getters(target: MetaType) -> MetaDecl {
+    let mut block = impl_for(target);
+    for field in fields(target) {
+        let name = field_name(field);
+        let mut getter = function(
+            "get_" + name,
+            field_type_ref(field),
+            access(variable("self"),name)
+        );
+        getter = parameter(getter,"self",reference(type_ref(target)));
+        block = method(block,getter);
+    }
+    return block;
+}
+
+#[comptime]
+#[proc_derive(Getters)]
+pub fn derive_getters(target: MetaType) -> MetaDecl {
+    return generate_getters(target);
+}
+
+// General-purpose AST construction for typed procedural derives; all values
+// exist only at compile time and emit no runtime code.
+#[comptime]
+#[meta_proc_intrinsic(str_expr)]
+pub fn str_expr(text: str) -> MetaExpr {return 0;}
+#[comptime]
+#[meta_proc_intrinsic(field_type_name)]
+pub fn field_type_name(field: MetaField) -> str {return "";}
+#[comptime]
+#[meta_proc_intrinsic(field_family)]
+pub fn field_family(field: MetaField) -> str {return "";}
+#[comptime]
+#[meta_proc_intrinsic(field_inner_type)]
+pub fn field_inner_type(field: MetaField) -> MetaTypeRef {return 0;}
+#[comptime]
+#[meta_proc_intrinsic(field_inner_name)]
+pub fn field_inner_name(field: MetaField) -> str {return "";}
+#[comptime]
+#[meta_proc_intrinsic(type_apply2)]
+pub fn type_apply2(name: str, first: MetaTypeRef, second: MetaTypeRef) -> MetaTypeRef {return 0;}
+#[comptime]
+#[meta_proc_intrinsic(call2)]
+pub fn call2(name: str, first: MetaExpr, second: MetaExpr) -> MetaExpr {return 0;}
+#[comptime]
+#[meta_proc_intrinsic(generic_call2)]
+pub fn generic_call2(name: str, type_arg: MetaTypeRef, first: MetaExpr, second: MetaExpr) -> MetaExpr {return 0;}
+#[comptime]
+#[meta_proc_intrinsic(try_expr)]
+pub fn try_expr(value: MetaExpr) -> MetaExpr {return 0;}
+
+// JSON derives intentionally generate *ordinary Nova code* which calls the
+// public parser and uses the normal Result `?` lowering. No C JSON builder.
+#[comptime]
+pub fn json_field_expression(field: MetaField, input: MetaExpr) -> MetaExpr {
+    let key = str_expr(field_name(field));
+    let family = field_family(field);
+    let name = field_type_name(field);
+    // Named primitive/STD codecs use their ordinary Nova parser functions.
+    // Generic `required<T>` is reserved for user types implementing JsonDecodable;
+    // a qualified String impl can otherwise be rejected during specialization.
+    let mut decoder = generic_call2("std::serialization::json::required",field_type_ref(field),input,key);
+    if name == "std::text::string::String" || name == "String" {
+        decoder = call2("std::serialization::json::required_string",input,key);
+    }
+    else if name == "i64" { decoder = call2("std::serialization::json::required_i64",input,key); }
+    else if name == "i32" { decoder = call2("std::serialization::json::required_i32",input,key); }
+    else if name == "bool" { decoder = call2("std::serialization::json::required_bool",input,key); }
+    else if name == "f64" { decoder = call2("std::serialization::json::required_f64",input,key); }
+    else if name == "std::collections::vec::StringVector" || name == "StringVector" {
+        decoder = call2("std::serialization::json::required_string_array",input,key);
+    }
+    else if family == "Option" || family == "std::core::option::Option" {
+        let inner = field_inner_name(field);
+        if inner == "std::text::string::String" || inner == "String" {
+            decoder = call2("std::serialization::json::optional_string",input,key);
+        } else {
+            decoder = generic_call2("std::serialization::json::optional",field_inner_type(field),input,key);
+        }
+    }
+    else if family == "Vec" || family == "std::collections::vec::Vec" {
+        decoder = generic_call2("std::serialization::json::required_array",field_inner_type(field),input,key);
+    }
+    return try_expr(decoder);
+}
+
+#[comptime]
+#[proc_derive(JsonDecode)]
+pub fn derive_json_decode(target: MetaType) -> MetaDecl {
+    let mut record = struct_init(target);
+    for field in fields(target) {
+        record = init_field(record,field_name(field),
+            json_field_expression(field,variable("json_text")));
+    }
+    let result = type_apply2("std::error::result::Result",type_ref(target),
+        type_named("std::serialization::json::JsonError"));
+    let mut decode = function("from_json",result,call("Ok",record));
+    decode = parameter(decode,"json_text",type_named("str"));
+    return method(impl_for(target),static_method(decode));
+}
+
+
+#[comptime]
+#[meta_proc_intrinsic(call0)]
+pub fn call0(name: str) -> MetaExpr {return 0;}
+#[comptime]
+#[meta_proc_intrinsic(call3)]
+pub fn call3(name: str, first: MetaExpr, second: MetaExpr, third: MetaExpr) -> MetaExpr {return 0;}
+#[comptime]
+#[meta_proc_intrinsic(borrow)]
+pub fn borrow(value: MetaExpr) -> MetaExpr {return 0;}
+
+#[comptime]
+pub fn json_field_write(field: MetaField, writer: MetaExpr) -> MetaExpr {
+    let key = str_expr(field_name(field));
+    let field_expression = access(variable("self"),field_name(field));
+    let family = field_family(field);
+    let name = field_type_name(field);
+    if name == "i64" {return call3("std::serialization::json::add_i64",writer,key,field_expression);}
+    if name == "i32" {return call3("std::serialization::json::add_i32",writer,key,field_expression);}
+    if name == "bool" {return call3("std::serialization::json::add_bool",writer,key,field_expression);}
+    if name == "f64" {return call3("std::serialization::json::add_f64",writer,key,field_expression);}
+    if name == "std::text::string::String" || name == "String" {
+        return call3("std::serialization::json::add_string",writer,key,borrow(field_expression));
+    }
+    if name == "std::collections::vec::StringVector" || name == "StringVector" {
+        return call3("std::serialization::json::add_string_vector",writer,key,borrow(field_expression));
+    }
+    if family == "Option" || family == "std::core::option::Option" {
+        let inner = field_inner_name(field);
+        if inner == "i64" {return call3("std::serialization::json::add_optional_i64",writer,key,field_expression);}
+        if inner == "i32" {return call3("std::serialization::json::add_optional_i32",writer,key,field_expression);}
+        if inner == "bool" {return call3("std::serialization::json::add_optional_bool",writer,key,field_expression);}
+        if inner == "f64" {return call3("std::serialization::json::add_optional_f64",writer,key,field_expression);}
+    }
+    return call3("std::serialization::json::add_nested",writer,key,borrow(field_expression));
+}
+
+#[comptime]
+#[proc_derive(JsonEncode)]
+pub fn derive_json_encode(target: MetaType) -> MetaDecl {
+    let mut writer = call0("std::serialization::json::begin_object");
+    for field in fields(target) {
+        writer = json_field_write(field,writer);
+    }
+    let mut method_fn = function("to_json",type_named("std::text::string::String"),
+        call("std::serialization::json::end_object",writer));
+    method_fn = parameter(method_fn,"self",reference(type_ref(target)));
+    return method(impl_for(target),method_fn);
+}
+
+// Field annotation expansion contract: a Nova function marked
+// #[comptime] #[proc_field_validator(Name)] receives (MetaField, MetaArgs)
+// and returns a MetaExpr that must evaluate to bool at runtime. The compiler
+// turns false into Err in a generated validate() method.
+#[comptime]
+#[meta_proc_intrinsic(bool_expr)]
+pub fn bool_expr(value: bool) -> MetaExpr { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(has_arg)]
+pub fn has_arg(args: MetaArgs, name: str) -> bool { return false; }
+#[comptime]
+#[meta_proc_intrinsic(int_arg)]
+pub fn int_arg(args: MetaArgs, name: str) -> i64 { return 0; }
+#[comptime]
+#[meta_proc_intrinsic(string_arg)]
+pub fn string_arg(args: MetaArgs, name: str) -> str { return ""; }
+#[comptime]
+#[meta_proc_intrinsic(argument_key)]
+pub fn argument_key(args: MetaArgs, index: i64) -> str { return ""; }
+
+// Generic AST/reflection tools for application-context generators.
+#[comptime] #[meta_proc_intrinsic(type_has_annotation)]
+pub fn type_has_annotation(target:MetaType,name:str)->bool {return false;}
+#[comptime] #[meta_proc_intrinsic(type_annotation_has_arg)]
+pub fn type_annotation_has_arg(target:MetaType,name:str,key:str)->bool {return false;}
+#[comptime] #[meta_proc_intrinsic(method_returns_unit)]
+pub fn method_returns_unit(method:MetaMethod)->bool {return false;}
+#[comptime] #[meta_proc_intrinsic(method_parameter_count)]
+pub fn method_parameter_count(method:MetaMethod)->i64 {return 0;}
+#[comptime] #[meta_proc_intrinsic(method_parameter_has_annotation)]
+pub fn method_parameter_has_annotation(method:MetaMethod,name:str)->bool {return false;}
+#[comptime] #[meta_proc_intrinsic(method_parameter_annotation_string)]
+pub fn method_parameter_annotation_string(method:MetaMethod,name:str,index:i64)->str {return "";}
+#[comptime] #[meta_proc_intrinsic(method_result_has_annotation)]
+pub fn method_result_has_annotation(method:MetaMethod,name:str)->bool {return false;}
+#[comptime] #[meta_proc_intrinsic(method_result_annotation_string)]
+pub fn method_result_annotation_string(method:MetaMethod,name:str)->str {return "";}
+#[comptime] #[meta_proc_intrinsic(method_result_type)]
+pub fn method_result_type(method:MetaMethod)->MetaTypeRef {return 0;}
+#[comptime] #[meta_proc_intrinsic(method_is_instance_http_handler)]
+pub fn method_is_instance_http_handler(method:MetaMethod)->bool {return false;}
+#[comptime] #[meta_proc_intrinsic(field_has_default)]
+pub fn field_has_default(field:MetaField)->bool {return false;}
+#[comptime] #[meta_proc_intrinsic(field_default)]
+pub fn field_default(field:MetaField)->MetaExpr {return 0;}
+#[comptime] #[meta_proc_intrinsic(type_apply1)]
+pub fn type_apply1(name:str,inner:MetaTypeRef)->MetaTypeRef {return 0;}
+#[comptime] #[meta_proc_intrinsic(generic_call3)]
+pub fn generic_call3(name:str,type_arg:MetaTypeRef,a:MetaExpr,b:MetaExpr,c:MetaExpr)->MetaExpr {return 0;}
+#[comptime] #[meta_proc_intrinsic(generic_call4)]
+pub fn generic_call4(name:str,type_arg:MetaTypeRef,a:MetaExpr,b:MetaExpr,c:MetaExpr,d:MetaExpr)->MetaExpr {return 0;}
+#[comptime] #[meta_proc_intrinsic(qualified_impl)]
+pub fn qualified_impl(target:MetaType)->MetaDecl {return 0;}
+#[comptime] #[meta_proc_intrinsic(qualified_init)]
+pub fn qualified_init(target:MetaType)->MetaExpr {return 0;}
+
+#[comptime] #[meta_proc_intrinsic(type_path)]
+pub fn type_path(target:MetaTypeRef)->str {return "";}
+#[comptime] #[meta_proc_intrinsic(methods_of)]
+pub fn methods_of(target:MetaTypeRef)->MetaMethods {return 0;}

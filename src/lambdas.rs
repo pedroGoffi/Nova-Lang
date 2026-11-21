@@ -39,6 +39,46 @@ fn infer_type(value: &Expr) -> Option<TypeRef> {
     Some(TypeRef::Named(name.into()))
 }
 
+// An expression-bodied closure can infer its result from typed parameters
+// and visible lexical locals; ambiguous calls still require an explicit type.
+fn inferred_lambda_expression(expr: &Expr, variables: &Locals) -> Option<TypeRef> {
+    match expr {
+        Expr::Var(name) => variables.get(name).cloned(),
+        Expr::Unary(_, operand) => inferred_lambda_expression(operand, variables),
+        Expr::Binary(left, op, right) => {
+            let left_ty = inferred_lambda_expression(left, variables)
+                .or_else(|| infer_type(left))?;
+            let right_ty = inferred_lambda_expression(right, variables)
+                .or_else(|| infer_type(right))?;
+            if matches!(op, ast::BinaryOp::Eq | ast::BinaryOp::Ne
+                | ast::BinaryOp::Lt | ast::BinaryOp::Le
+                | ast::BinaryOp::Gt | ast::BinaryOp::Ge)
+            {
+                Some(TypeRef::Named("bool".into()))
+            } else if left_ty == right_ty {
+                Some(left_ty)
+            } else if matches!(right.as_ref(), Expr::Int(_)) {
+                // An untyped integer literal adopts the typed left operand.
+                Some(left_ty)
+            } else if matches!(left.as_ref(), Expr::Int(_)) {
+                Some(right_ty)
+            } else {
+                None
+            }
+        }
+        Expr::Cast(_,ty) => Some(ty.clone()),
+        other => infer_type(other),
+    }
+}
+
+fn inferred_lambda_result(body:&[Stmt],variables:&Locals) -> Option<TypeRef> {
+    let value=match body.last()? {
+        Stmt::Return(Some(value)) | Stmt::Tail(value) => value,
+        _=>return None,
+    };
+    inferred_lambda_expression(value,variables)
+}
+
 fn capture_expression(
     expression: &Expr,
     outer: &Locals,
@@ -94,7 +134,7 @@ fn capture_expression(
                 capture_expression(value, outer, bound, captures);
             }
         }
-        Expr::MethodCall(receiver, _, args) => {
+        Expr::MethodCall(receiver, _, args, _) => {
             capture_expression(receiver, outer, bound, captures);
             for value in args {
                 capture_expression(value, outer, bound, captures);
@@ -231,7 +271,7 @@ fn rewrite_expression(
                 *expression = if matches!(captures.get(name), Some(TypeRef::Function { .. })) {
                     Expr::CallIndirect(Box::new(field), captured_arguments)
                 } else {
-                    Expr::MethodCall(Box::new(field), "call".into(), captured_arguments)
+                    Expr::MethodCall(Box::new(field), "call".into(), captured_arguments, vec![])
                 };
             }
         }
@@ -256,7 +296,7 @@ fn rewrite_expression(
                 rewrite_expression(value, captures, bound);
             }
         }
-        Expr::MethodCall(receiver, _, arguments) => {
+        Expr::MethodCall(receiver, _, arguments, _) => {
             rewrite_expression(receiver, captures, bound);
             for value in arguments {
                 rewrite_expression(value, captures, bound);
@@ -391,6 +431,10 @@ impl Lifter {
                 for param in params.iter() {
                     nested_locals.insert(param.name.clone(), param.ty.clone());
                 }
+                if *result == TypeRef::Named("auto".into()) {
+                    *result=inferred_lambda_result(body,&nested_locals).ok_or_else(||
+                        "cannot infer expression lambda return type; specify `|x: T| -> U { ... }`".to_string())?;
+                }
                 self.statements(body, generated, &mut nested_locals)?;
 
                 let mut bound = params
@@ -430,11 +474,14 @@ impl Lifter {
                         .map(|(name, ty)| ast::Field {
                             name: name.clone(),
                             ty: ty.clone(),
+                            default:None,
+                            attributes:vec![],
                         })
                         .collect();
                     generated.push(Item::Struct(ast::Struct {
                         name: closure_name.clone(),
                         generics: vec![],
+                        concept_bounds: vec![],
                         fields: captured_fields,
                         attributes: vec![],
                         is_class: false,
@@ -450,6 +497,7 @@ impl Lifter {
                         name: "self".into(),
                         ty: TypeRef::Named(closure_name.clone()),
                         default: None,
+                        attributes: vec![],
                     };
                     let method_params = std::iter::once(self_param)
                         .chain(params.iter().cloned())
@@ -496,7 +544,7 @@ impl Lifter {
                     self.expr(value, generated, locals)?;
                 }
             }
-            Expr::MethodCall(receiver, _, values) => {
+            Expr::MethodCall(receiver, _, values, _) => {
                 self.expr(receiver, generated, locals)?;
                 for value in values {
                     self.expr(value, generated, locals)?;
@@ -666,6 +714,21 @@ mod tests {
             .iter()
             .any(|item| matches!(item, Item::Impl(_))));
     }
+    #[test]
+    fn inferred_lambda_binary_result_uses_expression_operands() {
+        let variables = Locals::from([("x".to_string(), TypeRef::Named("i64".into()))]);
+        let x = || Box::new(Expr::Var("x".into()));
+        let one = || Box::new(Expr::Int("1".into()));
+        let result = TypeRef::Named("i64".into());
+        let add_right = Expr::Binary(x(), ast::BinaryOp::Add, one());
+        let add_left = Expr::Binary(one(), ast::BinaryOp::Add, x());
+        let comparison = Expr::Binary(x(), ast::BinaryOp::Gt, one());
+        assert_eq!(inferred_lambda_expression(&add_right, &variables), Some(result.clone()));
+        assert_eq!(inferred_lambda_expression(&add_left, &variables), Some(result));
+        assert_eq!(inferred_lambda_expression(&comparison, &variables),
+            Some(TypeRef::Named("bool".into())));
+    }
+
     #[test]
     fn noncapturing_lambda_remains_a_function_pointer() {
         let parsed = grammar::ProgramParser::new()

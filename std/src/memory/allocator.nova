@@ -1,0 +1,61 @@
+use std::memory::raw;
+use std::core::types::Size;
+use std::memory::layout::Layout;
+use std::memory::traits::Allocator;
+use std::memory::errors::AllocError;
+use std::memory::nonnull::NonNull;
+use std::core::option::Option;
+use std::error::result::Result;
+
+pub struct GlobalAllocator {}
+
+pub fn global_allocator() -> GlobalAllocator { return GlobalAllocator::new(); }
+
+impl GlobalAllocator {
+    static fn new() -> Self { return new GlobalAllocator {}; }
+    [[unsafe]] fn allocate_raw(self: &GlobalAllocator, layout: Layout) -> *mut u8 {
+        unsafe { return raw::allocate_bytes(layout.size, layout.alignment); }
+    }
+    [[unsafe]] fn deallocate_raw(self: &GlobalAllocator, address: *mut u8) -> () {
+        unsafe { raw::deallocate_bytes(address); }
+        return;
+    }
+    [[unsafe]] fn reallocate(self: &GlobalAllocator, address: *mut u8,
+        old_size: Size, layout: Layout) -> *mut u8 {
+        unsafe {
+            return raw::reallocate_bytes(
+                address, old_size, layout.size, layout.alignment);
+        }
+    }
+}
+
+impl Allocator for GlobalAllocator {
+    fn allocate(self: &GlobalAllocator, layout: Layout) -> Result<NonNull<u8>,AllocError> {
+        if layout.alignment == 0 || (layout.alignment & (layout.alignment - 1)) != 0 {
+            return Err(AllocError::new(-22, "allocation alignment must be a power of two"));
+        }
+        let pointer: *mut u8 = unsafe { self.allocate_raw(layout) };
+        let wrapped: Option<NonNull<u8> > = unsafe { NonNull::try_new(pointer) };
+        match wrapped {
+            Some(value) => { return Ok(value); }
+            None => { return Err(AllocError::new(-12, "allocator returned a null pointer")); }
+        }
+    }
+    fn deallocate(self: &GlobalAllocator, pointer: NonNull<u8>, layout: Layout) -> Result<(),AllocError> {
+        let address: *mut u8 = unsafe { pointer.as_ptr() };
+        let address_value: Size = unsafe { address as Size };
+        if address_value == 0 { return Err(AllocError::new(-22, "cannot deallocate a null pointer")); }
+        if layout.alignment == 0 { return Err(AllocError::new(-22, "invalid allocation layout")); }
+        unsafe { self.deallocate_raw(address); }
+        return Ok(());
+    }
+    fn reallocate(self: &GlobalAllocator, pointer: NonNull<u8>, old_layout: Layout, new_layout: Layout) -> Result<NonNull<u8>,AllocError> {
+        let address: *mut u8 = unsafe { pointer.as_ptr() };
+        let result: *mut u8 = unsafe { self.reallocate(address, old_layout.size, new_layout) };
+        let wrapped: Option<NonNull<u8> > = unsafe { NonNull::try_new(result) };
+        match wrapped {
+            Some(value) => { return Ok(value); }
+            None => { return Err(AllocError::new(-12, "allocator could not reallocate memory")); }
+        }
+    }
+}

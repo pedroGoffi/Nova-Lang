@@ -1,0 +1,7 @@
+// Deliberately isolated compiler/OS boundary.
+//
+// Application-facing modules must depend on std::io, std::fs and std::concurrency.
+// Only this namespace is allowed to expose LLVM
+// intrinsics, C ABI declarations and runtime handles.
+pub mod llvm;
+pub mod native;

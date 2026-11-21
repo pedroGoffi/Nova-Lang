@@ -1,0 +1,51 @@
+use std::memory::raw;
+use std::core::types::Size;
+use std::core::option::Option;
+use std::memory::traits::Owner;
+
+// A typed owner. Ownership is represented by one raw pointer and its
+// destructor releases both T and the allocation.
+pub struct UniquePtr<T> { pointer: *mut T }
+
+[[unsafe]] pub fn unique_from_raw<T>(pointer: *mut T) -> UniquePtr<T> {
+    return new UniquePtr<T> { pointer: pointer };
+}
+
+pub fn unique_new<T>(value: T) -> UniquePtr<T> {
+    unsafe {
+        let pointer: *mut T = raw::alloc_record::<T>();
+        *pointer = value;
+        return new UniquePtr<T> { pointer: pointer };
+    }
+}
+
+impl<T> UniquePtr<T> {
+    fn is_null(self: &UniquePtr<T>) -> bool { return (self.pointer as Size) == 0; }
+    [[unsafe]] fn as_ptr(self: &UniquePtr<T>) -> *mut T { return self.pointer; }
+    [[unsafe]] fn read(self: &UniquePtr<T>) -> T {
+        if self.is_null() { std::core::panic::fail("read from a consumed UniquePtr"); }
+        unsafe {
+            let value: T = raw::take_from::<T>(self.pointer);
+            self.pointer = 0 as (*mut T);
+            return value;
+        }
+    }
+    [[unsafe]] fn try_read(self: &UniquePtr<T>) -> Option<T> {
+        if self.is_null() { return None; }
+        unsafe {
+            let value: T = raw::take_from::<T>(self.pointer);
+            self.pointer = 0 as (*mut T);
+            return Some(value);
+        }
+    }
+    fn drop(self: UniquePtr<T>) -> () {
+        if self.is_null() { return; }
+        unsafe { raw::drop_in_place::<T>(self.pointer); }
+        unsafe { raw::free_record::<T>(self.pointer); }
+        return;
+    }
+}
+
+impl<T> Owner for UniquePtr<T> {
+    fn is_null(self: &UniquePtr<T>) -> bool { return self.is_null(); }
+}

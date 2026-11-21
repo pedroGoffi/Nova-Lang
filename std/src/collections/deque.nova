@@ -1,0 +1,30 @@
+use std::collections::vec::Vec;
+use std::core::types::Size;
+use std::collections::traits::Collection;
+
+// First public deque implementation. It intentionally keeps ownership in Vec;
+// the ring-buffer optimization can be added without changing this API.
+pub class Deque<T> { values: Vec<T> }
+
+impl<T> Deque<T> {
+    static fn new() -> Self {
+        return new Deque<T> { values: Vec::new() };
+    }
+    fn len(self: &Deque<T>) -> Size { return self.values.len(); }
+    fn is_empty(self: &Deque<T>) -> bool { return self.values.is_empty(); }
+    fn push_back(self: &Deque<T>, value: T) -> () {
+        self.values.push(value); return;
+    }
+    fn pop_back(self: &Deque<T>) -> T { return self.values.pop(); }
+    fn try_pop_back(self: &Deque<T>) -> std::core::option::Option<T> { return self.values.try_pop(); }
+    fn back(self: &Deque<T>) -> T {
+        return self.values.get((self.len() - 1) as i64);
+    }
+    fn clear(self: &Deque<T>) -> () { self.values.clear(); return; }
+    fn drop(self: Deque<T>) -> () { self.values.drop(); return; }
+}
+
+impl<T> Collection for Deque<T> {
+    fn len(self: &Deque<T>) -> Size { return self.len(); }
+    fn is_empty(self: &Deque<T>) -> bool { return self.is_empty(); }
+}

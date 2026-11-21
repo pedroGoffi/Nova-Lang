@@ -1,0 +1,71 @@
+import std;
+import nova_gui;
+
+use nova_gui::window::Window;
+use nova_gui::widgets::Panel;
+use nova_gui::widgets::TabBar;
+use nova_gui::widgets::BufferList;
+use nova_gui::editor::TextEditor;
+use std::platform::sdl2;
+
+fn main() -> i32 {
+    // Window owns the SDL2 window, renderer and event buffer.
+    let window = Window::open("Nova GUI", 800, 600);
+    // The builder keeps visual policy readable and gives every panel the same
+    // futuristic language: depth, grid, header and a restrained accent.
+    let panel = Panel::builder(16, 16, 768, 568)
+        .fill(28, 40, 60, 255)
+        .border(70, 150, 210, 2)
+        .padding(16)
+        .shadow(true)
+        .header(true, 30)
+        .accent(70, 220, 255)
+        .grid(true)
+        .build();
+    sdl2::initialize_ttf();
+    let font = sdl2::Font::open("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 18);
+    let mut editor = TextEditor::new(252, 114, 516, 450, font);
+    let tab_font = sdl2::Font::open("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 14);
+    let list_font = sdl2::Font::open("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 13);
+    let mut tabs = TabBar::new(252, 70, 516, 36, tab_font);
+    let mut buffers = BufferList::new(32, 70, 204, 480, list_font);
+    // Start with no tabs. Files are opened later through editor.open(path).
+    sdl2::start_text_input();
+
+    // SDL2 owns the event queue. Keep rendering until the user closes the
+    // window instead of destroying it after the first frame.
+    let mut running: bool = true;
+    while running {
+        let event = window.poll();
+        if event == sdl2::EVENT_QUIT { running = false; }
+        if event == sdl2::EVENT_KEY_DOWN {
+            tabs.handle_key(window.event_key());
+            buffers.select(tabs.active());
+            editor.select_buffer(tabs.active());
+        }
+        editor.handle_event(event, window.event_text(), window.event_key(), window.event_mod());
+        while tabs.count() < editor.count() {
+            tabs.add_buffer(editor.active_name());
+            buffers.add_buffer(editor.active_name(), tabs.count() - 1);
+        }
+        // Commands such as C-x b change the active editor buffer; keep both
+        // visual buffer selectors synchronized with that real state.
+        tabs.select(editor.active());
+        buffers.select(editor.active());
+        tabs.set_dirty(editor.active(), editor.is_modified());
+        window.clear(20, 24, 32, 255);
+        window.draw_panel(&panel);
+        window.draw_buffers(&buffers);
+        window.draw_tabs(&tabs);
+        window.draw_editor(&editor);
+        window.present();
+        if event == sdl2::EVENT_NONE { sdl2::delay(16); }
+    }
+    sdl2::stop_text_input();
+    editor.close();
+    tabs.close();
+    buffers.close();
+    sdl2::shutdown_ttf();
+    window.close();
+    return 0;
+}
