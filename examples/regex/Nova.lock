@@ -1,0 +1,4 @@
+# Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
+regex 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/regex hash=d658d9209ec8d2b2
+std 0.20.0 builtin hash=e51b0e95c377f0ff
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/regex/src/main.nova hash=d658d9209ec8d2b2

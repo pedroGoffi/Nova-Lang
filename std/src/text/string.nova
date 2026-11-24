@@ -75,7 +75,7 @@ impl String {
     fn drop(self: String) -> () {
         unsafe { raw::deallocate_bytes(self.data); }
         return;
-    }
+    }    
 }
 
 impl TextLike for String {
@@ -92,12 +92,118 @@ pub fn new_string() -> String { return String::new(); }
 pub fn from_text(value: str) -> String { return String::from(value); }
 pub fn owned_text(value: str) -> impl TextLike { return String::from(value); }
 pub fn text_length(value: str) -> Size { return core::text_size(value); }
+// Cross-module callers use these free functions so the receiver keeps its
+// fully-qualified String owner during specialization.
+pub fn append_text(output: &mut String, value: str) -> () {
+    (*output).append(value);
+    return;
+}
+pub fn clone_text(value: &String) -> String { return (*value).clone(); }
+pub fn as_text(value: &String) -> str {
+    if (*value).capacity == 0 { return ""; }
+    return unsafe { core::borrow((*value).data as Size) };
+}
 
 // Compiler lowering helpers for format!. They are ordinary std functions;
 // format! only selects them according to the statically known value type.
 pub fn format_add_text(base: String, value: str) -> String {
     let mut result: String = base;
     result.append(value);
+    return result;
+}
+
+fn decimal_digit(value: i64) -> str {
+    if value == 0 { return "0"; }
+    if value == 1 { return "1"; }
+    if value == 2 { return "2"; }
+    if value == 3 { return "3"; }
+    if value == 4 { return "4"; }
+    if value == 5 { return "5"; }
+    if value == 6 { return "6"; }
+    if value == 7 { return "7"; }
+    if value == 8 { return "8"; }
+    return "9";
+}
+
+// Numeric formatter used by typed format!. This stays in Nova and does not
+// introduce an unchecked libc formatting boundary.
+pub fn format_add_i64(base: String, value: i64) -> String {
+    let mut result: String = base;
+    let mut number: i64 = value;
+    if number < 0 {
+        result.append("-");
+        number = -number;
+    }
+    let mut divisor: i64 = 1;
+    while number / divisor >= 10 { divisor *= 10; }
+    while divisor > 0 {
+        result.append(decimal_digit((number / divisor) % 10));
+        divisor /= 10;
+    }
+    return result;
+}
+
+pub fn format_add_bool(base: String, value: bool) -> String {
+    if value { return format_add_text(base, "true"); }
+    return format_add_text(base, "false");
+}
+
+fn decimal_digit_u64(value: u64) -> str {
+    if value == 0 { return "0"; }
+    if value == 1 { return "1"; }
+    if value == 2 { return "2"; }
+    if value == 3 { return "3"; }
+    if value == 4 { return "4"; }
+    if value == 5 { return "5"; }
+    if value == 6 { return "6"; }
+    if value == 7 { return "7"; }
+    if value == 8 { return "8"; }
+    return "9";
+}
+
+pub fn format_add_u64(base: String, value: u64) -> String {
+    let mut result: String = base;
+    let mut divisor: u64 = 1;
+    while value / divisor >= 10 { divisor *= 10; }
+    while divisor > 0 {
+        result.append(decimal_digit_u64((value / divisor) % 10));
+        divisor /= 10;
+    }
+    return result;
+}
+
+pub fn format_add_float(base: String, value: f64, precision: i32) -> String {
+    let mut result: String = base;
+    let mut number: f64 = value;
+    if number < 0.0 {
+        result.append("-");
+        number = -number;
+    }
+    let whole: i64 = number as i64;
+    let mut divisor: i64 = 1;
+    while whole / divisor >= 10 { divisor *= 10; }
+    while divisor > 0 {
+        result.append(decimal_digit((whole / divisor) % 10));
+        divisor /= 10;
+    }
+    let digits: i32 = if precision < 0 { 6 } else { precision };
+    if digits == 0 { return result; }
+    result.append(".");
+    let mut fraction: f64 = number - (whole as f64);
+    let mut index: i32 = 0;
+    while index < digits {
+        fraction *= 10.0;
+        let digit: i64 = fraction as i64;
+        result.append(decimal_digit(digit));
+        fraction -= digit as f64;
+        index += 1;
+    }
+    return result;
+}
+
+pub fn format_add_owned(base: String, value: String) -> String {
+    let mut result: String = base;
+    append_text(&mut result, as_text(&value));
     return result;
 }
 

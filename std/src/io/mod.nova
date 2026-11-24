@@ -9,3 +9,22 @@ pub mod traits;
 pub fn stdin() -> reader::Reader { return reader::stdin(); }
 pub fn stdout() -> writer::Writer { return writer::stdout(); }
 pub fn stderr() -> writer::Writer { return writer::stderr(); }
+
+// Typed format-macro sink. Kept in the public modular IO namespace so
+// println!/format protocols do not depend on the removed std::old runtime.
+pub fn stdout_descriptor() -> i32 { return 1; }
+pub fn stderr_descriptor() -> i32 { return 2; }
+pub fn write_fd(descriptor: i32, value: str) -> () {
+    unsafe {
+        std::abi::llvm::write_bytes(
+            descriptor,
+            std::core::address(value),
+            std::core::text_size(value)
+        );
+    }
+    return;
+}
+pub fn write_string(descriptor: i32, value: std::text::string::String) -> () {
+    write_fd(descriptor, std::text::string::as_text(&value));
+    return;
+}

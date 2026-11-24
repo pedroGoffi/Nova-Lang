@@ -1,0 +1,21 @@
+use std::introspection::meta::Type;
+
+pub annotation RequiredArgsConstructor() on struct, class;
+
+#[processor(RequiredArgsConstructor)]
+fn add_required_constructor(
+    target: &mut Type, 
+    annotation: RequiredArgsConstructor
+) -> () {
+    let constructor = quote fn new() -> Self {
+        return new Self {};
+    };
+
+    for field in target.fields.required {
+        constructor.parameters[field.name] = field.type;
+        constructor.initializer[field.name] = field.name;
+    }
+
+    target.members.add(constructor);
+}
+

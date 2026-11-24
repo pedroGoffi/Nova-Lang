@@ -1,0 +1,14 @@
+use std::introspection::meta::Function;
+
+pub annotation Log(
+    level: str = "info"
+) on function;
+
+#[processor(Log)]
+fn add_logging(function: &mut Function, log: Log) -> () {
+    let name = function.name;
+    function.body.wrap(quote {
+        std::io::stdout().write_line("[${log.level}] entering ${name}");
+        ${body}
+    });
+}

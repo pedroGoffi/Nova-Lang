@@ -1,0 +1,3 @@
+// Passive dependency metadata. Construction remains the responsibility of
+// the application's composition root or of another annotation processor.
+pub annotation Inject() on field;

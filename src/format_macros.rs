@@ -80,13 +80,11 @@ fn capture_path(path: &str) -> Option<Expr> {
 
 fn write_text(text: &str, stderr: bool) -> Stmt {
     Stmt::Expr(Expr::Call(
-        if stderr {
-            "std::old::io::eprint"
-        } else {
-            "std::old::io::print"
-        }
-        .into(),
-        vec![quoted(text)],
+        "std::io::write_fd".into(),
+        vec![
+            Expr::Call(if stderr { "std::io::stderr_descriptor" } else { "std::io::stdout_descriptor" }.into(), vec![]),
+            quoted(text),
+        ],
     ))
 }
 
@@ -125,10 +123,9 @@ fn expand_output(
     }
     let Expr::Str(raw_format) = &arguments[0] else {
         if arguments.len() == 1 && name != "format" {
-            let mut output = vec![Stmt::Expr(Expr::Call(
-                if stderr { "std::old::io::eprint" } else { "std::old::io::print" }.into(),
-                vec![arguments[0].clone()],
-            ))];
+            let mut output = vec![Stmt::Expr(Expr::Call(WRITE_VALUE.into(), vec![
+                arguments[0].clone(), Expr::Int("-1".into()), Expr::Bool(false), Expr::Bool(stderr),
+            ]))];
             if newline { output.push(write_text("\n",stderr)); }
             return Ok(output);
         }
@@ -324,8 +321,11 @@ pub fn expand_format(arguments: &[Expr]) -> Result<Expr, String> {
         let Stmt::Expr(Expr::Call(name, mut values)) = statement else {
             unreachable!("format AST parser emitted a non-call statement")
         };
-        if name == "std::old::io::print" {
-            parts.push(Expr::Call(TEXT_PART.into(), values));
+        if name == "std::io::write_fd" {
+            if values.len() != 2 {
+                unreachable!("format literal write has an invalid shape")
+            }
+            parts.push(Expr::Call(TEXT_PART.into(), vec![values.remove(1)]));
         } else if name == WRITE_VALUE {
             debug_assert_eq!(values.len(), 4);
             values.pop(); // stderr flag: formatting has no output stream

@@ -1,4 +1,4 @@
 # Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
-metaprogramming 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/features/metaprogramming hash=80531f34345b9e2e
-std 0.20.0 builtin hash=99a226b8e30e7093
-source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/features/metaprogramming/src/main.nova hash=80531f34345b9e2e
+metaprogramming 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/features/metaprogramming hash=a92628965473594e
+std 0.20.0 builtin hash=0627c5a0645d657e
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/features/metaprogramming/src/main.nova hash=a92628965473594e

@@ -1,26 +1,20 @@
 import std;
 
-struct User {
-    id: i64,
-    active: bool
+// Debug and RequiredArgsConstructor
+// defined in std::introspection::<debug, builder>
+@Debug
+@RequiredArgsConstructor
+class FormatSamples {
+    sigma: bool,
+    magic: i64
 }
 
-// comptime functions are evaluated by the compiler rather than at runtime.
-comptime fn sum_to(limit: i64) -> i64 {
-    let mut total: i64 = 0;
-    for value in 0..limit { total += value; }
-    return total;
-}
-
-// Compile-time assertions can inspect metadata exposed by introspection.
-#[comptime_assert]
-fn user_metadata_is_correct() -> bool {
-    return std::introspection::meta::field_count::<User>() == 2
-        && std::introspection::meta::has_field::<User>("id")
-        && std::introspection::meta::field_type::<User>("id") == "i64";
-}
 
 fn main() -> i32 {
-    let result: i64 = sum_to(10);
-    return result as i32 - 45;
+    let samples = FormatSamples::new(
+        sigma: true,
+        magic: 69420
+    );
+    println!("----\n{:?}\n-----", samples);
+    0
 }

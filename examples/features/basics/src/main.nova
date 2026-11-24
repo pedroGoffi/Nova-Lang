@@ -1,8 +1,24 @@
 import std;
+use std::io;
+use std::io::reader::Reader;
 
-fn main() -> i32 {
-    // let declares a typed value; if selects a branch and return exits main.
-    let answer: i32 = 40 + 2;
-    if answer == 42 { return 0; }
-    return 1;
+fn format_user_prompt(read: std::text::string::String) -> std::text::string::String {
+    format!("Hello, {:?} you are using NOVA", read)
+}
+
+fn display_new_user_prompt(read: std::text::string::String) -> () {
+    io::stdout().write_line(read.as_str());
+}
+
+fn read_stdin(reader: Reader, prompt: str) -> std::text::string::String {
+    reader.prompt_read_string(prompt)
+}
+fn main() -> i32 {            
+    io::stdin()        
+        |> read_stdin("What's your name? ")
+        |> format_user_prompt
+        |> display_new_user_prompt
+        ;
+        
+    0
 }

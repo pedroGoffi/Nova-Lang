@@ -1,3 +1,49 @@
-use std::text::string::String;
-pub fn text(value: str) -> std::text::string::String { return String::from(value); }
-pub fn append(output: &mut std::text::string::String, value: str) -> () { output.append(value); return; }
+
+pub fn text(value: str) -> std::text::string::String { return std::text::string::String::from(value); }
+pub fn append(output: &mut std::text::string::String, value: str) -> () {
+    std::text::string::append_text(output, value);
+    return;
+}
+pub fn append_owned(output: &mut std::text::string::String, value: std::text::string::String) -> () {
+    std::text::string::append_text(output, std::text::string::as_text(&value));
+    return;
+}
+
+
+pub class Formatter {
+    output: std::text::string::String,
+    first: bool
+}
+
+impl Formatter {
+    static fn debug_struct(name: str) -> Formatter {
+        let mut output = std::text::string::String::from(name);
+        append(&mut output, " {\n");
+        return new Formatter { output: output, first: true };
+    }
+
+    fn separator(self: &mut Formatter) -> () {
+        if self.first {
+            self.first = false;
+            return;
+        }
+        append(&mut self.output, ",\n");
+        return;
+    }
+
+    fn field<T>(self: &mut Formatter, name: str, value: &T) -> () {
+        self.separator();
+        append(&mut self.output, "  ");
+        append(&mut self.output, name);
+        append(&mut self.output, ": ");
+        let rendered = format!("{:?}", value);
+        append_owned(&mut self.output, rendered);
+        return;
+    }
+
+    fn finish(self: Formatter) -> std::text::string::String {
+        let mut formatter = self;
+        append(&mut formatter.output, "\n}");
+        return std::text::string::clone_text(&formatter.output);
+    }
+}

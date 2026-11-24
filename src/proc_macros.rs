@@ -104,13 +104,15 @@ struct MacroDef {
     mode: Mode,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Mode { Derive, Attribute, Expression, FieldValidator }
+enum Mode { Derive, Attribute, Expression, FieldValidator, FunctionProcessor }
 
 struct Engine {
     derives: HashMap<String, MacroDef>,
     attributes: HashMap<String, MacroDef>,
     expressions: HashMap<String, MacroDef>,
     field_validators: HashMap<String, MacroDef>,
+    function_processors: HashMap<String, MacroDef>,
+    annotation_schemas: HashMap<String, ast::Struct>,
     explicit_validators: HashSet<String>,
     class_methods: HashMap<String, Vec<ast::Function>>,
     class_types: Vec<(String, ast::Struct)>,
@@ -126,7 +128,8 @@ impl Engine {
         let decorator_orders = crate::meta::Registry::decorator_orders(program)?;
         let mut result = Self {
             derives: HashMap::new(), attributes: HashMap::new(), expressions: HashMap::new(),
-            field_validators: HashMap::new(),
+            field_validators: HashMap::new(), function_processors: HashMap::new(),
+            annotation_schemas: HashMap::new(),
             explicit_validators: HashSet::new(),
             class_methods: HashMap::new(),
             class_types: Vec::new(),
@@ -144,8 +147,38 @@ impl Engine {
             match item {
                 Item::Public(inner) => self.collect(std::slice::from_ref(inner.as_ref()), ns, true)?,
                 Item::Namespace { name, items } => self.collect(items, &qualified(ns,name), public)?,
+                Item::Struct(s) if s.attributes.iter().any(|a|a.name=="__nova_annotation") => {
+                    let name=qualified(ns,&s.name);
+                    if self.annotation_schemas.insert(name.clone(),s.clone()).is_some() {
+                        return Err(format!("error[NOVA-PROC013]: duplicate annotation '{name}'"));
+                    }
+                }
                 Item::Function(f) => {
                     let fullname = qualified(ns, &f.name);
+                    if let Some(marker)=f.attributes.iter().find(|a|a.name=="processor") {
+                        if marker.args.len()!=1 || f.params.len()!=2 || !f.generics.is_empty() ||
+                            !matches!(&f.result,TypeRef::Named(n) if n=="()") {
+                            return Err(format!("error[NOVA-PROC014]: invalid #[processor] signature on '{fullname}'"));
+                        }
+                        let valid_function_target=matches!(&f.params[0].ty,
+                            TypeRef::Reference{mutable:true,inner}
+                                if matches!(inner.as_ref(),TypeRef::Named(n) if n=="Function" || n.ends_with("::Function")));
+                        let valid_type_target=matches!(&f.params[0].ty,
+                            TypeRef::Reference{mutable:true,inner}
+                                if matches!(inner.as_ref(),TypeRef::Named(n) if n=="Type" || n.ends_with("::Type")));
+                        let valid_annotation=matches!(&f.params[1].ty,TypeRef::Named(n)
+                            if n.rsplit("::").next()==Some(marker.args[0].as_str()));
+                        if (!valid_function_target && !valid_type_target) || !valid_annotation {
+                            return Err(format!("error[NOVA-PROC014]: processor '{fullname}' expects (&mut Function|Type, {})",marker.args[0]));
+                        }
+                        let key=qualified(ns,&marker.args[0]);
+                        if self.function_processors.insert(key.clone(),MacroDef{
+                            function:f.clone(),namespace:ns.into(),public,mode:Mode::FunctionProcessor
+                        }).is_some() {
+                            return Err(format!("error[NOVA-PROC014]: duplicate processor for '{key}'"));
+                        }
+                        continue;
+                    }
                     for attribute in &f.attributes {
                         if attribute.name == "meta_proc_intrinsic" {
                             if !matches!(ns, "std::meta" | "std::introspection::meta") || attribute.args.len()!=1 ||
@@ -216,7 +249,7 @@ impl Engine {
                         if mode==Mode::Attribute && matches!(name.as_str(),"derive"|"repr"|"effects"|"comptime"|"operator"|"requires"|"capabilities") {
                             return Err(format!("error[NOVA-PROC003]: '{}' is a reserved compiler attribute",name));
                         }
-                        let target=match mode {Mode::Derive=>&mut self.derives,Mode::Attribute=>&mut self.attributes,Mode::Expression=>&mut self.expressions,Mode::FieldValidator=>&mut self.field_validators};
+                        let target=match mode {Mode::Derive=>&mut self.derives,Mode::Attribute=>&mut self.attributes,Mode::Expression=>&mut self.expressions,Mode::FieldValidator=>&mut self.field_validators,Mode::FunctionProcessor=>unreachable!()};
                         let key=qualified(ns,name);
                         if target.insert(key.clone(),MacroDef{function:f.clone(),namespace:ns.into(),public,mode}).is_some() {
                             return Err(format!("error[NOVA-PROC003]: duplicate procedural macro '{key}'"));
@@ -998,11 +1031,101 @@ impl Engine {
                         field:field.name.clone(),annotation:attr.name.clone(),
                         predicate:result.expression().map_err(|e|format!("error[NOVA-VAL001]: @{}: {e}",attr.name))?,
                     });
+                } else if let Some(schema)=self.annotation_schema(ns,&attr.name) {
+                    let targets=schema.attributes.iter().find(|a|a.name=="__nova_annotation")
+                        .map(|a|a.args.as_slice()).unwrap_or(&[]);
+                    if !targets.is_empty() && !targets.iter().any(|target|target=="field") {
+                        return Err(format!("error[NOVA-PROC015]: @{} cannot annotate field '{}.{}'",attr.name,source.name,field.name));
+                    }
+                    // Passive typed field metadata is compile-time-only.
                 } else {retained.push(attr.clone());}
             }
             field.attributes=retained;
         }
         Ok((result,checks))
+    }
+    fn function_processor(&self, ns:&str, name:&str)->Option<&MacroDef> {
+        if name.contains("::") { return self.function_processors.get(name); }
+        let mut scope=ns;
+        loop {
+            if let Some(found)=self.function_processors.get(&qualified(scope,name)){return Some(found);}
+            if scope.is_empty(){break;}
+            scope=scope.rsplit_once("::").map(|(head,_)|head).unwrap_or("");
+        }
+        let suffix=format!("::{name}");
+        let mut found=self.function_processors.iter().filter(|(key,_)|key.ends_with(&suffix));
+        let first=found.next().map(|(_,value)|value)?;
+        if found.next().is_none(){Some(first)}else{None}
+    }
+    fn annotation_schema(&self,ns:&str,name:&str)->Option<&ast::Struct>{
+        if name.contains("::"){return self.annotation_schemas.get(name);}
+        let mut scope=ns;
+        loop {
+            if let Some(found)=self.annotation_schemas.get(&qualified(scope,name)){return Some(found);}
+            if scope.is_empty(){break;}
+            scope=scope.rsplit_once("::").map(|(head,_)|head).unwrap_or("");
+        }
+        let suffix=format!("::{name}");
+        let mut found=self.annotation_schemas.iter().filter(|(key,_)|key.ends_with(&suffix));
+        let first=found.next().map(|(_,value)|value)?;
+        if found.next().is_none(){Some(first)}else{None}
+    }
+    fn apply_function_processors(&mut self, source:&ast::Function, ns:&str)->Result<ast::Function,String>{
+        let mut function=source.clone();
+        let mut retained=Vec::new();
+        for attribute in &source.attributes {
+            let Some(processor)=self.function_processor(ns,&attribute.name).cloned() else {
+                retained.push(attribute.clone());continue;
+            };
+            let schema=self.annotation_schema(ns,&attribute.name).cloned().ok_or_else(||
+                format!("error[NOVA-PROC015]: processor annotation '{}' has no schema",attribute.name))?;
+            let targets=schema.attributes.iter().find(|a|a.name=="__nova_annotation")
+                .map(|a|a.args.as_slice()).unwrap_or(&[]);
+            if !targets.is_empty() && !targets.iter().any(|target|target=="function") {
+                return Err(format!("error[NOVA-PROC015]: @{} cannot annotate function '{}'",attribute.name,function.name));
+            }
+            function=expand_function_processor(&processor.function,&function,&schema,attribute)
+                .map_err(|e|format!("error[NOVA-PROC016]: @{} on '{}': {e}",attribute.name,function.name))?;
+        }
+        function.attributes=retained;
+        Ok(function)
+    }
+    fn apply_type_processors(&mut self,source:&ast::Struct,ns:&str)->Result<(ast::Struct,Vec<Item>),String>{
+        let mut target=source.clone();let mut retained=Vec::new();let mut generated=Vec::new();
+        for attribute in &source.attributes {
+            let Some(processor)=self.function_processor(ns,&attribute.name).cloned() else {
+                retained.push(attribute.clone());continue;
+            };
+            let is_type=matches!(&processor.function.params[0].ty,
+                TypeRef::Reference{mutable:true,inner}
+                    if matches!(inner.as_ref(),TypeRef::Named(name) if name=="Type"||name.ends_with("::Type")));
+            if !is_type {retained.push(attribute.clone());continue;}
+            let schema=self.annotation_schema(ns,&attribute.name).cloned().ok_or_else(||
+                format!("error[NOVA-PROC015]: processor annotation '{}' has no schema",attribute.name))?;
+            let wanted=if target.is_class{"class"}else{"struct"};
+            let targets=schema.attributes.iter().find(|a|a.name=="__nova_annotation")
+                .map(|a|a.args.as_slice()).unwrap_or(&[]);
+            if !targets.is_empty() && !targets.iter().any(|value|value==wanted) {
+                return Err(format!("error[NOVA-PROC015]: @{} cannot annotate {wanted} '{}'",attribute.name,target.name));
+            }
+            let bindings=annotation_bindings(&schema,attribute,&processor.function.params[1].name)?;
+            if let Some(implementation)=expand_quoted_type_members(
+                &target,&processor.function,&bindings,&attribute.name
+            )? {
+                generated.push(Item::Impl(implementation));
+                continue;
+            }
+            let expansion=type_processor_expansion(&processor.function,&processor.function.params[0].name)
+                .ok_or_else(||format!("error[NOVA-PROC016]: type processor '{}' contains a quoted member transformation that is not supported yet",processor.function.name))?;
+            let implementation=match expansion {
+                TypeProcessorExpansion::Noop=>None,
+                TypeProcessorExpansion::RequiredConstructor=>Some(required_constructor(&target)),
+                TypeProcessorExpansion::Getters=>Some(getter_impl(&target,&processor.function,&bindings,&attribute.name)?),
+                TypeProcessorExpansion::Setters=>Some(setter_impl(&target,&processor.function,&bindings,&attribute.name)?),
+            };
+            if let Some(implementation)=implementation{generated.push(Item::Impl(implementation));}
+        }
+        target.attributes=retained;Ok((target,generated))
     }
     fn items(&mut self,items:&[Item],ns:&str)->Result<Vec<Item>,String>{
         let mut output=Vec::new();
@@ -1019,12 +1142,13 @@ impl Engine {
                         }
                     }
                 },
-                Item::Function(f) if f.attributes.iter().any(|a|matches!(a.name.as_str(),"proc_derive"|"proc_attribute"|"proc_macro"|"proc_field_validator"))=>{},
+                Item::Function(f) if f.attributes.iter().any(|a|matches!(a.name.as_str(),"proc_derive"|"proc_attribute"|"proc_macro"|"proc_field_validator"|"processor"))=>{},
+                Item::Struct(s) if s.attributes.iter().any(|a|a.name=="__nova_annotation")=>{},
                 Item::Function(f) if self.attributes.contains_key(&qualified(ns,&f.name)) &&
                     !f.attributes.iter().any(|a|matches!(a.name.as_str(),"proc_attribute"))=>{},
                 Item::Struct(source)=>{
-                    let (mut s,field_checks)=self.field_checks(source,ns)?;
-                    let mut generated=Vec::new();
+                    let (processed,mut generated)=self.apply_type_processors(source,ns)?;
+                    let (mut s,field_checks)=self.field_checks(&processed,ns)?;
                     if !field_checks.is_empty() {
                         if self.explicit_validators.contains(&qualified(ns,&source.name)) {
                             return Err(format!("error[NOVA-VAL002]: '{}.validate' already exists; remove it or remove field validators",source.name));
@@ -1091,12 +1215,15 @@ impl Engine {
                     output.extend(self.expand_generated(&generated, ns)?);
                 },
                 Item::Function(f)=>{
-                    let mut f=f.clone();self.walk_stmts(&mut f.body,ns,0)?;
+                    let mut f=self.apply_function_processors(f,ns)?;self.walk_stmts(&mut f.body,ns,0)?;
                     output.push(Item::Function(f));
                 }
                 Item::Impl(block)=>{
                     let mut block=block.clone();
-                    for method in &mut block.methods{self.walk_stmts(&mut method.body,ns,0)?;}
+                    for method in &mut block.methods{
+                        *method=self.apply_function_processors(method,ns)?;
+                        self.walk_stmts(&mut method.body,ns,0)?;
+                    }
                     output.push(Item::Impl(block));
                 }
                 Item::Trait(trait_def)=>{
@@ -1111,6 +1238,424 @@ impl Engine {
         }
         Ok(output)
     }
+}
+
+fn splice_meta_fragments(statements:&mut Vec<Stmt>,fragments:&HashMap<String,Vec<Stmt>>){
+    let mut output=Vec::new();
+    for mut statement in std::mem::take(statements) {
+        if let Stmt::Expr(Expr::Call(marker,args))=&statement {
+            if marker=="__nova_meta_splice" {
+                if let [Expr::Var(name)]=args.as_slice() {
+                    if let Some(fragment)=fragments.get(name){output.extend(fragment.clone());continue;}
+                }
+            }
+        }
+        match &mut statement {
+            Stmt::If{then_body,else_body,..}=>{splice_meta_fragments(then_body,fragments);if let Some(body)=else_body{splice_meta_fragments(body,fragments);}},
+            Stmt::While{body,..}|Stmt::Loop(body)|Stmt::Unsafe(body)|Stmt::For{body,..}|Stmt::ForEach{body,..}=>splice_meta_fragments(body,fragments),
+            Stmt::Match{arms,..}=>for arm in arms{splice_meta_fragments(&mut arm.body,fragments);},
+            _=>{}
+        }
+        output.push(statement);
+    }
+    *statements=output;
+}
+
+fn quoted_block(expression:&Expr)->Option<Vec<Stmt>>{
+    match expression {
+        Expr::Call(marker,args) if marker=="__nova_meta_quote"=>match args.as_slice(){[Expr::Block(body)]=>Some(body.clone()),_=>None},
+        _=>None,
+    }
+}
+
+fn append_meta_fragment(
+    body:&[Stmt],field:Option<&ast::Field>,fragments:&mut HashMap<String,Vec<Stmt>>,
+    base_bindings:&HashMap<String,String>
+)->Result<(),String>{
+    for statement in body {
+        if let Stmt::Expr(Expr::MethodCall(receiver,method,args,_))=statement {
+            if method=="append" {
+                if let (Expr::Var(name),[quoted])=(receiver.as_ref(),args.as_slice()) {
+                    if let Some(mut addition)=quoted_block(quoted) {
+                        let mut bindings=base_bindings.clone();
+                        if let Some(field)=field{bindings.insert("field.name".into(),field.name.clone());}
+                        interpolate_stmts(&mut addition,&bindings,&[])?;
+                        if let Some(field)=field{replace_meta_field_stmts(&mut addition,"field",&field.name);}
+                        fragments.entry(name.clone()).or_default().extend(addition);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Execute the general quote/append/splice subset used by type processors.
+/// It is intentionally annotation-agnostic: no Debug/getter/constructor names
+/// are inspected here.
+fn expand_quoted_type_members(
+    target:&ast::Struct,processor:&Function,annotation_bindings:&HashMap<String,String>,generated_by:&str
+)->Result<Option<ast::Impl>,String>{
+    let mut bindings=annotation_bindings.clone();
+    bindings.insert("target.name".into(),target.name.clone());
+    let mut fragments=HashMap::<String,Vec<Stmt>>::new();
+    let mut methods=Vec::new();
+    for statement in &processor.body {
+        match statement {
+            Stmt::Let{name,init,..}=>if let Some(mut body)=quoted_block(init) {
+                interpolate_stmts(&mut body,&bindings,&[])?;
+                fragments.insert(name.clone(),body);
+            },
+            Stmt::ForEach{iterable,body,..} if matches!(iterable,
+                Expr::Field(owner,name) if name=="fields" && matches!(owner.as_ref(),Expr::Var(_)))=>{
+                for field in &target.fields{append_meta_fragment(body,Some(field),&mut fragments,&bindings)?;}
+            },
+            Stmt::Expr(Expr::MethodCall(receiver,method,args,_)) if method=="append"=>{
+                if let (Expr::Var(name),[quoted])=(receiver.as_ref(),args.as_slice()) {
+                    if let Some(mut addition)=quoted_block(quoted) {
+                        interpolate_stmts(&mut addition,&bindings,&[])?;
+                        fragments.entry(name.clone()).or_default().extend(addition);
+                    }
+                }
+            },
+            Stmt::Expr(Expr::MethodCall(receiver,method,args,_)) if method=="add" &&
+                matches!(receiver.as_ref(),Expr::Field(_,name) if name=="members")=>{
+                let [Expr::Call(marker,quoted)]=args.as_slice() else{continue};
+                if marker!="__nova_meta_quote_function"{continue;}
+                let [Expr::Str(name),Expr::Lambda{params,result,body}]=quoted.as_slice() else{continue};
+                let mut body=body.clone();
+                splice_meta_fragments(&mut body,&fragments);
+                interpolate_stmts(&mut body,&bindings,&[])?;
+                methods.push(Function{
+                    mode:ast::FunctionMode::Normal,name:name.trim_matches('"').into(),generics:vec![],concept_bounds:vec![],
+                    params:params.clone(),variadic:false,result:result.clone(),body,
+                    is_virtual:false,is_override:false,
+                    attributes:vec![ast::Attribute{name:"__nova_generated_by".into(),args:vec![generated_by.into()]}],
+                });
+            },
+            _=>{}
+        }
+    }
+    if methods.is_empty(){return Ok(None);}
+    let type_arguments=target.generics.iter().cloned().map(TypeRef::Named).collect::<Vec<_>>();
+    let ty=if type_arguments.is_empty(){TypeRef::Named(target.name.clone())}
+        else{TypeRef::Applied(target.name.clone(),type_arguments)};
+    Ok(Some(ast::Impl{generics:target.generics.clone(),trait_name:None,target:ty,associated_types:vec![],methods}))
+}
+
+#[derive(Clone,Copy)]
+enum TypeProcessorExpansion { Noop, RequiredConstructor, Getters, Setters }
+
+fn type_processor_expansion(processor:&Function,target:&str)->Option<TypeProcessorExpansion>{
+    fn quoted_template(statement:&Stmt)->Option<(&str,&str)>{match statement {
+        Stmt::Let{name,init:Expr::Call(marker,args),..}
+            if (marker=="__nova_meta_quote" && matches!(args.as_slice(),[Expr::Block(_)])) ||
+               (marker=="__nova_meta_quote_function" && matches!(args.as_slice(),[Expr::Str(_),Expr::Lambda{..}]))
+                =>Some((name.as_str(),match args.first(){Some(Expr::Str(name))=>name.trim_matches('"'),_=>""})),
+        Stmt::ForEach{body,..}=>body.iter().find_map(quoted_template),
+        _=>None,
+    }}
+    let Some((template,template_name))=processor.body.iter().find_map(quoted_template) else {
+        return Some(TypeProcessorExpansion::Noop);
+    };
+    let iterates_required=processor.body.iter().any(|statement|match statement {
+        Stmt::ForEach{iterable,..}=>matches!(iterable,
+            Expr::Field(fields,required) if required=="required" && matches!(fields.as_ref(),
+                Expr::Field(owner,name) if name=="fields" && matches!(owner.as_ref(),Expr::Var(name) if name==target))),
+        _=>false,
+    });
+    let adds_template_at_top=processor.body.iter().any(|statement|match statement {
+        Stmt::Expr(Expr::MethodCall(receiver,method,args,_)) if method=="add"=>
+            matches!(receiver.as_ref(),Expr::Field(owner,name) if name=="members" && matches!(owner.as_ref(),Expr::Var(name) if name==target)) &&
+            matches!(args.as_slice(),[Expr::Var(name)] if name==template),
+        _=>false,
+    });
+    if iterates_required && adds_template_at_top{return Some(TypeProcessorExpansion::RequiredConstructor);}
+    let adds_template_in_field_loop=processor.body.iter().any(|statement|match statement {
+        Stmt::ForEach{iterable,body,..} if matches!(iterable,
+            Expr::Field(owner,name) if name=="fields" && matches!(owner.as_ref(),Expr::Var(name) if name==target))=>
+            body.iter().any(|nested|matches!(nested,
+                Stmt::Expr(Expr::MethodCall(receiver,method,args,_)) if method=="add" &&
+                matches!(receiver.as_ref(),Expr::Field(owner,name) if name=="members" && matches!(owner.as_ref(),Expr::Var(name) if name==target)) &&
+                matches!(args.as_slice(),[Expr::Var(name)] if name==template))),
+        _=>false,
+    });
+    if !adds_template_in_field_loop{return None;}
+    match template_name {
+        "get"=>Some(TypeProcessorExpansion::Getters),
+        "set"=>Some(TypeProcessorExpansion::Setters),
+        _=>None,
+    }
+}
+
+fn getter_template_body(processor:&Function)->Option<Vec<Stmt>>{
+    fn visit(statements:&[Stmt])->Option<Vec<Stmt>>{
+        for statement in statements {
+            if let Stmt::Expr(Expr::MethodCall(receiver,method,args,_))=statement {
+                if method=="wrap" && matches!(receiver.as_ref(),Expr::Field(_,name) if name=="body") {
+                    if let [Expr::Call(marker,quoted)]=args.as_slice() {
+                        if marker=="__nova_meta_quote" {
+                            if let [Expr::Block(body)]=quoted.as_slice(){return Some(body.clone());}
+                        }
+                    }
+                }
+            }
+            if let Stmt::ForEach{body,..}|Stmt::Loop(body)=statement {
+                if let Some(found)=visit(body){return Some(found);}
+            }
+        }
+        None
+    }
+    visit(&processor.body)
+}
+
+fn member_name_template(processor:&Function)->Option<String>{
+    fn visit(statements:&[Stmt])->Option<String>{
+        for statement in statements {
+            if let Stmt::FieldSet{field,value,..}=statement {
+                if field=="name" {
+                    match value {
+                        Expr::MacroCall(name,args) if name=="format"=>
+                            if let Some(Expr::Str(text))=args.first(){return Some(text.trim_matches('"').into());},
+                        Expr::Str(text)=>return Some(text.trim_matches('"').into()),
+                        _=>{}
+                    }
+                }
+            }
+            if let Stmt::ForEach{body,..}|Stmt::Loop(body)=statement {
+                if let Some(found)=visit(body){return Some(found);}
+            }
+        }
+        None
+    }
+    visit(&processor.body)
+}
+
+fn replace_meta_field_expr(expression:&mut Expr,loop_name:&str,field_name:&str){
+    if matches!(expression,Expr::Index(owner,index)
+        if matches!(owner.as_ref(),Expr::Var(name) if name=="self") &&
+           matches!(index.as_ref(),Expr::Field(base,name) if name=="name" && matches!(base.as_ref(),Expr::Var(name) if name==loop_name))) {
+        *expression=Expr::Field(Box::new(Expr::Var("self".into())),field_name.into());return;
+    }
+    match expression {
+        Expr::Unary(_,value)|Expr::Deref(value)|Expr::Yield(value)|Expr::Await(value)|Expr::Spread(value)|Expr::Cast(value,_)=>replace_meta_field_expr(value,loop_name,field_name),
+        Expr::AddressOf{value,..}=>replace_meta_field_expr(value,loop_name,field_name),
+        Expr::Binary(left,_,right)|Expr::Index(left,right)=>{replace_meta_field_expr(left,loop_name,field_name);replace_meta_field_expr(right,loop_name,field_name);},
+        Expr::Call(_,args)|Expr::MacroCall(_,args)|Expr::GenericCall(_,_,args)|Expr::Array(args)=>for arg in args{replace_meta_field_expr(arg,loop_name,field_name);},
+        Expr::CallIndirect(receiver,args)|Expr::MethodCall(receiver,_,args,_)=>{replace_meta_field_expr(receiver,loop_name,field_name);for arg in args{replace_meta_field_expr(arg,loop_name,field_name);}},
+        Expr::StructInit(_,fields)|Expr::GenericStructInit(_,_,fields)=>for (_,value) in fields{replace_meta_field_expr(value,loop_name,field_name);},
+        Expr::Field(receiver,_)=>replace_meta_field_expr(receiver,loop_name,field_name),
+        Expr::Block(body)|Expr::Lambda{body,..}=>replace_meta_field_stmts(body,loop_name,field_name),
+        _=>{}
+    }
+}
+
+fn replace_meta_field_stmts(statements:&mut [Stmt],loop_name:&str,field_name:&str){
+    for statement in statements {
+        if let Stmt::FieldSet{root,field,..}=statement {
+            if root=="__nova_invalid_assignment_target__" && field=="assignment target must be a local or local.field" {
+                *root="self".into();*field=field_name.into();
+            }
+        }
+        match statement {
+            Stmt::Let{init,defer,..}=>{replace_meta_field_expr(init,loop_name,field_name);if let Some(value)=defer{replace_meta_field_expr(value,loop_name,field_name);}},
+            Stmt::Expr(value)|Stmt::Tail(value)|Stmt::Defer(value)=>replace_meta_field_expr(value,loop_name,field_name),
+            Stmt::Return(Some(value))=>replace_meta_field_expr(value,loop_name,field_name),
+            Stmt::Set{value,..}|Stmt::DerefSet{value,..}|Stmt::FieldSet{value,..}|Stmt::CompoundSet{value,..}=>replace_meta_field_expr(value,loop_name,field_name),
+            Stmt::If{condition,then_body,else_body}=>{replace_meta_field_expr(condition,loop_name,field_name);replace_meta_field_stmts(then_body,loop_name,field_name);if let Some(body)=else_body{replace_meta_field_stmts(body,loop_name,field_name);}},
+            Stmt::While{condition,body}=>{replace_meta_field_expr(condition,loop_name,field_name);replace_meta_field_stmts(body,loop_name,field_name);},
+            Stmt::Loop(body)|Stmt::Unsafe(body)=>replace_meta_field_stmts(body,loop_name,field_name),
+            _=>{}
+        }
+    }
+}
+
+fn getter_impl(target:&ast::Struct,processor:&Function,annotation_bindings:&HashMap<String,String>,generated_by:&str)->Result<ast::Impl,String>{
+    let type_arguments=target.generics.iter().cloned().map(TypeRef::Named).collect::<Vec<_>>();
+    let ty=if type_arguments.is_empty(){TypeRef::Named(target.name.clone())}
+        else{TypeRef::Applied(target.name.clone(),type_arguments)};
+    let template=getter_template_body(processor).ok_or_else(||"getter template must call getter.body.wrap(quote { ... })".to_string())?;
+    let name_template=member_name_template(processor).unwrap_or_else(||"get_${field.name}".into());
+    let mut methods=Vec::new();
+    for field in &target.fields {
+        let mut body=template.clone();
+        let mut bindings=annotation_bindings.clone();
+        bindings.insert("field.name".into(),field.name.clone());
+        interpolate_stmts(&mut body,&bindings,&[])?;
+        replace_meta_field_stmts(&mut body,"field",&field.name);
+        let name=interpolate_text(&name_template,&bindings)?;
+        methods.push(Function{
+            mode:ast::FunctionMode::Normal,name,generics:vec![],concept_bounds:vec![],
+            params:vec![ast::Param{name:"self".into(),ty:ty.clone(),default:None,attributes:vec![]}],
+            variadic:false,result:field.ty.clone(),body,
+            is_virtual:false,is_override:false,attributes:vec![ast::Attribute{name:"__nova_generated_by".into(),args:vec![generated_by.into()]}],
+        });
+    }
+    Ok(ast::Impl{generics:target.generics.clone(),trait_name:None,target:ty,associated_types:vec![],methods})
+}
+
+fn setter_impl(target:&ast::Struct,processor:&Function,annotation_bindings:&HashMap<String,String>,generated_by:&str)->Result<ast::Impl,String>{
+    let type_arguments=target.generics.iter().cloned().map(TypeRef::Named).collect::<Vec<_>>();
+    let ty=if type_arguments.is_empty(){TypeRef::Named(target.name.clone())}
+        else{TypeRef::Applied(target.name.clone(),type_arguments)};
+    let template=getter_template_body(processor).ok_or_else(||"setter template must call setter.body.wrap(quote { ... })".to_string())?;
+    let name_template=member_name_template(processor).unwrap_or_else(||"set_${field.name}".into());
+    let mut methods=Vec::new();
+    for field in &target.fields {
+        let mut body=template.clone();
+        let mut bindings=annotation_bindings.clone();
+        bindings.insert("field.name".into(),field.name.clone());
+        interpolate_stmts(&mut body,&bindings,&[])?;
+        replace_meta_field_stmts(&mut body,"field",&field.name);
+        let name=interpolate_text(&name_template,&bindings)?;
+        methods.push(Function{
+            mode:ast::FunctionMode::Normal,name,generics:vec![],concept_bounds:vec![],
+            params:vec![
+                ast::Param{name:"self".into(),ty:TypeRef::Reference{mutable:true,inner:Box::new(ty.clone())},default:None,attributes:vec![]},
+                ast::Param{name:"value".into(),ty:field.ty.clone(),default:None,attributes:vec![]},
+            ],
+            variadic:false,result:TypeRef::Named("()".into()),body,
+            is_virtual:false,is_override:false,attributes:vec![ast::Attribute{name:"__nova_generated_by".into(),args:vec![generated_by.into()]}],
+        });
+    }
+    Ok(ast::Impl{generics:target.generics.clone(),trait_name:None,target:ty,associated_types:vec![],methods})
+}
+
+fn required_constructor(target:&ast::Struct)->ast::Impl{
+    let required=target.fields.iter().filter(|field|field.default.is_none()).collect::<Vec<_>>();
+    let params=required.iter().map(|field|ast::Param{
+        name:field.name.clone(),ty:field.ty.clone(),default:None,attributes:vec![]
+    }).collect();
+    let fields=required.iter().map(|field|(field.name.clone(),Expr::Var(field.name.clone()))).collect();
+    let type_arguments=target.generics.iter().cloned().map(TypeRef::Named).collect::<Vec<_>>();
+    let ty=if type_arguments.is_empty(){TypeRef::Named(target.name.clone())}
+        else{TypeRef::Applied(target.name.clone(),type_arguments.clone())};
+    let init=if type_arguments.is_empty(){Expr::StructInit(target.name.clone(),fields)}
+        else{Expr::GenericStructInit(target.name.clone(),type_arguments,fields)};
+    let constructor=Function{
+        mode:ast::FunctionMode::Normal,name:"new".into(),generics:vec![],concept_bounds:vec![],
+        params,variadic:false,result:ty.clone(),body:vec![Stmt::Return(Some(init))],
+        is_virtual:false,is_override:false,attributes:vec![ast::Attribute{name:"static".into(),args:vec![]}],
+    };
+    ast::Impl{generics:target.generics.clone(),trait_name:None,target:ty,associated_types:vec![],methods:vec![constructor]}
+}
+
+fn meta_literal(expression:&Expr)->Result<String,String>{
+    match expression {
+        Expr::Str(value)=>Ok(value.trim_matches('"').to_string()),
+        Expr::Int(value)=>Ok(value.clone()),
+        Expr::Bool(value)=>Ok(value.to_string()),
+        _=>Err("annotation defaults must be string, integer or boolean literals".into()),
+    }
+}
+
+fn annotation_bindings(schema:&ast::Struct,attribute:&ast::Attribute,prefix:&str)->Result<HashMap<String,String>,String>{
+    let mut values=HashMap::new();
+    for field in &schema.fields {
+        if let Some(default)=&field.default {values.insert(field.name.clone(),meta_literal(default)?);}
+    }
+    let mut positional=0usize;
+    let mut assigned=HashSet::new();
+    for raw in &attribute.args {
+        let (name,value)=if let Some((name,value))=raw.split_once('=') {
+            (name.to_string(),value.trim_matches('"').to_string())
+        }else{
+            let field=schema.fields.get(positional).ok_or_else(||"too many positional annotation arguments".to_string())?;
+            positional+=1;(field.name.clone(),raw.trim_matches('"').to_string())
+        };
+        if !schema.fields.iter().any(|field|field.name==name){return Err(format!("unknown annotation argument '{name}'"));}
+        if !assigned.insert(name.clone()){return Err(format!("duplicate annotation argument '{name}'"));}
+        values.insert(name,value);
+    }
+    for field in &schema.fields {
+        if !values.contains_key(&field.name){return Err(format!("missing required annotation argument '{}'",field.name));}
+    }
+    Ok(values.into_iter().map(|(name,value)|(format!("{prefix}.{name}"),value)).collect())
+}
+
+fn interpolate_text(text:&str,bindings:&HashMap<String,String>)->Result<String,String>{
+    let mut result=String::new();let mut rest=text;
+    while let Some(start)=rest.find("${") {
+        result.push_str(&rest[..start]);
+        let tail=&rest[start+2..];
+        let end=tail.find('}').ok_or_else(||"unterminated ${...} interpolation".to_string())?;
+        let key=&tail[..end];
+        let value=bindings.get(key).ok_or_else(||format!("unknown quote interpolation '${{{key}}}'"))?;
+        result.push_str(value);rest=&tail[end+1..];
+    }
+    result.push_str(rest);Ok(result)
+}
+
+fn interpolate_expr(expression:&mut Expr,bindings:&HashMap<String,String>)->Result<(),String>{
+    match expression {
+        Expr::Str(text)=>*text=interpolate_text(text,bindings)?,
+        Expr::Unary(_,value)|Expr::Deref(value)|Expr::Yield(value)|Expr::Await(value)|Expr::Spread(value)|Expr::Cast(value,_)=>interpolate_expr(value,bindings)?,
+        Expr::AddressOf{value,..}=>interpolate_expr(value,bindings)?,
+        Expr::Binary(left,_,right)|Expr::Index(left,right)=>{interpolate_expr(left,bindings)?;interpolate_expr(right,bindings)?;},
+        Expr::Call(_,args)|Expr::MacroCall(_,args)|Expr::GenericCall(_,_,args)|Expr::Array(args)=>for arg in args{interpolate_expr(arg,bindings)?;},
+        Expr::CallIndirect(receiver,args)|Expr::MethodCall(receiver,_,args,_)=>{interpolate_expr(receiver,bindings)?;for arg in args{interpolate_expr(arg,bindings)?;}},
+        Expr::StructInit(_,fields)|Expr::GenericStructInit(_,_,fields)=>for (_,value) in fields{interpolate_expr(value,bindings)?;},
+        Expr::Field(receiver,_)=>interpolate_expr(receiver,bindings)?,
+        Expr::If{condition,then_body,else_body}=>{interpolate_expr(condition,bindings)?;interpolate_stmts(then_body,bindings,&[])?;interpolate_stmts(else_body,bindings,&[])?;},
+        Expr::Block(body)|Expr::Lambda{body,..}=>interpolate_stmts(body,bindings,&[])?,
+        _=>{}
+    }
+    Ok(())
+}
+
+fn interpolate_stmts(statements:&mut Vec<Stmt>,bindings:&HashMap<String,String>,original:&[Stmt])->Result<(),String>{
+    let mut output=Vec::new();
+    for mut statement in std::mem::take(statements) {
+        if matches!(&statement,Stmt::Expr(Expr::Call(name,args))
+            if name=="__nova_meta_splice" && matches!(args.as_slice(),[Expr::Var(name)] if name=="body")) {
+            output.extend_from_slice(original);continue;
+        }
+        match &mut statement {
+            Stmt::Let{init,defer,..}=>{interpolate_expr(init,bindings)?;if let Some(value)=defer{interpolate_expr(value,bindings)?;}},
+            Stmt::Expr(value)|Stmt::Tail(value)|Stmt::Defer(value)=>interpolate_expr(value,bindings)?,
+            Stmt::Return(Some(value))=>interpolate_expr(value,bindings)?,
+            Stmt::Set{value,..}|Stmt::DerefSet{value,..}|Stmt::FieldSet{value,..}|Stmt::CompoundSet{value,..}=>interpolate_expr(value,bindings)?,
+            Stmt::If{condition,then_body,else_body}=>{interpolate_expr(condition,bindings)?;interpolate_stmts(then_body,bindings,original)?;if let Some(body)=else_body{interpolate_stmts(body,bindings,original)?;}},
+            Stmt::While{condition,body}=>{interpolate_expr(condition,bindings)?;interpolate_stmts(body,bindings,original)?;},
+            Stmt::Loop(body)|Stmt::Unsafe(body)=>interpolate_stmts(body,bindings,original)?,
+            Stmt::For{start,end,body,..}=>{interpolate_expr(start,bindings)?;interpolate_expr(end,bindings)?;interpolate_stmts(body,bindings,original)?;},
+            Stmt::ForEach{iterable,body,..}=>{interpolate_expr(iterable,bindings)?;interpolate_stmts(body,bindings,original)?;},
+            Stmt::Match{value,arms}=>{interpolate_expr(value,bindings)?;for arm in arms{interpolate_stmts(&mut arm.body,bindings,original)?;}},
+            _=>{}
+        }
+        output.push(statement);
+    }
+    *statements=output;Ok(())
+}
+
+fn expand_function_processor(processor:&Function,target:&Function,schema:&ast::Struct,attribute:&ast::Attribute)->Result<Function,String>{
+    let target_parameter=&processor.params[0].name;
+    let annotation_parameter=&processor.params[1].name;
+    let mut bindings=annotation_bindings(schema,attribute,annotation_parameter)?;
+    bindings.insert(format!("{target_parameter}.name"),target.name.clone());
+    for statement in &processor.body {
+        if let Stmt::Let{name,init:Expr::Field(owner,field),..}=statement {
+            if matches!(owner.as_ref(),Expr::Var(owner) if owner==target_parameter) && field=="name" {
+                bindings.insert(name.clone(),target.name.clone());
+            }
+        }
+    }
+    let mut quote=None;
+    for statement in &processor.body {
+        let Stmt::Expr(Expr::MethodCall(receiver,method,args,_))=statement else{continue};
+        let valid_receiver=matches!(receiver.as_ref(),Expr::Field(owner,field)
+            if field=="body" && matches!(owner.as_ref(),Expr::Var(name) if name==target_parameter));
+        if valid_receiver && method=="wrap" {
+            if let [Expr::Call(marker,quoted)]=args.as_slice() {
+                if marker=="__nova_meta_quote" {
+                    if let [Expr::Block(body)]=quoted.as_slice(){quote=Some(body.clone());}
+                }
+            }
+        }
+    }
+    let mut body=quote.ok_or_else(||"processor must call function.body.wrap(quote { ... })".to_string())?;
+    interpolate_stmts(&mut body,&bindings,&target.body)?;
+    let mut result=target.clone();result.body=body;Ok(result)
 }
 
 /// Expression macros do not receive implicit access to caller locals. AST

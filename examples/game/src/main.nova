@@ -1,0 +1,461 @@
+
+import std;
+use std::io;
+use std::platform::sdl2;
+use std::platform::sdl2::Window;
+use std::platform::sdl2::EventBuffer;
+use std::platform::sdl2::Renderer;
+
+comptime const WIDTH: i32 = 860;
+comptime const HEIGHT: i32 = 720;
+
+comptime const PLAYER_WIDTH: i32 = 40;
+comptime const PLAYER_HEIGHT: i32 = 50;
+
+comptime const GRAVITY: i32 = 1800;
+comptime const JUMP_FORCE: i32 = -900;
+comptime const PLAYER_SPEED: i32 = 350;
+
+class WindowManager
+{
+    window: Window,
+    events: EventBuffer
+}
+
+impl WindowManager
+{
+    static fn new() -> WindowManager
+    {
+        new WindowManager {
+            window: sdl2::open("Nova Platformer", WIDTH, HEIGHT),
+            events: sdl2::new_event_buffer()
+        }
+    }
+
+    fn config(self: &mut Self) -> ()
+    {
+        self.window.set_resizable(true);
+        self.window.show();
+    }
+
+    fn release(self: Self) -> ()
+    {
+        auto out = io::stdout();
+        out.write_line("Game closed");
+    }
+}
+
+class Context : WindowManager
+{
+    is_running: bool,
+    left: bool,
+    right: bool,
+    jump: bool
+}
+
+impl Context
+{
+    static fn new() -> Context
+    {
+        new Context {
+            is_running: true,
+            left: false,
+            right: false,
+            jump: false
+        }
+    }
+
+    fn events_poll(self: &mut Self) -> ()
+    {
+        auto type = self.events.poll();
+
+        if type == sdl2::EVENT_QUIT {
+            self.is_running = false;
+        }
+
+        if type == sdl2::EVENT_KEY_DOWN {
+            auto key = self.events.key_code();
+
+            if key == sdl2::KEY_A {
+                self.left = true;
+            }
+
+            if key == sdl2::KEY_D {
+                self.right = true;
+            }
+
+            if key == sdl2::KEY_SPACE {
+                self.jump = true;
+            }
+
+            if key == sdl2::KEY_ESCAPE {
+                self.is_running = false;
+            }
+        }
+
+        if type == sdl2::EVENT_KEY_UP {
+            auto key = self.events.key_code();
+
+            if key == sdl2::KEY_A {
+                self.left = false;
+            }
+
+            if key == sdl2::KEY_D {
+                self.right = false;
+            }
+        }
+    }
+}
+
+class Platform
+{
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32
+}
+
+impl Platform
+{
+    static fn new(
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32
+    ) -> Platform
+    {
+        new Platform {
+            x: x,
+            y: y,
+            width: width,
+            height: height
+        }
+    }
+
+    fn draw(self: &Self, render: &sdl2::Renderer) -> ()
+    {
+        auto rect = sdl2::rect(
+            self.x,
+            self.y,
+            self.width,
+            self.height
+        );
+
+        render.set_draw_color(60, 190, 120, 255);
+        render.fill_rect(&rect);
+    }
+}
+
+class Coin
+{
+    x: i32,
+    y: i32,
+    collected: bool
+}
+
+impl Coin
+{
+    static fn new(x: i32, y: i32) -> Coin
+    {
+        new Coin {
+            x: x,
+            y: y,
+            collected: false
+        }
+    }
+
+    fn draw(self: &Self, render: &sdl2::Renderer) -> ()
+    {
+        if !self.collected {
+            auto rect = sdl2::rect(self.x, self.y, 20, 20);
+
+            render.set_draw_color(255, 210, 40, 255);
+            render.fill_rect(&rect);
+        }
+    }
+}
+
+class Player
+{
+    x: i32,
+    y: i32,
+    vy: i32,
+    on_ground: bool,
+    score: i32
+}
+
+impl Player
+{
+    static fn new() -> Player
+    {
+        new Player {
+            x: 80,
+            y: 500,
+            vy: 0,
+            on_ground: false,
+            score: 0
+        }
+    }
+
+    fn jump(self: &mut Self) -> ()
+    {
+        if self.on_ground {
+            self.vy = JUMP_FORCE;
+            self.on_ground = false;
+        }
+    }
+
+    fn update_horizontal(
+        self: &mut Self,
+        left: bool,
+        right: bool,
+        dt: u32
+    ) -> ()
+    {
+        let mut direction: i32 = 0;
+
+        if left {
+            direction = -1;
+        }
+
+        if right {
+            direction = 1;
+        }
+
+        self.x += direction * PLAYER_SPEED * (dt as i32) / 1000;
+
+        if self.x < 0 {
+            self.x = 0;
+        }
+
+        if self.x > WIDTH - PLAYER_WIDTH {
+            self.x = WIDTH - PLAYER_WIDTH;
+        }
+    }
+
+    fn update_physics(self: &mut Self, dt: u32) -> ()
+    {
+        let old_y = self.y;
+        let delta = dt as i32;
+
+        // Gravidade
+        self.vy += GRAVITY * delta / 1000;
+
+        // Movimento vertical
+        self.y += self.vy * delta / 1000;
+
+        self.on_ground = false;
+
+        // Chão
+        let ground = HEIGHT - PLAYER_HEIGHT;
+
+        if self.y >= ground {
+            self.y = ground;
+            self.vy = 0;
+            self.on_ground = true;
+        }
+
+        // Plataforma 1
+        if self.vy >= 0
+            && old_y + PLAYER_HEIGHT <= 550
+            && self.y + PLAYER_HEIGHT >= 550
+            && self.x + PLAYER_WIDTH > 150
+            && self.x < 300
+        {
+            self.y = 550 - PLAYER_HEIGHT;
+            self.vy = 0;
+            self.on_ground = true;
+        }
+
+        // Plataforma 2
+        if self.vy >= 0
+            && old_y + PLAYER_HEIGHT <= 450
+            && self.y + PLAYER_HEIGHT >= 450
+            && self.x + PLAYER_WIDTH > 380
+            && self.x < 530
+        {
+            self.y = 450 - PLAYER_HEIGHT;
+            self.vy = 0;
+            self.on_ground = true;
+        }
+
+        // Plataforma 3
+        if self.vy >= 0
+            && old_y + PLAYER_HEIGHT <= 350
+            && self.y + PLAYER_HEIGHT >= 350
+            && self.x + PLAYER_WIDTH > 600
+            && self.x < 760
+        {
+            self.y = 350 - PLAYER_HEIGHT;
+            self.vy = 0;
+            self.on_ground = true;
+        }
+
+        // Plataforma 4
+        if self.vy >= 0
+            && old_y + PLAYER_HEIGHT <= 250
+            && self.y + PLAYER_HEIGHT >= 250
+            && self.x + PLAYER_WIDTH > 350
+            && self.x < 500
+        {
+            self.y = 250 - PLAYER_HEIGHT;
+            self.vy = 0;
+            self.on_ground = true;
+        }
+
+        // Plataforma 5
+        if self.vy >= 0
+            && old_y + PLAYER_HEIGHT <= 350
+            && self.y + PLAYER_HEIGHT >= 350
+            && self.x + PLAYER_WIDTH > 80
+            && self.x < 210
+        {
+            self.y = 350 - PLAYER_HEIGHT;
+            self.vy = 0;
+            self.on_ground = true;
+        }
+
+        // Reiniciar ao cair do mapa
+        if self.y > HEIGHT {
+            self.x = 80;
+            self.y = 500;
+            self.vy = 0;
+        }
+    }
+
+    fn collect_coin(
+        self: &mut Self,
+        coin: &mut Coin
+    ) -> ()
+    {
+        if !coin.collected {
+            let player_right = self.x + PLAYER_WIDTH;
+            let player_bottom = self.y + PLAYER_HEIGHT;
+
+            let coin_right = coin.x + 20;
+            let coin_bottom = coin.y + 20;
+
+            if self.x < coin_right
+                && player_right > coin.x
+                && self.y < coin_bottom
+                && player_bottom > coin.y
+            {
+                coin.collected = true;
+                self.score += 1;
+            }
+        }
+    }
+
+    fn draw(self: &Self, render: &sdl2::Renderer) -> ()
+    {
+        auto rect = sdl2::rect(
+            self.x,
+            self.y,
+            PLAYER_WIDTH,
+            PLAYER_HEIGHT
+        );
+
+        render.set_draw_color(245, 85, 85, 255);
+        render.fill_rect(&rect);
+
+        // Olhos
+        auto eye1 = sdl2::rect(self.x + 9, self.y + 10, 7, 7);
+        auto eye2 = sdl2::rect(self.x + 25, self.y + 10, 7, 7);
+
+        render.set_draw_color(255, 255, 255, 255);
+        render.fill_rect(&eye1);
+        render.fill_rect(&eye2);
+    }
+}
+
+fn main() -> i32
+{
+    sdl2::initialize_video();
+
+    let mut ctx = Context::new();
+    ctx.config();
+
+    auto render = sdl2::create_renderer(
+        &ctx.window,
+        sdl2::RENDERER_PRESENT_VSYNC
+    );
+
+    let mut player = Player::new();
+
+    // Plataformas
+    let platform1 = Platform::new(150, 550, 150, 20);
+    let platform2 = Platform::new(380, 450, 150, 20);
+    let platform3 = Platform::new(600, 350, 160, 20);
+    let platform4 = Platform::new(350, 250, 150, 20);
+    let platform5 = Platform::new(80, 350, 130, 20);
+
+    // Moedas
+    let mut coin1 = Coin::new(210, 510);
+    let mut coin2 = Coin::new(440, 410);
+    let mut coin3 = Coin::new(660, 310);
+    let mut coin4 = Coin::new(400, 210);
+    let mut coin5 = Coin::new(120, 310);
+
+    auto mut previous_ticks = sdl2::ticks();
+
+    while ctx.is_running {
+        auto current_ticks = sdl2::ticks();
+        auto mut dt = current_ticks - previous_ticks;
+        previous_ticks = current_ticks;
+
+        if dt > 32 {
+            dt = 32;
+        }
+
+        ctx.events_poll();
+
+        player.update_horizontal(
+            ctx.left,
+            ctx.right,
+            dt
+        );
+
+        if ctx.jump {
+            player.jump();
+            ctx.jump = false;
+        }
+
+        player.update_physics(dt);
+
+        player.collect_coin(&mut coin1);
+        player.collect_coin(&mut coin2);
+        player.collect_coin(&mut coin3);
+        player.collect_coin(&mut coin4);
+        player.collect_coin(&mut coin5);
+
+        // Fundo
+        render.set_draw_color(20, 25, 45, 255);
+        render.clear();
+
+        // Chão
+        auto ground = sdl2::rect(0, 650, 860, 70);
+        render.set_draw_color(45, 55, 75, 255);
+        render.fill_rect(&ground);
+
+        // Plataformas
+        platform1.draw(&render);
+        platform2.draw(&render);
+        platform3.draw(&render);
+        platform4.draw(&render);
+        platform5.draw(&render);
+
+        // Moedas
+        coin1.draw(&render);
+        coin2.draw(&render);
+        coin3.draw(&render);
+        coin4.draw(&render);
+        coin5.draw(&render);
+
+        // Jogador
+        player.draw(&render);
+
+        render.present();
+    }
+
+    return 0;
+}

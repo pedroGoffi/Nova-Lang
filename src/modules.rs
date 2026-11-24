@@ -1033,6 +1033,8 @@ impl Index {
                 self.ensure_visible(&target, scope, &raw)?;
                 *name = target;
             }
+            Expr::MacroCall(name, _)
+                if matches!(name.as_str(), "format" | "print" | "println" | "eprint" | "eprintln") => {}
             Expr::Call(name, _)
             | Expr::MacroCall(name, _)
             | Expr::GenericCall(name, _, _)

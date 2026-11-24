@@ -3283,11 +3283,11 @@ impl Engine {
                     let descriptor = Expr::Call(if resolved_print.ends_with("::eprint") {
                         "std::io::stderr_descriptor".into()
                     } else {
-                        "std::old::io::stdout_descriptor".into()
+                        "std::io::stdout_descriptor".into()
                     },vec![]);
                     let (callee,arguments): (&str,Vec<Expr>) = match &ty {
                         TypeRef::Named(kind) if kind == "str" => (
-                            "std::old::io::write_fd",vec![descriptor,value],
+                            "std::io::write_fd",vec![descriptor,value],
                         ),
                         TypeRef::Named(kind) if kind == "bool" => (
                             "std::old::io::write_bool",vec![descriptor,value],
@@ -3313,7 +3313,7 @@ impl Engine {
                                 if view_ty != TypeRef::Named("str".into()) {
                                     return Err("error[NOVA-FMT006]: to_string must return str".into());
                                 }
-                                ("std::old::io::write_fd",vec![descriptor,Expr::MethodCall(Box::new(value),"to_string".into(),vec![],vec![])])
+                                ("std::io::write_fd",vec![descriptor,Expr::MethodCall(Box::new(value),"to_string".into(),vec![],vec![])])
                             } else {
                                 ("std::old::io::write_stringable",vec![descriptor,value])
                             }
@@ -3348,45 +3348,56 @@ impl Engine {
                         let Expr::Bool(debug) = &data[2] else {
                             return Err("error[NOVA-FMT005]: debug mode must be static".into());
                         };
-                        let (_,ty) = self.expression(&data[0],scope,None)?;
+                        let (_,raw_ty) = self.expression(&data[0],scope,None)?;
+                        let (ty, value, borrowed) = match raw_ty {
+                            TypeRef::Reference { inner, .. } => {
+                                ((*inner).clone(), Expr::Deref(Box::new(data[0].clone())), true)
+                            }
+                            other => (other, data[0].clone(), false),
+                        };
                         let TypeRef::Named(kind) = &ty else {
                             return Err(format!("error[NOVA-FMT006]: {} is not formattable",display_type(&ty)));
                         };
                         if precision >= 0 && kind != "f32" && kind != "f64" {
                             return Err(format!("error[NOVA-FMT004]: precision is only valid for floats, not {}",display_type(&ty)));
                         }
-                        let value = data[0].clone();
                         let (function,mut forwarded): (&str,Vec<Expr>) = match kind.as_str() {
                             "str" if *debug => ("std::text::string::format_add_text",vec![value]),
                             "str" => ("std::text::string::format_add_text",vec![value]),
-                            "bool" => ("std::old::string::format_add_bool",vec![value]),
+                            "bool" => ("std::text::string::format_add_bool",vec![value]),
                             "i8"|"i16"|"i32"|"i64"|"isize" => (
-                                "std::old::string::format_add_i64",
+                                "std::text::string::format_add_i64",
                                 vec![Expr::Cast(Box::new(value),TypeRef::Named("i64".into()))],
                             ),
                             "u8"|"u16"|"u32"|"u64"|"usize" => (
-                                "std::old::string::format_add_u64",
+                                "std::text::string::format_add_u64",
                                 vec![Expr::Cast(Box::new(value),TypeRef::Named("u64".into()))],
                             ),
                             "f32"|"f64" => (
-                                "std::old::string::format_add_float",
+                                "std::text::string::format_add_float",
                                 vec![Expr::Cast(Box::new(value),TypeRef::Named("f64".into())),Expr::Int(precision.to_string())],
                             ),
                             _ => {
-                                let is_string = kind.ends_with("std__text__string__String");
-                                if is_string && !matches!(&value,Expr::Var(_)) {
-                                    (if *debug {"std::old::string::format_add_owned_debug"} else {"std::old::string::format_add_owned"},vec![value])
+                                let is_string = kind == "String"
+                                    || kind.ends_with("::String")
+                                    || kind.ends_with("std__text__string__String");
+                                if is_string && borrowed {
+                                    let rendered=Expr::Call("std::text::string::as_text".into(),vec![data[0].clone()]);
+                                    ("std::text::string::format_add_text",vec![rendered])
+                                } else if is_string && !matches!(&value,Expr::Var(_)) {
+                                    ("std::text::string::format_add_owned",vec![value])
                                 } else {
                                     let method = if *debug && !is_string {"to_debug_string"} else {"to_string"};
-                                    let (_,result) = self.expression(
-                                        &Expr::MethodCall(Box::new(value.clone()),method.into(),vec![],vec![]),
-                                        scope,Some(&TypeRef::Named("str".into()))
-                                    ).map_err(|error|format!("error[NOVA-FMT006]: implement `{method}() -> str` for {}; {error}",display_type(&ty)))?;
-                                    if result != TypeRef::Named("str".into()) {
-                                        return Err("error[NOVA-FMT006]: formatting method must return str".into());
+                                    let rendered=Expr::MethodCall(Box::new(value.clone()),method.into(),vec![],vec![]);
+                                    let (_,result) = self.expression(&rendered,scope,None)
+                                        .map_err(|error|format!("error[NOVA-FMT006]: implement `{method}() -> str|String` for {}; {error}",display_type(&ty)))?;
+                                    if result==TypeRef::Named("str".into()) {
+                                        ("std::text::string::format_add_text",vec![rendered])
+                                    } else if matches!(&result,TypeRef::Named(name) if name.ends_with("std__text__string__String")) {
+                                        ("std::text::string::format_add_owned",vec![rendered])
+                                    } else {
+                                        return Err("error[NOVA-FMT006]: formatting method must return str or String".into());
                                     }
-                                    ("std::text::string::format_add_text",
-                                        vec![Expr::MethodCall(Box::new(value),method.into(),vec![],vec![])])
                                 }
                             }
                         };
@@ -3396,56 +3407,32 @@ impl Engine {
                     }
                     return self.expression(&string,scope,expected);
                 }
-                // Format output is expanded in the macro AST pass, but only
-                // the surface checker knows the concrete type of each value.
-                // Dispatch to typed STD intrinsics here: no printf varargs,
-                // runtime dynamic type tags, or duplicated evaluations.
+                // Use the same owned-String builder as format!, then send that
+                // value through the modern std::io surface. Formatting never
+                // reaches the compatibility runtime namespace.
                 if name == crate::format_macros::WRITE_VALUE {
                     if original_args.len() != 4 {
                         return Err("error[NOVA-FMT005]: malformed format write".into());
                     }
-                    let Expr::Int(precision_text) = &original_args[1] else {
-                        return Err("error[NOVA-FMT005]: precision must be static".into());
-                    };
-                    let precision: i32 = precision_text.parse().map_err(|_|"error[NOVA-FMT005]: invalid precision")?;
-                    let Expr::Bool(debug) = &original_args[2] else {
-                        return Err("error[NOVA-FMT005]: debug flag must be static".into());
-                    };
                     let Expr::Bool(stderr) = &original_args[3] else {
                         return Err("error[NOVA-FMT005]: output stream must be static".into());
                     };
-                    let value=original_args[0].clone();
-                    let (_,ty)=self.expression(&value,scope,None)?;
-                    let TypeRef::Named(kind)=&ty else {
-                        return Err(format!("error[NOVA-FMT006]: cannot format {}",display_type(&ty)));
-                    };
-                    if precision>=0 && kind!="f32" && kind!="f64" {
-                        return Err(format!("error[NOVA-FMT004]: precision applies only to floats, not {}",display_type(&ty)));
-                    }
-                    let output=if *stderr {"std::old::io::eprint"} else {"std::old::io::print"};
-                    if precision < 0 && (!*debug || (kind!="str" && !kind.ends_with("std__old__string__String"))) {
-                        if *debug && !matches!(kind.as_str(),"bool"|"i8"|"i16"|"i32"|"i64"|"isize"|"u8"|"u16"|"u32"|"u64"|"usize"|"f32"|"f64") {
-                            return self.expression(&Expr::Call(output.into(),vec![Expr::MethodCall(Box::new(value),"to_debug_string".into(),vec![],vec![])]),scope,expected);
-                        }
-                        return self.expression(&Expr::Call(output.into(),vec![value]),scope,expected);
-                    }
-                    let descriptor=Expr::Call(if *stderr {"std::io::stderr_descriptor".into()} else {"std::old::io::stdout_descriptor".into()},vec![]);
-                    if precision>=0 {
-                        return self.expression(&Expr::Call("std::old::io::write_float".into(),vec![
-                            descriptor,Expr::Cast(Box::new(value),TypeRef::Named("f64".into())),Expr::Int(precision.to_string()),
-                        ]),scope,expected);
-                    }
-                    if kind=="str" {
-                        return self.expression(&Expr::Call("std::old::io::write_debug".into(),vec![descriptor,value]),scope,expected);
-                    }
-                    if kind.ends_with("std__old__string__String") {
-                        if !matches!(&value,Expr::Var(_)) {
-                            return self.expression(&Expr::Call("std::old::io::write_owned_debug".into(),vec![descriptor,value]),scope,expected);
-                        }
-                        return self.expression(&Expr::Call("std::old::io::write_debug".into(),vec![descriptor,
-                            Expr::MethodCall(Box::new(value),"as_str".into(),vec![],vec![])]),scope,expected);
-                    }
-                    return self.expression(&Expr::Call(output.into(),vec![value]),scope,expected);
+                    let rendered = Expr::Call(crate::format_macros::BUILD.into(), vec![
+                        Expr::Call(crate::format_macros::VALUE_PART.into(), vec![
+                            original_args[0].clone(),
+                            original_args[1].clone(),
+                            original_args[2].clone(),
+                        ]),
+                    ]);
+                    let descriptor = Expr::Call(
+                        if *stderr { "std::io::stderr_descriptor" } else { "std::io::stdout_descriptor" }.into(),
+                        vec![],
+                    );
+                    return self.expression(
+                        &Expr::Call("std::io::write_string".into(), vec![descriptor, rendered]),
+                        scope,
+                        expected,
+                    );
                 }
                 let args = self.expand_call_args(original_args, scope)?;
                 // Coroutine keywords are lowered to legacy runtime calls before

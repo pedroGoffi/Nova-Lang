@@ -1,0 +1,388 @@
+use std::core;
+use std::core::option::Option;
+use std::error::result::Result;
+use std::collections::vec::Vec;
+
+// A small Thompson-NFA regular-expression engine.  Keeping the automaton in
+// Nova makes matching deterministic (including for ambiguous repetitions) and
+// avoids a platform-specific regex ABI.
+const ACCEPT: i64 = 0;
+const BYTE: i64 = 1;
+const ANY: i64 = 2;
+const SPLIT: i64 = 3;
+const CLASS: i64 = 4;
+const BEGIN: i64 = 5;
+const END: i64 = 6;
+
+pub struct Match { start: u64, end: u64 }
+
+impl Match {
+    fn len(self: &Match) -> u64 { return self.end - self.start; }
+    fn is_empty(self: &Match) -> bool { return self.start == self.end; }
+}
+
+pub class RegexError { value: str }
+
+impl RegexError {
+    static fn new(value: str) -> Self { return new RegexError { value: value }; }
+    fn code(self: &RegexError) -> i32 { return 1; }
+    fn as_str(self: &RegexError) -> str { return self.value; }
+    fn to_string(self: &RegexError) -> str { return self.value; }
+}
+
+struct Fragment { start: i64, out_head: i64 }
+
+impl Fragment {
+    static fn new(start: i64, out_head: i64) -> Self {
+        return new Fragment { start: start, out_head: out_head };
+    }
+}
+
+pub class Regex {
+    kinds: Vec<i64>,
+    values: Vec<i64>,
+    first: Vec<i64>,
+    second: Vec<i64>,
+    classes: Vec<i64>,
+    start_state: i64
+}
+
+class Parser {
+    pattern: str,
+    length: u64,
+    position: u64,
+    depth: i64,
+    failed: bool,
+    kinds: Vec<i64>,
+    values: Vec<i64>,
+    first: Vec<i64>,
+    second: Vec<i64>,
+    classes: Vec<i64>
+}
+
+fn byte_at(value: str, index: u64) -> i64 {
+    return core::load(core::address(value) + index) as i64;
+}
+
+impl Parser {
+    static fn new(pattern: str) -> Self {
+        return new Parser {
+            pattern: pattern,
+            length: core::text_size(pattern),
+            position: 0,
+            depth: 0,
+            failed: false,
+            kinds: Vec::new::<i64>(),
+            values: Vec::new::<i64>(),
+            first: Vec::new::<i64>(),
+            second: Vec::new::<i64>(),
+            classes: Vec::new::<i64>()
+        };
+    }
+
+    fn peek(self: &Parser) -> i64 {
+        if self.position >= self.length { return -1; }
+        return byte_at(self.pattern, self.position);
+    }
+
+    fn take(self: &mut Parser) -> i64 {
+        let value = self.peek();
+        if value >= 0 { self.position += 1; }
+        return value;
+    }
+
+    fn state(self: &mut Parser, kind: i64, value: i64, one: i64, two: i64) -> i64 {
+        let index = self.kinds.count();
+        self.kinds.push(kind); self.values.push(value);
+        self.first.push(one); self.second.push(two);
+        return index;
+    }
+
+    fn patch(self: &mut Parser, head: i64, target: i64) -> () {
+        let mut slot = head;
+        while slot >= 0 {
+            let state = slot / 2;
+            let following = if slot % 2 == 0 { self.first.get(state) } else { self.second.get(state) };
+            if slot % 2 == 0 { self.first.set(state, target); } else { self.second.set(state, target); }
+            slot = following;
+        }
+        return;
+    }
+
+    fn join(self: &mut Parser, left: i64, right: i64) -> i64 {
+        if left < 0 { return right; }
+        let mut slot = left;
+        while true {
+            let state = slot / 2;
+            let following = if slot % 2 == 0 { self.first.get(state) } else { self.second.get(state) };
+            if following < 0 {
+                if slot % 2 == 0 { self.first.set(state, right); } else { self.second.set(state, right); }
+                return left;
+            }
+            slot = following;
+        }
+        return left;
+    }
+
+    fn empty(self: &mut Parser) -> Fragment {
+        let state = self.state(SPLIT, 0, -1, -1);
+        return Fragment::new(state, state * 2);
+    }
+
+    fn expression(self: &mut Parser) -> Fragment {
+        let mut left = self.sequence();
+        while !self.failed && self.peek() == 124 {
+            self.take();
+            let right = self.sequence();
+            let state = self.state(SPLIT, 0, left.start, right.start);
+            left = Fragment::new(state, self.join(left.out_head, right.out_head));
+        }
+        return left;
+    }
+
+    fn sequence(self: &mut Parser) -> Fragment {
+        let mut present = false;
+        let mut result = self.empty();
+        while !self.failed {
+            let next_value = self.peek();
+            if next_value < 0 || next_value == 41 || next_value == 124 { break; }
+            let item = self.repeat();
+            if !present { result = item; present = true; }
+            else {
+                self.patch(result.out_head, item.start);
+                result = Fragment::new(result.start, item.out_head);
+            }
+        }
+        return result;
+    }
+
+    fn repeat(self: &mut Parser) -> Fragment {
+        let atom = self.atom();
+        if self.failed { return atom; }
+        let suffix = self.peek();
+        if suffix == 42 {
+            self.take();
+            let state = self.state(SPLIT, 0, atom.start, -1);
+            self.patch(atom.out_head, state);
+            let after = self.peek();
+            if after == 42 || after == 43 || after == 63 || after == 123 { self.failed = true; }
+            return Fragment::new(state, state * 2 + 1);
+        } else if suffix == 43 {
+            self.take();
+            let state = self.state(SPLIT, 0, atom.start, -1);
+            self.patch(atom.out_head, state);
+            let after = self.peek();
+            if after == 42 || after == 43 || after == 63 || after == 123 { self.failed = true; }
+            return Fragment::new(atom.start, state * 2 + 1);
+        } else if suffix == 63 {
+            self.take();
+            let state = self.state(SPLIT, 0, atom.start, -1);
+            let after = self.peek();
+            if after == 42 || after == 43 || after == 63 || after == 123 { self.failed = true; }
+            return Fragment::new(state, self.join(atom.out_head, state * 2 + 1));
+        }
+        return atom;
+    }
+
+    fn escaped_kind(self: &Parser, value: i64) -> i64 {
+        if value == 100 { return 1; } // digit
+        if value == 68 { return 2; }
+        if value == 119 { return 3; } // word
+        if value == 87 { return 4; }
+        if value == 115 { return 5; } // space
+        if value == 83 { return 6; }
+        return 0;
+    }
+
+    fn class_add_kind(self: &mut Parser, base: i64, kind: i64) -> () {
+        let mut value: i64 = 0;
+        while value < 256 {
+            let digit = value >= 48 && value <= 57;
+            let word = digit || (value >= 65 && value <= 90) || (value >= 97 && value <= 122) || value == 95;
+            let space = value == 32 || value == 9 || value == 10 || value == 13 || value == 12 || value == 11;
+            let yes = if kind == 1 { digit } else if kind == 2 { !digit } else if kind == 3 { word } else if kind == 4 { !word } else if kind == 5 { space } else { !space };
+            if yes { self.classes.set(base + value, 1); }
+            value += 1;
+        }
+        return;
+    }
+
+    fn character_class(self: &mut Parser) -> Fragment {
+        self.take();
+        let negate = if self.peek() == 94 { self.take(); true } else { false };
+        let base = self.classes.count();
+        let mut fill: i64 = 0;
+        while fill < 256 { self.classes.push(0); fill += 1; }
+        let mut any = false;
+        while !self.failed && self.peek() >= 0 && self.peek() != 93 {
+            let mut left = self.take();
+            let mut special: i64 = 0;
+            if left == 92 {
+                if self.peek() < 0 { self.failed = true; break; }
+                left = self.take(); special = self.escaped_kind(left);
+                if special == 0 && !(left == 92 || left == 93 || left == 45 || left == 94) { self.failed = true; break; }
+            }
+            if special != 0 { self.class_add_kind(base, special); any = true; }
+            else if self.peek() == 45 && self.position + 1 < self.length && byte_at(self.pattern, self.position + 1) != 93 {
+                self.take();
+                let mut right = self.take();
+                if right == 92 {
+                    if self.peek() < 0 { self.failed = true; break; }
+                    right = self.take();
+                    if self.escaped_kind(right) != 0 { self.failed = true; break; }
+                }
+                if right < left { self.failed = true; break; }
+                let mut value = left;
+                while value <= right { self.classes.set(base + value, 1); value += 1; }
+                any = true;
+            } else { self.classes.set(base + left, 1); any = true; }
+        }
+        if self.peek() != 93 || !any { self.failed = true; }
+        else { self.take(); }
+        if negate {
+            let mut value: i64 = 0;
+            while value < 256 {
+                let toggled = if self.classes.get(base + value) == 0 { 1 } else { 0 };
+                self.classes.set(base + value, toggled);
+                value += 1;
+            }
+        }
+        let state = self.state(CLASS, base, -1, -1);
+        return Fragment::new(state, state * 2);
+    }
+
+    fn atom(self: &mut Parser) -> Fragment {
+        let value = self.peek();
+        if value < 0 || value == 41 || value == 124 || value == 42 || value == 43 || value == 63 || value == 123 {
+            self.failed = true; return self.empty();
+        }
+        if value == 40 {
+            self.take(); self.depth += 1;
+            if self.depth > 128 { self.failed = true; }
+            let result = self.expression();
+            if self.peek() != 41 { self.failed = true; } else { self.take(); }
+            self.depth -= 1;
+            return result;
+        }
+        if value == 91 { return self.character_class(); }
+        self.take();
+        if value == 46 { let state = self.state(ANY, 0, -1, -1); return Fragment::new(state, state * 2); }
+        if value == 94 { let state = self.state(BEGIN, 0, -1, -1); return Fragment::new(state, state * 2); }
+        if value == 36 { let state = self.state(END, 0, -1, -1); return Fragment::new(state, state * 2); }
+        let mut literal = value;
+        if value == 92 {
+            if self.peek() < 0 { self.failed = true; return self.empty(); }
+            literal = self.take();
+            let kind = self.escaped_kind(literal);
+            if kind != 0 {
+                let base = self.classes.count(); let mut fill: i64 = 0;
+                while fill < 256 { self.classes.push(0); fill += 1; }
+                self.class_add_kind(base, kind);
+                let state = self.state(CLASS, base, -1, -1);
+                return Fragment::new(state, state * 2);
+            }
+            if literal == 116 { literal = 9; }
+            else if literal == 114 { literal = 13; }
+            else if literal == 110 { literal = 10; }
+            else if literal == 102 { literal = 12; }
+            else if literal == 118 { literal = 11; }
+            else if !(literal == 46 || literal == 42 || literal == 43 || literal == 63 || literal == 40 || literal == 41 || literal == 91 || literal == 93 || literal == 123 || literal == 125 || literal == 94 || literal == 36 || literal == 124 || literal == 92) { self.failed = true; }
+        }
+        let state = self.state(BYTE, literal, -1, -1);
+        return Fragment::new(state, state * 2);
+    }
+}
+
+fn add_state(regex: &Regex, list: &mut Vec<i64>, seen: &mut Vec<i64>, generation: i64, state: i64, position: u64, length: u64) -> () {
+    if state < 0 || seen.get(state) == generation { return; }
+    seen.set(state, generation);
+    let kind = regex.kinds.get(state);
+    if kind == SPLIT {
+        add_state(regex, list, seen, generation, regex.first.get(state), position, length);
+        add_state(regex, list, seen, generation, regex.second.get(state), position, length);
+    } else if kind == BEGIN {
+        if position == 0 { add_state(regex, list, seen, generation, regex.first.get(state), position, length); }
+    } else if kind == END {
+        if position == length { add_state(regex, list, seen, generation, regex.first.get(state), position, length); }
+    } else { list.push(state); }
+    return;
+}
+
+impl Regex {
+    fn match_from(self: &Regex, text: str, start: u64) -> Option<u64> {
+        let length = core::text_size(text);
+        let mut seen = Vec::new::<i64>();
+        let mut fill: i64 = 0;
+        while fill < self.kinds.count() { seen.push(0); fill += 1; }
+        let mut generation: i64 = 1;
+        let mut states = Vec::new::<i64>();
+        add_state(self, &mut states, &mut seen, generation, self.start_state, start, length);
+        let mut level_start: i64 = 0;
+        let mut level_end: i64 = states.count();
+        let mut position = start;
+        let mut found = false;
+        let mut best = start;
+        while true {
+            let mut index: i64 = level_start;
+            while index < level_end {
+                if self.kinds.get(states.get(index)) == ACCEPT { found = true; best = position; }
+                index += 1;
+            }
+            if position >= length { break; }
+            let byte = byte_at(text, position);
+            generation += 1;
+            index = level_start;
+            while index < level_end {
+                let state = states.get(index); let kind = self.kinds.get(state);
+                let matches = if kind == BYTE { self.values.get(state) == byte } else if kind == ANY { byte != 10 } else if kind == CLASS { self.classes.get(self.values.get(state) + byte) != 0 } else { false };
+                if matches { add_state(self, &mut states, &mut seen, generation, self.first.get(state), position + 1, length); }
+                index += 1;
+            }
+            level_start = level_end; level_end = states.count(); position += 1;
+            if level_start == level_end { break; }
+        }
+        if found { return Some(best); }
+        return None;
+    }
+
+    fn find(self: &Regex, text: str) -> Option<Match> {
+        let length = core::text_size(text); let mut start: u64 = 0;
+        while start <= length {
+            match self.match_from(text, start) {
+                Some(end) => { return Some(new Match { start: start, end: end }); }
+                None => {}
+            }
+            start += 1;
+        }
+        return None;
+    }
+
+    fn is_match(self: &Regex, text: str) -> bool {
+        match self.find(text) { Some(value) => { return true; } None => { return false; } }
+    }
+
+    fn full_match(self: &Regex, text: str) -> bool {
+        match self.match_from(text, 0) {
+            Some(end) => { return end == core::text_size(text); }
+            None => { return false; }
+        }
+    }
+}
+
+pub fn compile(pattern: str) -> Result<Regex,RegexError> {
+    if core::text_size(pattern) > 8192 { return Err(RegexError::new("regular expression is too large")); }
+    let mut parser = Parser::new(pattern);
+    let fragment = parser.expression();
+    if parser.position != parser.length || parser.depth != 0 { parser.failed = true; }
+    if parser.failed { return Err(RegexError::new("invalid regular expression")); }
+    let accept = parser.state(ACCEPT, 0, -1, -1);
+    parser.patch(fragment.out_head, accept);
+    return Ok(new Regex {
+        kinds: parser.kinds, 
+        values: parser.values,
+        first: parser.first, 
+        second: parser.second,
+        classes: parser.classes, 
+        start_state: fragment.start
+    });
+}

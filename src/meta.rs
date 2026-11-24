@@ -278,7 +278,7 @@ impl Registry {
     fn verify_attributes(&self, attrs: &[Attribute], target: &str, owner: &str, shape: Shape<'_>) -> Result<(), String> {
         let mut seen = HashSet::new();
         for a in attrs {
-            if a.name.starts_with("__nova_return::") { continue; }
+            if a.name.starts_with("__nova_return::") || a.name=="__nova_generated_by" { continue; }
             let short_name=a.name.rsplit("::").next().unwrap_or(&a.name);
             if !seen.insert(a.name.as_str()) {
                 // A type may have both `with Trait` and explicit capabilities

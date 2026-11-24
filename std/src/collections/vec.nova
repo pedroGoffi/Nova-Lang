@@ -13,7 +13,9 @@ pub class Vec<T> : Storage<T> { length: Size }
 
 impl<T> Vec<T> {
     static fn new() -> Self {
-        return new Vec<T> { length: 0 };
+        return new Vec<T> {
+            length: 0
+        };
     }
     fn len(self: &Vec<T>) -> Size { return self.length; }
     fn count(self: &Vec<T>) -> i64 { return self.length as i64; }
@@ -22,7 +24,7 @@ impl<T> Vec<T> {
         unsafe { self.grow(requested); }
         return;
     }
-    fn push(self: &Vec<T>, value: T) -> () {
+    fn push(self: &mut Vec<T>, value: T) -> () {
         unsafe {
             let max: Size = -1 as Size;
             if self.length == max { panic::fail("vector length overflow"); }
@@ -81,7 +83,7 @@ impl<T> Vec<T> {
             return removed;
         }
     }
-    fn clear(self: &Vec<T>) -> () {
+    fn clear(self: &mut Vec<T>) -> () {
         unsafe {
             while self.length > 0 {
                 self.length -= 1;
@@ -91,7 +93,7 @@ impl<T> Vec<T> {
         }
         return;
     }
-    fn drop(self: Vec<T>) -> () {
+    fn release(self: &mut Vec<T>) -> () {
         self.clear();
         unsafe { raw::deallocate_bytes(self.data as (*mut u8)); }
         return;

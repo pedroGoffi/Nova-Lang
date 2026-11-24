@@ -24,6 +24,19 @@ Item: Item = {
     UnpublishedItem,
 };
 UnpublishedItem: Item = {
+    // Typed annotations are compile-time schemas. They reuse Struct/Field in
+    // the source AST and are consumed before semantic lowering.
+    "annotation" <name:Ident> "(" <params:Comma<Param>> ")" <targets:("on" <Comma<AnnotationTarget>>)?> ";"
+        => Item::Struct(Struct {
+            name, generics:vec![], concept_bounds:vec![],
+            fields:params.into_iter().map(|p| Field {
+                name:p.name, ty:p.ty, default:p.default, attributes:p.attributes
+            }).collect(),
+            attributes:vec![Attribute {
+                name:"__nova_annotation".into(), args:targets.unwrap_or_default()
+            }],
+            is_class:false, parent:None
+        }),
     <attributes:Attribute*> <s:StructDef> => {
         let mut flags=s.attributes.clone();flags.extend(attributes);
         Item::Struct(Struct { attributes:flags, ..s })
@@ -80,6 +93,13 @@ UnpublishedItem: Item = {
     "use" <name:Ident> "=" <target:Type> ";"
         => Item::TypeAlias(TypeAlias {name, target}),
     "use" <at:@L> <path:UsePath> ";" => Item::Use {path,at},
+};
+AnnotationTarget: String = {
+    "struct" => "struct".into(),
+    "class" => "class".into(),
+    "trait" => "trait".into(),
+    "enum" => "enum".into(),
+    Ident,
 };
 
 // Traits carry their operator binding in source rather than in the Rust
@@ -168,6 +188,7 @@ AttributeName: String = {
 MetaAttributeArgument: String = {
     "async" => "async".into(),
     "struct" => "struct".into(),
+    "class" => "class".into(),
     "enum" => "enum".into(),
     "trait" => "trait".into(),
     "fn" => "function".into(),
@@ -610,6 +631,10 @@ ElseBlock: Vec<Stmt> = {
         => vec![Stmt::If { condition, then_body, else_body }],
 };
 Stmt: Stmt = {
+    // Quasiquote splice. The processor removes this marker before ordinary
+    // semantic analysis.
+    "$" "{" <name:Ident> "}" => Stmt::Expr(Expr::Call(
+        "__nova_meta_splice".into(), vec![Expr::Var(name)])),
     // Repeated statement fragments are represented as internal AST nodes
     // and eliminated by the macro expander before semantic analysis.
     "$" "(" <body:Stmt*> ")" "*" => Stmt::If {
@@ -940,6 +965,16 @@ CascadeAssignmentRest: Vec<(String, Option<BinaryOp>, Expr)> = {
     }
 };
 Atom: Expr = {
+    // A quoted named member keeps its declaration shape. Unlike an anonymous
+    // lambda, callers can add it directly to a type without mutating `name`.
+    "quote" "fn" <name:FunctionName> "(" <params:Comma<Param>> ")" "->" <result:Type> <body:Block>
+        => Expr::Call("__nova_meta_quote_function".into(), vec![
+            Expr::Str(format!("\"{name}\"")), Expr::Lambda {params,result,body}
+        ]),
+    // Typed statement quasiquote, represented internally as an AST marker
+    // until procedural expansion.
+    "quote" <body:Block> => Expr::Call(
+        "__nova_meta_quote".into(), vec![Expr::Block(body)]),
     // Kotlin-style top-level receiver scope. The postfix spelling
     // `value.with { ... }` is also accepted below in PostfixExpr.
     "with" "(" <base:Expr> ")" <body:Block>
@@ -1060,6 +1095,9 @@ MemberIdent: String = {
     // sync(a) as guard { ... } and a call followed by an `as` cast.
     "sync" => "sync".into(),
     "scope" => "scope".into(),
+    // Meta nodes expose `node.as::<Type>()`; `as` remains the cast keyword in
+    // ordinary expression position and is contextual after a dot.
+    "as" => "as".into(),
     "new" => "new".into(),
     "next" => "next".into(),
     "finished" => "finished".into(),
@@ -1068,12 +1106,22 @@ MemberIdent: String = {
     "spawn" => "spawn".into(),
     "dispose" => "dispose".into(),
     "coro" => "coro".into(),
+    // `quote { ... }` starts a meta quasiquote, while `quote` remains a valid
+    // function/member name such as serialization::json::quote.
+    "quote" => "quote".into(),
     // `replace` is also a statement keyword, but remains valid as a method
     // name (for example `Guard<T>::replace(value)`).
     "replace" => "replace".into(),
 };
 Ident: String = {
     <s:r"[a-zA-Z_][a-zA-Z0-9_]*"> => s.to_string(),
+    // Contextual metaprogramming keywords remain available as ordinary names
+    // outside their declaration positions (the existing std meta API uses an
+    // `annotation` parameter extensively).
+    "annotation" => "annotation".to_string(),
+    "on" => "on".to_string(),
+    "function" => "function".to_string(),
+    "field" => "field".to_string(),
     // `out` remains a contextual keyword: existing STD and self-host code
     // legitimately use it as a parameter/local name (`fn append(out: u64)`).
     "out" => "out".to_string(),

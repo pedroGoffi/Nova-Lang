@@ -1,0 +1,31 @@
+use std::introspection::meta::Type;
+
+pub annotation Debug(
+    name: str = "",
+    pretty: bool = false
+) on struct, class;
+
+#[processor(Debug)]
+fn add_debug(target: &mut Type, debug: Debug) -> () {
+    let body = quote {
+        let mut formatter = std::text::format::Formatter::debug_struct("${target.name}");
+    };
+
+    for field in target.fields {
+        body.append(quote {
+            formatter.field(
+                "${field.name}",
+                &self[field.name]
+            );
+        });
+    }
+
+    body.append(quote {
+        return formatter.finish();
+    });
+
+    target.members.add(quote fn to_debug_string(self: &Self) -> std::text::string::String {
+        ${body}
+    });
+}
+

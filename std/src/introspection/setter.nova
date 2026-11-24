@@ -1,0 +1,25 @@
+import std;
+
+use std::introspection::meta::Type;
+
+pub annotation Setters (
+
+) on struct, class;
+
+#[processor(Setters)]
+fn add_setter(
+    target: &mut Type,
+    annotation: Setters
+) -> () 
+{
+    for field in target.fields 
+    {
+        let setter = quote fn set(self: &mut Self, value: ()) -> () {};
+        setter.name = format!("set_${field.name}");
+        setter.parameters["value"] = field.type;
+
+        setter.body.wrap(quote { self[field.name] = value; });
+
+        target.members.add(setter);
+    }
+}

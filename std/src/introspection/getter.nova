@@ -1,0 +1,22 @@
+use std::introspection::meta::Type;
+
+pub annotation Getters() on struct, class;
+
+#[processor(Getters)]
+fn add_getters(
+    target: &mut Type, 
+    annotation: Getters
+) -> ()
+{
+    for field in target.fields
+    {
+        let getter = quote fn get(self: Self) -> () {};
+        
+        getter.name = format!("get_${field.name}");
+        getter.result = field.type;
+        getter.body.wrap(quote { return self[field.name]; });
+
+        target.members.add(getter);
+    }
+}
+

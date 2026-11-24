@@ -7,13 +7,22 @@ use std::error::result::Result;
 
 // Base class for typed owning collections. Vec, String and future sequences
 // inherit the allocation and capacity state instead of duplicating it.
-pub class Storage<T> { data: *mut T, capacity: Size }
+fn alloc_init<T>() -> *mut T {
+    unsafe {
+        return raw::alloc_elements::<T>(0);
+    }
+}
+pub class Storage<T> {
+    data: *mut T = alloc_init::<T>(),
+    capacity: Size
+}
 
 impl<T> Storage<T> {
     static fn new() -> Self {
         unsafe {
             return new Storage<T> {
-                data: raw::alloc_elements::<T>(0), capacity: 0
+                data: raw::alloc_elements::<T>(0),
+                capacity: 0
             };
         }
     }
