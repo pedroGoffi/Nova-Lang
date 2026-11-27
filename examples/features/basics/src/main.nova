@@ -1,24 +1,48 @@
 import std;
-use std::io;
-use std::io::reader::Reader;
+use std::concurrency::atomic::AtomicBool;
+use std::concurrency::atomic::AtomicI64;
+use std::concurrency::atomic::AtomicU32;
+use std::concurrency::atomic::Atomic;
+use std::concurrency::atomic::MemoryOrdering;
+use std::concurrency::mutex::Mutex;
 
-fn format_user_prompt(read: std::text::string::String) -> std::text::string::String {
-    format!("Hello, {:?} you are using NOVA", read)
+fn increment(value: &mut i64) -> i64
+{
+    *value = *value + 1;
+    return *value;
 }
 
-fn display_new_user_prompt(read: std::text::string::String) -> () {
-    io::stdout().write_line(read.as_str());
-}
+fn main() -> i32
+{
+    let flag = AtomicBool::new(false);
+    flag.store(true, MemoryOrdering::Release);
+    if !flag.load(MemoryOrdering::Acquire) { return 1; }
 
-fn read_stdin(reader: Reader, prompt: str) -> std::text::string::String {
-    reader.prompt_read_string(prompt)
-}
-fn main() -> i32 {            
-    io::stdin()        
-        |> read_stdin("What's your name? ")
-        |> format_user_prompt
-        |> display_new_user_prompt
-        ;
-        
-    0
+    let acquired = flag.compare_exchange(
+        true,
+        false,
+        MemoryOrdering::AcqRel,
+        MemoryOrdering::Acquire
+    );
+    if !acquired { return 2; }
+
+    let counter = AtomicI64::new(40);
+    counter.store(41, MemoryOrdering::Relaxed);
+    let old = counter.swap(42, MemoryOrdering::SeqCst);
+    if old != 41 || counter.load(MemoryOrdering::SeqCst) != 42 { return 3; }
+
+    let sequence = AtomicU32::new(7);
+    if !sequence.compare_exchange(
+        7, 8, MemoryOrdering::SeqCst, MemoryOrdering::Acquire
+    ) { return 4; }
+
+    let generic = Atomic::new::<i64>(10);
+    let result = generic.with_lock(increment);
+    if result != 11 { return 5; }
+
+    let mutex = Mutex::new::<i64>(20);
+    let mutex_result = mutex.with_lock(increment);
+    if mutex_result != 21 { return 6; }
+
+    return 0;
 }

@@ -364,6 +364,157 @@ fn class_inline_defer_and_scope_unwind_lower_to_mir() {
     );
 }
 
+
+#[test]
+fn custom_drop_runs_before_fields_and_fields_are_registered_in_reverse_drop_order() {
+    use crate::hir::{ExprKind, Stmt};
+
+    let src = r#"
+        extern fn mark(value: i32) -> ();
+        class Resource { id: i32 }
+        impl Resource {
+            fn drop(self: Resource) -> () {
+                mark(2);
+                return;
+            }
+        }
+        class Container {
+            first: Resource,
+            second: Resource,
+        }
+        impl Container {
+            fn drop(self: Container) -> () {
+                mark(1);
+                return;
+            }
+        }
+        fn main() -> i32 {
+            let value = new Container {
+                first: new Resource { id: 10 },
+                second: new Resource { id: 20 },
+            };
+            return 0;
+        }
+    "#;
+
+    let ast = parse_source(src);
+    let surface = crate::surface::lower(&ast).unwrap();
+    let hir = crate::hir::lower(&surface).unwrap();
+    let drop_fn = hir.functions.iter().find(|f| f.name == "Container__drop")
+        .expect("container destructor must be lowered");
+
+    // The custom destructor body must execute before member cleanup. The
+    // generated field cleanups are registered in declaration order because
+    // defer executes in LIFO order, yielding second then first at runtime.
+    let registrations = drop_fn.body.iter().take_while(|stmt| matches!(stmt, Stmt::Defer { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(registrations.len(), 2, "both owning fields need cleanup");
+    let field_indices = registrations.iter().map(|stmt| {
+        let Stmt::Defer { expr, .. } = stmt else { unreachable!() };
+        let ExprKind::Call(_, args) = &expr.kind else { panic!("field cleanup must call Resource::drop") };
+        let ExprKind::Field(_, index) = &args[0].kind else { panic!("cleanup must target a field") };
+        *index
+    }).collect::<Vec<_>>();
+    assert_eq!(field_indices, vec![0, 1],
+        "LIFO cleanup registration must destroy field 1 before field 0");
+
+    // The user-authored body follows the cleanup registrations. MIR executes
+    // it first, then unwinds the registered field cleanups on return.
+    assert!(matches!(drop_fn.body.get(2), Some(Stmt::Expr(_))));
+    let mir = crate::mir::lower(&hir).unwrap();
+    assert!(mir.functions.iter().any(|f| f.name == "Container__drop"));
+}
+
+#[test]
+fn partial_move_of_owning_struct_field_uses_independent_drop_flags() {
+    use crate::hir::{Expr, ExprKind, Stmt};
+    let src = r#"
+        class Resource { id: i32 }
+        impl Resource { fn drop(self: Resource) -> () { return; } }
+        struct Pair { left: Resource, right: Resource }
+        fn consume(value: Resource) -> () { return; }
+        fn main() -> i32 {
+            let pair = new Pair {
+                left: new Resource { id: 1 },
+                right: new Resource { id: 2 },
+            };
+            consume(pair.left);
+            return 0;
+        }
+    "#;
+    let ast = parse_source(src);
+    let surface = crate::surface::lower(&ast).unwrap();
+    let typed = crate::hir::lower(&surface).expect("moving one owning field must preserve its siblings");
+    let main = typed.functions.iter().find(|f| f.name == "main").unwrap();
+    assert!(main.body.iter().any(|stmt| matches!(stmt, Stmt::Expr(Expr { kind: ExprKind::Call(_, args), .. }) if args.iter().any(|arg| matches!(&arg.kind, ExprKind::MoveField { .. })))));
+    let mir = crate::mir::lower(&typed).expect("field moves must lower to MIR");
+    let main_mir = mir.functions.iter().find(|f| f.name == "main").unwrap();
+    assert!(main_mir.blocks.iter().any(|block| matches!(block.terminator.as_ref(), Some(crate::mir::Terminator::Branch { .. }))),
+        "remaining field cleanup must be guarded by its independent drop flag");
+    assert!(crate::codegen::generate(&mir).contains("Resource__drop"));
+}
+
+#[test]
+fn use_after_partial_field_move_is_rejected() {
+    let src = r#"
+        class Resource { id: i32 }
+        impl Resource { fn drop(self: Resource) -> () { return; } }
+        struct Pair { left: Resource, right: Resource }
+        fn consume(value: Resource) -> () { return; }
+        fn main() -> i32 {
+            let pair = new Pair { left: new Resource { id: 1 }, right: new Resource { id: 2 } };
+            consume(pair.left);
+            let again = pair.left;
+            return 0;
+        }
+    "#;
+    let ast = parse_source(src);
+    let surface = crate::surface::lower(&ast).unwrap();
+    let error = crate::hir::lower(&surface).unwrap_err();
+    assert!(error.contains("use of moved field 'pair.left'"), "{error}");
+}
+
+#[test]
+fn whole_struct_cannot_move_after_a_partial_field_move() {
+    let src = r#"
+        class Resource { id: i32 }
+        impl Resource { fn drop(self: Resource) -> () { return; } }
+        struct Pair { left: Resource, right: Resource }
+        fn consume(value: Resource) -> () { return; }
+        fn consume_pair(value: Pair) -> () { return; }
+        fn main() -> i32 {
+            let pair = new Pair { left: new Resource { id: 1 }, right: new Resource { id: 2 } };
+            consume(pair.left);
+            consume_pair(pair);
+            return 0;
+        }
+    "#;
+    let ast = parse_source(src);
+    let surface = crate::surface::lower(&ast).unwrap();
+    let error = crate::hir::lower(&surface).unwrap_err();
+    assert!(error.contains("cannot move 'pair' because one or more fields have already been moved"), "{error}");
+}
+
+#[test]
+fn partial_move_from_custom_drop_type_is_rejected() {
+    let src = r#"
+        class Resource { id: i32 }
+        impl Resource { fn drop(self: Resource) -> () { return; } }
+        struct Pair { left: Resource, right: Resource }
+        impl Pair { fn drop(self: Pair) -> () { return; } }
+        fn consume(value: Resource) -> () { return; }
+        fn main() -> i32 {
+            let pair = new Pair { left: new Resource { id: 1 }, right: new Resource { id: 2 } };
+            consume(pair.left);
+            return 0;
+        }
+    "#;
+    let ast = parse_source(src);
+    let surface = crate::surface::lower(&ast).unwrap();
+    let error = crate::hir::lower(&surface).unwrap_err();
+    assert!(error.contains("custom destructor"), "{error}");
+}
+
 #[test]
 fn typed_builder_and_string_parse() {
     parses(
@@ -615,6 +766,33 @@ fn implicit_numeric_widening_is_lossless_and_emitted_in_llvm() {
     let ir = crate::codegen::generate(&mir);
     assert!(ir.contains("sext i32") && ir.contains("sitofp i32"));
     assert!(ir.contains("zext i8"));
+}
+
+#[test]
+fn equal_width_primitive_aliases_coerce_implicitly() {
+    let source = r#"
+        fn take_u64(value: u64) -> u64 { return value; }
+        fn take_i64(value: i64) -> i64 { return value; }
+        fn main() -> i32 {
+            let native_size: usize = 42;
+            let portable_size: u64 = native_size;
+            let through_call: u64 = take_u64(native_size);
+            let native_signed: isize = 7;
+            let portable_signed: i64 = take_i64(native_signed);
+            if portable_size != 42 as u64 { return 1; }
+            if through_call != 42 as u64 { return 2; }
+            if portable_signed != 7 as i64 { return 3; }
+            return 0;
+        }
+    "#;
+    let ast = parse_source(source);
+    let surface = crate::surface::lower(&ast)
+        .expect("same-representation primitive types should coerce implicitly");
+    let typed = crate::hir::lower(&surface).expect("implicit alias casts must typecheck");
+    let mir = crate::mir::lower(&typed).expect("implicit alias casts must verify");
+    let ir = crate::codegen::generate(&mir);
+    // Same-width signedness-preserving conversions are representation no-ops.
+    assert!(!ir.contains("trunc i64"));
 }
 
 #[test]
@@ -1431,4 +1609,20 @@ fn static_constructor_syntax_and_template_bounds_parse() {
         crate::ast::Item::Impl(block)=>Some(&block.methods), _=>None,
     }).unwrap();
     assert!(methods.iter().any(|m|m.name=="new" && m.attributes.iter().any(|a|a.name=="static")));
+}
+
+#[test]
+fn impl_methods_accept_pub_visibility() {
+    let program = parse_source(r#"
+        struct Api {}
+        impl Api {
+            pub fn open(self: &Self) -> i32 { return 1; }
+            fn internal(self: &Self) -> i32 { return 0; }
+        }
+    "#);
+    let crate::ast::Item::Impl(block) = &program.items[1] else {
+        panic!("expected impl block");
+    };
+    assert!(block.methods[0].attributes.iter().any(|a| a.name == "__public"));
+    assert!(!block.methods[1].attributes.iter().any(|a| a.name == "__public"));
 }

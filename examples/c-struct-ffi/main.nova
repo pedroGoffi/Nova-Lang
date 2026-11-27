@@ -1,0 +1,18 @@
+#[repr(C)]
+struct Point {
+    x: i32,
+    y: f64
+}
+
+[[unsafe]] extern fn c_point_scale(point: *mut Point, factor: f64) -> ();
+
+fn main() -> i32 {
+    let mut point = new Point { x: 4, y: 2.0 };
+
+    unsafe {
+        let raw: *mut Point = &mut point;
+        c_point_scale(raw, 2.0);
+    }
+
+    return point.x - 8;
+}

@@ -1,7 +1,10 @@
 use std::error::error::Error;
 use std::core::control::Fallible;
 
-pub enum Result<T,E> { Ok(T), Err(E) }
+pub enum Result<T,E> {
+    Ok(T),
+    Err(E)
+}
 
 impl<T,E> Result<T,E> {
     fn is_ok(self: Result<T,E>) -> bool {

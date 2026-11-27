@@ -8,7 +8,7 @@ pub class Set<T> { values: Vec<T> }
 
 impl<T> Set<T> {
     static fn new() -> Self {
-        return new Set<T> { values: Vec::new() };
+        return new Set<T> { values: Vec::new::<V>() };
     }
     fn len(self: &Set<T>) -> Size { return self.values.len(); }
     fn is_empty(self: &Set<T>) -> bool { return self.values.is_empty(); }

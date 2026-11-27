@@ -1,3 +1,7 @@
+pub concept Integer<T> = numeric<T>;
+impl<T: Integer> T {
+    fn i64(self: &Self) -> i64 { self as i64 }
+}
 // Methods shared by Nova signed integer values.
 impl i64 {
     fn abs(self: i64) -> i64 {

@@ -9,4 +9,4 @@ pub mod utf8;
 pub mod format;
 pub mod encoding;
 pub mod unicode;
-pub mod regex;
+pub mod cstr;

@@ -8,7 +8,7 @@ pub class Deque<T> { values: Vec<T> }
 
 impl<T> Deque<T> {
     static fn new() -> Self {
-        return new Deque<T> { values: Vec::new() };
+        return new Deque<T> { values: Vec::new::<V>() };
     }
     fn len(self: &Deque<T>) -> Size { return self.values.len(); }
     fn is_empty(self: &Deque<T>) -> bool { return self.values.is_empty(); }

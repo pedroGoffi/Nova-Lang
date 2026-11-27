@@ -80,7 +80,7 @@ pub enum Operand {
     Int(i128, TypeId),
     Float(f64, TypeId),
     Bool(bool),
-    Str(String),
+    Str(String, TypeId),
     Unit,
     Zero(TypeId),
 }
@@ -113,6 +113,8 @@ struct Builder {
     /// Fixed-array owner slots get independent flags. A moved slot is skipped
     /// while sibling elements still receive their destructor calls.
     slot_drop_flags: std::collections::HashMap<(LocalId, usize), LocalId>,
+    /// Owning struct fields have independent initialization flags.
+    field_drop_flags: std::collections::HashMap<(LocalId, usize), LocalId>,
 }
 impl Builder {
     fn new(f: &hir::Function, types: &Types) -> Self {
@@ -132,6 +134,7 @@ impl Builder {
             cleanups: Vec::new(),
             drop_flags: std::collections::HashMap::new(),
             slot_drop_flags: std::collections::HashMap::new(),
+            field_drop_flags: std::collections::HashMap::new(),
         }
     }
     fn new_block(&mut self) -> BlockId {
@@ -173,7 +176,7 @@ impl Builder {
             ExprKind::Int(n) => Operand::Int(*n, e.ty),
             ExprKind::Float(n) => Operand::Float(*n, e.ty),
             ExprKind::Bool(b) => Operand::Bool(*b),
-            ExprKind::Str(s) => Operand::Str(s.clone()),
+            ExprKind::Str(s) => Operand::Str(s.clone(), e.ty),
             ExprKind::Unit => Operand::Unit,
             ExprKind::If { condition, then_body, else_body, result } => {
                 let cond = self.expression(condition);
@@ -202,6 +205,16 @@ impl Builder {
                 let snapshot = self.temp(e.ty);
                 self.assign(snapshot, Rvalue::Use(Operand::Local(*owner)));
                 if let Some(flag) = self.drop_flags.get(owner).copied() {
+                    self.assign(flag, Rvalue::Use(Operand::Bool(false)));
+                }
+                Operand::Local(snapshot)
+            }
+            ExprKind::MoveField { root, index } => {
+                // Snapshot the selected field before clearing its field-level
+                // flag. The aggregate remains initialized and owns its siblings.
+                let snapshot = self.temp(e.ty);
+                self.assign(snapshot, Rvalue::Field(Operand::Local(*root), *index));
+                if let Some(flag) = self.field_drop_flags.get(&(*root, *index)).copied() {
                     self.assign(flag, Rvalue::Use(Operand::Bool(false)));
                 }
                 Operand::Local(snapshot)
@@ -340,6 +353,37 @@ impl Builder {
                 }
                 Operand::Local(dst)
             }
+            ExprKind::DropStruct { root, fields } => {
+                for (index, drop_fn) in fields {
+                    let key = (*root, *index);
+                    let field_flag = self.field_drop_flags.get(&key).copied();
+                    if let Some(flag) = field_flag {
+                        let drop_block = self.new_block();
+                        let next_block = self.new_block();
+                        self.end(Terminator::Branch { condition: Operand::Local(flag), then_bb: drop_block, else_bb: next_block });
+                        self.current = drop_block;
+                        self.assign(flag, Rvalue::Use(Operand::Bool(false)));
+                        let field_ty = match self.types.kind(self.function.locals[*root]) {
+                            TypeKind::Struct(struct_id) => self.types.structs[struct_id].fields[*index].ty,
+                            _ => unreachable!("DropStruct root must be a struct"),
+                        };
+                        let field_value = self.temp(field_ty);
+                        self.assign(field_value, Rvalue::Field(Operand::Local(*root), *index));
+                        self.function.blocks[self.current].instructions.push(Instruction::Eval(Rvalue::Call(*drop_fn, vec![Operand::Local(field_value)])));
+                        self.end(Terminator::Goto(next_block));
+                        self.current = next_block;
+                    } else {
+                        let field_ty = match self.types.kind(self.function.locals[*root]) {
+                            TypeKind::Struct(struct_id) => self.types.structs[struct_id].fields[*index].ty,
+                            _ => unreachable!("DropStruct root must be a struct"),
+                        };
+                        let field_value = self.temp(field_ty);
+                        self.assign(field_value, Rvalue::Field(Operand::Local(*root), *index));
+                        self.function.blocks[self.current].instructions.push(Instruction::Eval(Rvalue::Call(*drop_fn, vec![Operand::Local(field_value)])));
+                    }
+                }
+                Operand::Unit
+            }
             ExprKind::DropArray { root, element, len, drop_fn } => {
                 for index in (0..*len).rev() {
                     if let Some(flag) = self.slot_drop_flags.get(&(*root, index)).copied() {
@@ -446,6 +490,20 @@ impl Builder {
                     if let Some(flag) = self.drop_flags.get(local).copied() {
                         self.assign(flag, Rvalue::Use(Operand::Bool(true)));
                     }
+                    // Reinitializing an owner restores every subobject's
+                    // initialized state, not just the aggregate root flag.
+                    let field_flags: Vec<LocalId> = self.field_drop_flags.iter()
+                        .filter_map(|((root, _), flag)| (*root == *local).then_some(*flag))
+                        .collect();
+                    for flag in field_flags {
+                        self.assign(flag, Rvalue::Use(Operand::Bool(true)));
+                    }
+                    let slot_flags: Vec<LocalId> = self.slot_drop_flags.iter()
+                        .filter_map(|((root, _), flag)| (*root == *local).then_some(*flag))
+                        .collect();
+                    for flag in slot_flags {
+                        self.assign(flag, Rvalue::Use(Operand::Bool(true)));
+                    }
                 }
                 Stmt::FieldSet {
                     root,
@@ -462,6 +520,9 @@ impl Builder {
                             index: *index,
                             value,
                         });
+                    if let Some(flag) = self.field_drop_flags.get(&(*root, *index)).copied() {
+                        self.assign(flag, Rvalue::Use(Operand::Bool(true)));
+                    }
                 }
                 Stmt::DerefSet { local, value } => {
                     let value = self.expression(value);
@@ -478,6 +539,13 @@ impl Builder {
                             let flag = self.temp(self.types.boolean());
                             self.assign(flag, Rvalue::Use(Operand::Bool(true)));
                             self.slot_drop_flags.insert((*owner, slot), flag);
+                        }
+                    }
+                    if let (Some(owner), ExprKind::DropStruct { fields, .. }) = (owner, &expr.kind) {
+                        for (index, _) in fields {
+                            let flag = self.temp(self.types.boolean());
+                            self.assign(flag, Rvalue::Use(Operand::Bool(true)));
+                            self.field_drop_flags.insert((*owner, *index), flag);
                         }
                     }
                     if let Some(owner) = owner {
@@ -649,7 +717,7 @@ pub fn operand_ty(op: &Operand, f: &Function, types: &Types) -> Result<TypeId, S
             .ok_or_else(|| format!("unknown local {id}")),
         Operand::Int(_, ty) | Operand::Float(_, ty) => Ok(*ty),
         Operand::Bool(_) => Ok(types.boolean()),
-        Operand::Str(_) => Ok(types.string()),
+        Operand::Str(_, ty) => Ok(*ty),
         Operand::Unit => Ok(types.unit()),
         Operand::Zero(ty) => Ok(*ty),
     }
@@ -711,8 +779,8 @@ pub fn rvalue_ty(rv: &Rvalue, f: &Function, p: &Program) -> Result<TypeId, Strin
             Err("array rvalue requires destination context".into())
         }
         Rvalue::Index(base, _) => match types.kind(operand_ty(base, f, types)?) {
-            TypeKind::Array { element, .. } => Ok(element),
-            _ => Err("indexing a non-array".into()),
+            TypeKind::Array { element, .. } | TypeKind::Pointer { element, .. } => Ok(element),
+            _ => Err("indexing a non-array or non-pointer".into()),
         },
         Rvalue::AddressOf(_) => Err("address-of requires destination pointer context".into()),
         Rvalue::DynObjectRef(_, _) => Err("dyn object construction requires destination context".into()),
@@ -760,10 +828,10 @@ fn place_type(place: &Place, f: &Function, types: &Types) -> Result<TypeId, Stri
                 if operand_ty(index, f, types)? != types.i32() {
                     return Err("array address index must be i32".into());
                 }
-                let TypeKind::Array { element, .. } = types.kind(current) else {
-                    return Err("indexed address on non-array".into());
-                };
-                element
+                match types.kind(current) {
+                    TypeKind::Array { element, .. } | TypeKind::Pointer { element, .. } => element,
+                    _ => return Err("indexed address requires an array or pointer".into()),
+                }
             }
         };
     }

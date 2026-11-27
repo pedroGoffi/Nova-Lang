@@ -1,0 +1,104 @@
+use std::text::string::String;
+use super::value::JsonValue;
+
+
+pub class JsonBuilder
+{
+    value: JsonValue
+}
+
+impl JsonBuilder
+{
+    static fn object() -> JsonBuilder
+    {
+        new JsonBuilder {
+            value: JsonValue::Object()
+        }
+    }
+
+    static fn array() -> JsonBuilder
+    {
+        new JsonBuilder {
+            value: JsonValue::Array()
+        }
+    }
+
+    static fn null() -> JsonBuilder
+    {
+        new JsonBuilder {
+            value: JsonValue::Null()
+        }
+    }
+
+    static fn integer(value: i64) -> JsonBuilder
+    {
+        new JsonBuilder {
+            value: JsonValue::Integer(value)
+        }
+    }
+
+    static fn string(value: String) -> JsonBuilder
+    {
+        new JsonBuilder {
+            value: JsonValue::String(value)
+        }
+    }
+
+    static fn boolean(value: bool) -> JsonBuilder
+    {
+        new JsonBuilder {
+            value: JsonValue::Boolean(value)
+        }
+    }
+
+
+
+    fn set(
+        self: &mut Self,
+        key: String,
+        value: JsonValue
+    ) -> &mut Self
+    {
+        match &mut self.value {
+            JsonValue::object(object) => {
+                object.insert(key, value);
+            },
+            _ => {
+                println!("Builder is not an object");
+            }
+        }
+
+        return self;
+    }
+
+    fn push(
+        self: &mut Self,
+        value: JsonValue
+    ) -> &mut Self
+    {
+        match &mut self.value {
+            JsonValue::array(array) => {
+                array.push(value);
+            },
+            _ => {
+                println!("Builder is not an array");
+            }
+        }
+
+        return self;
+    }
+
+    fn build(self: Self) -> JsonValue
+    {
+        self.value
+    }
+}
+
+impl JsonValue
+{
+    fn to_builder(self: Self) -> JsonBuilder {
+        new JsonBuilder {
+            value: self
+        }
+    }
+}

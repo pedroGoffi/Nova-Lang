@@ -1,0 +1,180 @@
+import std;
+use super::value;
+use std::text::string::String;
+use std::collections::vec::Vec;
+use std::collections::map::Map;
+use std::error::result::Result;
+
+pub enum JsonParserError
+{
+    BAD_STRING,
+    CONSUME_ERROR(*const u8),
+    INVALID_JSON
+}
+
+pub class JsonParser {
+    source: String,
+    curr: u64
+}
+
+impl JsonParser {
+    static fn new(source: *const u8) -> JsonParser {
+        new JsonParser {
+            source: String::from_cstr(source),
+            curr: 0
+        }
+    }
+}
+
+impl JsonParser {
+    fn skip_whitespace(self: &mut Self) -> ()
+    {
+        while !self.at_eof() && self.source.isspace_at(self.curr) {
+            self.advance();
+        }
+        return;
+    }
+
+    fn advance(self: &mut Self) -> char
+    {
+        if self.at_eof() {
+            return '\0';
+        }
+
+        let byte: char = self.source.byte_at(self.curr) as char;
+        self.curr += 1;
+
+        let byte_repr = String::from_char(byte);
+        println!("advance => {byte_repr}");
+        return byte;
+    }
+
+    fn advance_consume(self: &mut Self, expected: char, error: *const u8) throws JsonParserError -> ()
+    {
+        if self.current() != expected
+        {
+            throw JsonParserError::CONSUME_ERROR(error);
+        }
+        self.advance();
+        return Result::Ok(());
+    }
+
+    fn try_advance_consume(self: &mut Self, expected: char) -> bool
+    {
+        if self.current() != expected {
+            return false;
+        }
+
+        self.advance();
+        return true;
+    }
+
+    fn current(self: &mut Self) -> char
+    {
+        if self.at_eof() {
+            return '\0';
+        }
+
+        return self.source.byte_at(self.curr) as char;
+    }
+
+    fn at_eof(self: &Self) -> bool
+    {
+        self.curr >= self.source.len()
+    }
+
+    fn parse_array(self: &mut Self) throws JsonParserError -> value::JsonValue
+    {
+        auto mut output = Vec::new::<value::JsonValue>();
+
+        self.advance_consume('[', "Expected an opening bracket");
+        self.skip_whitespace();
+
+        if self.try_advance_consume(']') {
+            return Result::Ok(value::JsonValue::array(output));
+        }
+
+        while true {
+            self.skip_whitespace();
+
+            auto parsed_value = try self.parse();
+            output.push(parsed_value);
+
+            self.skip_whitespace();
+
+            if self.try_advance_consume(']') {
+                break;
+            }
+
+            self.advance_consume(',', "Expected comma between array elements");
+        }
+
+        return Result::Ok(value::JsonValue::array(output));
+    }
+
+    fn handle_string(self: &mut Self) throws JsonParserError -> String
+    {
+        self.advance_consume('"', "Expected opening quote for JSON string");
+        let start = self.curr;
+        while self.current() != '"' {
+            if self.at_eof() || self.current() == '\n' {
+                throw JsonParserError::BAD_STRING;
+            }
+            self.advance();
+        }
+        let end = self.curr;
+        self.advance_consume('"', "\"Expected closing quote for JSON string");
+        let content = self.source.substring(start, end - start);
+        return Ok(content);
+    }
+    fn parse_string(self: &mut Self) throws JsonParserError -> value::JsonValue
+    {
+        return Result::Ok(value::JsonValue::string(self.handle_string().expect("")));
+    }
+
+    fn parse_object(self: &mut Self) throws JsonParserError -> value::JsonValue
+    {
+        auto mut object = Map::new::<String, value::JsonValue>();
+
+        self.advance_consume('{', "Expected an opening brace");
+        self.skip_whitespace();
+
+        if self.try_advance_consume('}') {
+            return Result::Ok(value::JsonValue::object(object));
+        }
+
+        while true {
+            self.skip_whitespace();
+
+            let key = try self.handle_string();
+
+            self.skip_whitespace();
+            self.advance_consume(':', "Expected colon separator between key and value");
+
+            self.skip_whitespace();
+
+            auto parsed_value = try self.parse();
+            object.insert(key, parsed_value);
+
+            self.skip_whitespace();
+
+            if self.try_advance_consume('}') {
+                break;
+            }
+
+            self.advance_consume(',', "Expected comma between object entries");
+        }
+
+        return Result::Ok(value::JsonValue::object(object));
+    }
+
+    fn parse(self: &mut Self) throws JsonParserError -> value::JsonValue
+    {
+        self.skip_whitespace();
+        let c = self.current();
+        if c == '"'     { return Result::Ok(try self.parse_string());   }
+        if c == '['     { return Result::Ok(try self.parse_array());    }
+        if c == '{'     { return Result::Ok(try self.parse_object());   }
+        throw JsonParserError::INVALID_JSON;        
+    }
+}

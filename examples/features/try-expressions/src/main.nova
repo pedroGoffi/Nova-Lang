@@ -1,0 +1,41 @@
+use std::error::result::Result;
+
+enum FetchError { Missing, Blocked, Offline }
+
+fn fetch(value: i32) throws FetchError -> i32 {
+    if value == 0 { throw FetchError::Missing; }
+    if value < 0 { throw FetchError::Blocked; }
+    return Ok(value);
+}
+
+fn propagate(value: i32) throws FetchError -> i32 {
+    let loaded = try fetch(value);
+    let checked = try {
+        fetch(loaded + 1)
+    };
+    return Ok(checked + 1);
+}
+
+fn recover(value: i32) -> i32 {
+    let loaded = try {
+        fetch(value)
+    } catch {
+        FetchError::Missing => { 0 }
+        FetchError::Blocked => { -1 }
+        _ => { -2 }
+    };
+    return loaded;
+}
+
+fn recover_any(value: i32) -> i32 {
+    let loaded = try {
+        fetch(value)
+    } catch error {
+        0
+    };
+    return loaded;
+}
+
+fn main() -> i32 {
+    return recover(0);
+}

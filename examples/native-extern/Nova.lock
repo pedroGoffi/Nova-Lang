@@ -1,0 +1,4 @@
+# Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
+native_extern 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/native-extern hash=fd290582542d3c76
+std 0.20.0 builtin hash=e91bb9ced2d7a815
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/native-extern/src/main.nova hash=fd290582542d3c76

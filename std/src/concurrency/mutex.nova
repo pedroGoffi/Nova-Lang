@@ -1,8 +1,51 @@
-pub class Mutex<T> { value: T, locked: bool }
-impl<T> Mutex<T> {
-    static fn new(value: T) -> Self { return new Mutex<T> { value: value, locked: false }; }
-    fn is_locked(self: &Mutex<T>) -> bool { return self.locked; }
-    fn lock(self: &Mutex<T>) -> bool { if self.locked { return false; } self.locked = true; return true; }
-    fn unlock(self: &Mutex<T>) -> () { self.locked = false; return; }
-    fn get(self: &Mutex<T>) -> T { return self.value; }
+use std::concurrency::atomic::Atomic;
+
+// Mutex<T> currently uses a yielding spinlock backend. It provides mutual
+// exclusion, but it is not an OS-blocking pthread mutex.
+pub class Mutex<T> { inner: Atomic<T> }
+
+impl<T> Mutex<T>
+{
+    static fn new(value: T) -> Self
+    {
+        return new Mutex<T> { inner: Atomic::new::<T>(value) };
+    }
+
+    fn is_locked(self: &Mutex<T>) -> bool
+    {
+        return self.inner.is_locked();
+    }
+
+    fn try_lock(self: &Mutex<T>) -> bool
+    {
+        return self.inner.try_lock();
+    }
+
+    fn lock(self: &Mutex<T>) -> ()
+    {
+        self.inner.lock();
+        return;
+    }
+
+    fn unlock(self: &Mutex<T>) -> ()
+    {
+        self.inner.unlock();
+        return;
+    }
+
+    fn with_lock<R>(self: &Mutex<T>, callback: fn(&mut T) -> R) -> R
+    {
+        return self.inner.with_lock(callback);
+    }
+
+    // The caller must hold this mutex until it stops using the returned ref.
+    [[unsafe]] fn get_unchecked_mut(self: &Mutex<T>) -> &mut T
+    {
+        unsafe { return self.inner.get_unchecked_mut(); }
+    }
+
+    fn get_mut(self: &mut Mutex<T>) -> &mut T
+    {
+        return self.inner.get_mut();
+    }
 }

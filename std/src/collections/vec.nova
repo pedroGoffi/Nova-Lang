@@ -1,5 +1,7 @@
 use std::memory::storage::Storage;
 use std::memory::traits::Storable;
+use std::core::value::Eq;
+use std::core::value::Equatable;
 use std::memory::raw;
 use std::core::panic;
 use std::core::types::Size;
@@ -44,6 +46,16 @@ impl<T> Vec<T> {
             let slot: *mut T = raw::element_at::<T>(self.data, index as Size);
             return *slot;
         }
+    }
+    // Borrows an initialized element without copying its ownership.
+    // Use this for non-Copy values such as String and other owning records.
+    fn get_ref(self: &Vec<T>, index: i64) -> &T {
+        if index < 0 || index as Size >= self.length {
+            panic::fail("vector index out of bounds");
+        }
+        // The returned reference is a projection of `self`, so the compiler
+        // can tie its lifetime to the receiver instead of a local raw pointer.
+        return &self.data[index as i32];
     }
     fn at(self: &Vec<T>, index: i64) -> T { return self.get(index); }
     fn set(self: &Vec<T>, index: i64, value: T) -> () {
@@ -103,4 +115,19 @@ impl<T> Vec<T> {
 impl<T> Collection for Vec<T> {
     fn len(self: &Vec<T>) -> Size { return self.len(); }
     fn is_empty(self: &Vec<T>) -> bool { return self.is_empty(); }
+}
+
+// Equality is performed through a borrowed element. The element remains owned
+// by the Vec; no reference to its internal allocation escapes this method.
+impl<T: Equatable> Vec<T> {
+    fn equals_at(self: &Vec<T>, index: i64, value: &T) -> bool {
+        if index < 0 || index as Size >= self.length {
+            panic::fail("vector index out of bounds");
+        }
+
+        unsafe {
+            let slot: *mut T = raw::element_at::<T>(self.data, index as Size);
+            return (*slot).equals(value);
+        }
+    }
 }

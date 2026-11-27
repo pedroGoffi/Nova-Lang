@@ -1,13 +1,13 @@
 [package]
 name = "nova"
-version = "0.20.0-alpha.1"
+version = "0.20.26-alpha.1"
 edition = "2021"
 autotests = false
 
 [[bin]]
 name = "nova"
 path = "src/main.rs"
-test = false
+test = true
 
 [[test]]
 name = "feature_examples"

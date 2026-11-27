@@ -424,3 +424,112 @@ fn contextual_member_names_are_valid_macro_rule_names() {
     "#);
     assert_eq!(parsed.items.len(), 3);
 }
+
+
+#[test]
+fn try_expression_and_try_blocks_parse() {
+    use crate::ast::{Expr, Item, Stmt};
+    let ast = parse(r#"
+        fn fetch() -> Result<i32, i32> { return Ok(42); }
+        fn load() -> Result<i32, i32> {
+            let value = try fetch();
+            return Ok(value);
+        }
+        fn load_block() -> Result<i32, i32> {
+            let value = try { fetch() };
+            return Ok(value);
+        }
+        fn recover() -> i32 {
+            let value = try { fetch() } catch error { 0 };
+            return value;
+        }
+    "#);
+    let functions: Vec<_> = ast.items.iter().filter_map(|item| match item {
+        Item::Function(function) => Some(function),
+        _ => None,
+    }).collect();
+    assert_eq!(functions.len(), 4);
+    assert!(matches!(
+        &functions[1].body[0],
+        Stmt::Let { init: Expr::Call(name, _), .. } if name == "__nova_internal_try"
+    ));
+    assert!(matches!(
+        &functions[2].body[0],
+        Stmt::Let { init: Expr::Call(name, _), .. } if name == "__nova_internal_try"
+    ));
+    assert!(matches!(
+        &functions[3].body[0],
+        Stmt::Let { init: Expr::Block(_), .. }
+    ));
+    crate::ergonomic_lowering::lower(&ast)
+        .expect("try propagation and catch should lower through Result control flow");
+}
+
+#[test]
+fn try_catch_supports_error_variant_patterns() {
+    let ast = parse(r#"
+        enum UserError { NotFound, Blocked(i32), Unavailable }
+        fn fetch() throws UserError -> i32 { throw UserError::Blocked(403); }
+        fn recover() -> i32 {
+            let value = try { fetch() } catch {
+                UserError::NotFound => { 0 },
+                UserError::Blocked(code) => { code },
+                _ => { 2 }
+            };
+            return value;
+        }
+    "#);
+    let lowered = crate::ergonomic_lowering::lower(&ast)
+        .expect("pattern-based catch should lower into nested Result/error matches");
+    let rendered = format!("{lowered:?}");
+    assert!(rendered.contains("__nova_try_error"), "{rendered}");
+    assert!(rendered.contains("Blocked"), "{rendered}");
+}
+
+#[test]
+fn try_statement_block_parses() {
+    use crate::ast::{Expr, Item, Stmt};
+    let ast = parse(r#"
+        fn run() -> Result<i32, i32> {
+            try { Ok(42) };
+            return Ok(0);
+        }
+    "#);
+    let Some(Item::Function(function)) = ast.items.first() else { panic!("missing function"); };
+    assert!(matches!(
+        &function.body[0],
+        Stmt::Expr(Expr::Call(name, _)) if name == "__nova_internal_try"
+    ));
+}
+
+
+#[test]
+fn throws_contract_and_throw_statement_lower_to_result() {
+    use crate::ast::{Expr, Item, Stmt, TypeRef};
+    let ast = parse(r#"
+        fn fail() throws i32 -> i32 {
+            throw 7;
+        }
+        fn caller() throws i32 -> i32 {
+            let value = try fail();
+            return Ok(value);
+        }
+    "#);
+    let functions: Vec<_> = ast.items.iter().filter_map(|item| match item {
+        Item::Function(function) => Some(function),
+        _ => None,
+    }).collect();
+    assert_eq!(functions.len(), 2);
+    assert_eq!(
+        functions[0].result,
+        TypeRef::Applied("std::error::result::Result".into(), vec![
+            TypeRef::Named("i32".into()), TypeRef::Named("i32".into())
+        ])
+    );
+    assert!(matches!(
+        &functions[0].body[0],
+        Stmt::Return(Some(Expr::Call(name, args))) if name == "Err" && args.len() == 1
+    ));
+    crate::ergonomic_lowering::lower(&ast)
+        .expect("typed throw and try should lower through Result control flow");
+}

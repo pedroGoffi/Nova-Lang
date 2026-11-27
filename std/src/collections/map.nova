@@ -3,53 +3,77 @@ use std::core::option::Option;
 use std::core::types::Size;
 use std::collections::traits::Collection;
 use std::memory::traits::Storable;
+use std::core::value::Equatable;
 
-pub concept MapKey<T> = integer<T> || boolean<T>;
+pub concept MapKey<T> = integer<T> || boolean<T> || Equatable<T>;
 pub concept MapValue<T> = Storable<T>;
 
 pub class Map<K,V> { keys: Vec<K>, values: Vec<V> }
 
-impl<K,V> Map<K,V> {
+impl<K: Equatable,V> Map<K,V> {
     static fn new() -> Self {
-        return new Map<K,V> { keys: Vec::new(), values: Vec::new() };
+        return new Map<K,V> { keys: Vec::new::<K>(), values: Vec::new::<V>() };
     }
+
     fn len(self: &Map<K,V>) -> Size { return self.keys.len(); }
     fn is_empty(self: &Map<K,V>) -> bool { return self.keys.is_empty(); }
-    fn index_of(self: &Map<K,V>, key: K) -> i64 {
+
+    fn index_of(self: &Map<K,V>, key: &K) -> i64 {
         let mut index: i64 = 0;
         while index < self.len() as i64 {
-            if self.keys.get(index) == key { return index; }
+            if self.keys.equals_at(index, key) { return index; }
             index += 1;
         }
         return -1;
     }
-    fn contains(self: &Map<K,V>, key: K) -> bool { return self.index_of(key) >= 0; }
-    fn insert(self: &Map<K,V>, key: K, value: V) -> bool {
-        let index: i64 = self.index_of(key);
-        if index >= 0 { self.values.set(index, value); return false; }
-        self.keys.push(key); self.values.push(value); return true;
+
+    fn contains(self: &Map<K,V>, key: &K) -> bool {
+        return self.index_of(key) >= 0;
     }
-    fn get(self: &Map<K,V>, key: K) -> Option<V> {
+
+    fn insert(self: &mut Map<K,V>, key: K, value: V) -> bool {
+        let index: i64 = self.index_of(&key);
+        if index >= 0 {
+            self.values.set(index, value);
+            return false;
+        }
+        self.keys.push(key);
+        self.values.push(value);
+        return true;
+    }
+
+    fn get(self: &Map<K,V>, key: &K) -> Option<V> {
         let index: i64 = self.index_of(key);
         if index < 0 { return None; }
         return Some(self.values.get(index));
     }
-    fn try_get(self: &Map<K,V>, key: K) -> Option<V> { return self.get(key); }
-    fn get_or(self: &Map<K,V>, key: K, fallback: V) -> V {
+
+    fn try_get(self: &Map<K,V>, key: &K) -> Option<V> {
+        return self.get(key);
+    }
+
+    fn get_or(self: &Map<K,V>, key: &K, fallback: V) -> V {
         let index: i64 = self.index_of(key);
         if index < 0 { return fallback; }
         return self.values.get(index);
     }
-    fn remove(self: &Map<K,V>, key: K) -> bool {
+
+    fn remove(self: &mut Map<K,V>, key: &K) -> bool {
         let index: i64 = self.index_of(key);
         if index < 0 { return false; }
-        self.keys.swap_remove(index); self.values.swap_remove(index); return true;
+        self.keys.swap_remove(index);
+        self.values.swap_remove(index);
+        return true;
     }
-    fn clear(self: &Map<K,V>) -> () { self.keys.clear(); self.values.clear(); return; }
-    fn drop(self: Map<K,V>) -> () { self.clear(); return; }
+
+    fn clear(self: &mut Map<K,V>) -> () {
+        self.keys.clear();
+        self.values.clear();
+        return;
+    }
 }
 
-impl<K,V> Collection for Map<K,V> {
+impl<K: Equatable,V> Collection for Map<K,V> {
     fn len(self: &Map<K,V>) -> Size { return self.len(); }
     fn is_empty(self: &Map<K,V>) -> bool { return self.is_empty(); }
 }

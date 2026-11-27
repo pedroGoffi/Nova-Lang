@@ -1,0 +1,6 @@
+import math_core;
+
+fn main() -> i32 {
+    let sum = math_core::add(20, 22);
+    return sum - 42;
+}

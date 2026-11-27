@@ -1,43 +1,46 @@
 mod ast;
-mod entrypoint;
-#[cfg(test)] mod entrypoint_tests;
 mod call_arguments;
-mod out_parameters;
-mod validation;
-#[cfg(test)] mod validation_tests;
-#[cfg(test)]
-mod nb_tests;
-#[cfg(test)]
-mod nb_backend_tests;
-#[cfg(test)] mod out_parameters_tests;
 mod codegen;
+mod compile_helpers;
 mod concepts;
 mod concurrency;
 mod consteval;
-mod compile_helpers;
 mod coroutine_codegen;
 mod coroutines;
 mod devtools;
 mod diagnostics;
 mod editor_overlay;
-mod ergonomic_lowering;
 mod effects;
+mod entrypoint;
+#[cfg(test)]
+mod entrypoint_tests;
+mod ergonomic_lowering;
 mod hir;
-mod iterators;
 mod intrinsics;
-mod llvm_intrinsics;
+mod iterators;
 mod lambdas;
+mod llvm_intrinsics;
 mod macros;
 mod meta;
 mod mir;
 mod modules;
+#[cfg(test)]
+mod nb_backend_tests;
+#[cfg(test)]
+mod nb_tests;
+mod out_parameters;
+#[cfg(test)]
+mod out_parameters_tests;
 mod ownership;
 mod package;
 mod proc_macros;
-mod surface;
 mod stdlib_audit;
+mod surface;
 mod type_features;
 mod types;
+mod validation;
+#[cfg(test)]
+mod validation_tests;
 use lalrpop_util::lalrpop_mod;
 use std::{
     env, fs,
@@ -57,11 +60,13 @@ mod ergonomics_stage19_tests;
 mod ergonomics_stage20_tests;
 #[cfg(test)]
 mod ergonomics_stage21_tests;
-#[cfg(test)]
-mod json_stage22_tests;
 mod format_macros;
 #[cfg(test)]
 mod function_attributes_tests;
+#[cfg(test)]
+mod grammar_build_regression_tests;
+#[cfg(test)]
+mod json_stage22_tests;
 #[cfg(test)]
 mod libc_tests;
 #[cfg(test)]
@@ -69,14 +74,13 @@ mod module_tests;
 #[cfg(test)]
 mod parser_regressions;
 #[cfg(test)]
-mod grammar_build_regression_tests;
-#[cfg(test)]
 mod variadic_tests;
 
 fn usage() -> &'static str {
     r#"Nova 0.25 Alpha: typed standard library in Nova + compiler-reviewed LLVM platform ABI — native compiler (Rust + LALRPOP + HIR/MIR + LLVM)
 Usage:
   nova new <name> | init | add std | add <name> --path <directory> | tree [directory]
+  nova package build [directory] [--verbose]  Compile a package to .o/.a/.nvi
   nova check [file.nova | package-directory] [--all-errors]
   nova build [file.nova | package-directory] [-o executable] [--emit-llvm] [--all-errors]
   nova run [file.nova | package-directory] [-o executable]
@@ -106,6 +110,10 @@ Options:
   --deny-all-extern     Reject ANY reachable foreign ABI symbol except LLVM intrinsics
   --helpers <macro|function>  Use source macros or direct functions for standard helpers
   --module-path <directory>   Add a Go-style module/package search directory
+  -l, --library <name>        Link a native shared/system library
+  -L <directory>              Add a native library search directory
+  --static-library <path>     Link an explicit .a archive
+  --rpath <directory>         Add an ELF runtime library search path
   NOVA_PATH                   Colon-separated default module search directories
   --keep-all-functions  Keep unreachable functions in generated LLVM (debug/interop)
   --all-errors           Collect independent surface/HIR errors (max 64 per phase)
@@ -164,7 +172,7 @@ pub(crate) fn strip_comments(source: &str) -> String {
     }
     out
 }
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Options {
     output: Option<PathBuf>,
     emit_llvm: bool,
@@ -179,6 +187,11 @@ struct Options {
     keep_all_functions: bool,
     helper_mode: compile_helpers::HelperMode,
     module_paths: Vec<PathBuf>,
+    link_libraries: Vec<String>,
+    link_static: Vec<PathBuf>,
+    link_search: Vec<PathBuf>,
+    link_rpath: Vec<PathBuf>,
+    allowed_externs: Vec<String>,
 }
 fn options(args: &[String]) -> Result<Options, String> {
     let mut o = Options::default();
@@ -203,7 +216,29 @@ fn options(args: &[String]) -> Result<Options, String> {
                     Some("function") => compile_helpers::HelperMode::Function,
                     _ => return Err("--helpers must be macro or function".into()),
                 };
-            },
+            }
+            "--library" | "-l" => {
+                i += 1;
+                o.link_libraries
+                    .push(args.get(i).ok_or("--library needs a name")?.clone());
+            }
+            "-L" => {
+                i += 1;
+                o.link_search
+                    .push(PathBuf::from(args.get(i).ok_or("-L needs a directory")?));
+            }
+            "--static-library" => {
+                i += 1;
+                o.link_static.push(PathBuf::from(
+                    args.get(i).ok_or("--static-library needs a path")?,
+                ));
+            }
+            "--rpath" => {
+                i += 1;
+                o.link_rpath.push(PathBuf::from(
+                    args.get(i).ok_or("--rpath needs a directory")?,
+                ));
+            }
             "--module-path" | "-I" => {
                 i += 1;
                 o.module_paths.push(PathBuf::from(
@@ -237,7 +272,8 @@ fn options(args: &[String]) -> Result<Options, String> {
 // `argv` is a borrowed C array (NUL-terminated strings); it must not be freed.
 fn require_main(hir: &hir::Program) -> Result<(), String> {
     use crate::types::{Primitive, TypeKind};
-    const EXPECTED: &str = "entry point must be fn main() -> i32 or fn main(argc: i32, argv: *const *const u8) -> i32";
+    const EXPECTED: &str =
+        "entry point must be fn main() -> i32 or fn main(argc: i32, argv: *const *const u8) -> i32";
     let f = hir
         .functions
         .iter()
@@ -254,13 +290,19 @@ fn require_main(hir: &hir::Program) -> Result<(), String> {
             }
             let TypeKind::Pointer { element: inner, .. } = hir.types.kind(f.locals[*argv].ty)
             else {
-                return Err(format!("{EXPECTED}; argv must be a pointer to pointers to u8"));
+                return Err(format!(
+                    "{EXPECTED}; argv must be a pointer to pointers to u8"
+                ));
             };
             let TypeKind::Pointer { element: byte, .. } = hir.types.kind(inner) else {
-                return Err(format!("{EXPECTED}; argv must be a pointer to pointers to u8"));
+                return Err(format!(
+                    "{EXPECTED}; argv must be a pointer to pointers to u8"
+                ));
             };
             if hir.types.kind(byte) != TypeKind::Primitive(Primitive::Unsigned(8)) {
-                return Err(format!("{EXPECTED}; argv must be a pointer to pointers to u8"));
+                return Err(format!(
+                    "{EXPECTED}; argv must be a pointer to pointers to u8"
+                ));
             }
             Ok(())
         }
@@ -274,7 +316,8 @@ fn llvm_path(output: &Path) -> PathBuf {
 // A PostgreSQL dependency is optional. Declaration-only imports do not
 // activate it; generated calls into the private postgres ABI do.
 fn needs_crypto_runtime(ir: &str) -> bool {
-    ir.lines().any(|line| line.contains("call ") && line.contains("@__nova_std__old__crypto____"))
+    ir.lines()
+        .any(|line| line.contains("call ") && line.contains("@__nova_std__old__crypto____"))
 }
 fn needs_postgres_runtime(ir: &str) -> bool {
     ir.lines()
@@ -292,29 +335,37 @@ fn uses_native_symbols(ir: &str, symbols: &[&str]) -> bool {
     })
 }
 fn needs_coroutine_runtime(ir: &str) -> bool {
-    uses_native_symbols(ir, &[
-        "@__nova_coro_create", "@__nova_std__old__coro____",
-        "@__nova_std__old__task____", "@__nova_std__old__generator____",
-    ])
+    uses_native_symbols(
+        ir,
+        &[
+            "@__nova_coro_create",
+            "@__nova_std__old__coro____",
+            "@__nova_std__old__task____",
+            "@__nova_std__old__generator____",
+        ],
+    )
 }
 fn needs_net_runtime(ir: &str) -> bool {
     uses_native_symbols(ir, &["@__nova_std__old__net____"])
 }
-// Compiler-provided LLVM atomic wrappers and std::abi::llvm definitions are
-// ordinary linked definitions, not dependencies on libnova_rt. Only symbols
-// actually missing a definition in this module can pull the C adapter.
+// Kept as a regression-test helper for detecting legacy resource ABI references.
+#[cfg(test)]
 fn needs_core_runtime(ir: &str) -> bool {
     use std::collections::HashSet;
     fn symbols(line: &str) -> Vec<&str> {
         let mut result = Vec::new();
         for token in line.split('@').skip(1) {
-            let end = token.find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '$')))
+            let end = token
+                .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '$')))
                 .unwrap_or(token.len());
-            if end != 0 { result.push(&token[..end]); }
+            if end != 0 {
+                result.push(&token[..end]);
+            }
         }
         result
     }
-    let defined: HashSet<&str> = ir.lines()
+    let defined: HashSet<&str> = ir
+        .lines()
         .filter(|line| line.trim_start().starts_with("define "))
         .flat_map(symbols)
         .collect();
@@ -329,9 +380,51 @@ fn needs_core_runtime(ir: &str) -> bool {
                 && !symbol.starts_with("__nova_std__coro____")
                 && !symbol.starts_with("__nova_std__task____")
                 && !symbol.starts_with("__nova_std__generator____"))
-                || symbol.starts_with("__nova_json_")
-            ) && !defined.contains(symbol)
+                || symbol.starts_with("__nova_json_"))
+                && !defined.contains(symbol)
         })
+}
+
+// Native atomics are implemented by a small C adapter using compiler
+// atomic builtins. It is linked only when an atomic symbol is reachable.
+fn needs_atomic_runtime(ir: &str) -> bool {
+    uses_native_symbols(
+        ir,
+        &[
+            "@__nova_atomic_bool_load",
+            "@__nova_atomic_bool_store",
+            "@__nova_atomic_bool_swap",
+            "@__nova_atomic_bool_compare_exchange",
+            "@__nova_atomic_bool_is_lock_free",
+            "@__nova_atomic_i8_load", "@__nova_atomic_i8_store",
+            "@__nova_atomic_i8_swap", "@__nova_atomic_i8_compare_exchange",
+            "@__nova_atomic_i8_is_lock_free",
+            "@__nova_atomic_i16_load", "@__nova_atomic_i16_store",
+            "@__nova_atomic_i16_swap", "@__nova_atomic_i16_compare_exchange",
+            "@__nova_atomic_i16_is_lock_free",
+            "@__nova_atomic_i32_load", "@__nova_atomic_i32_store",
+            "@__nova_atomic_i32_swap", "@__nova_atomic_i32_compare_exchange",
+            "@__nova_atomic_i32_is_lock_free",
+            "@__nova_atomic_i64_load", "@__nova_atomic_i64_store",
+            "@__nova_atomic_i64_swap", "@__nova_atomic_i64_compare_exchange",
+            "@__nova_atomic_i64_is_lock_free",
+            "@__nova_atomic_u8_load", "@__nova_atomic_u8_store",
+            "@__nova_atomic_u8_swap", "@__nova_atomic_u8_compare_exchange",
+            "@__nova_atomic_u8_is_lock_free",
+            "@__nova_atomic_u16_load", "@__nova_atomic_u16_store",
+            "@__nova_atomic_u16_swap", "@__nova_atomic_u16_compare_exchange",
+            "@__nova_atomic_u16_is_lock_free",
+            "@__nova_atomic_u32_load", "@__nova_atomic_u32_store",
+            "@__nova_atomic_u32_swap", "@__nova_atomic_u32_compare_exchange",
+            "@__nova_atomic_u32_is_lock_free",
+            "@__nova_atomic_u64_load", "@__nova_atomic_u64_store",
+            "@__nova_atomic_u64_swap", "@__nova_atomic_u64_compare_exchange",
+            "@__nova_atomic_u64_is_lock_free",
+            "@__nova_atomic_ptr_load", "@__nova_atomic_ptr_store",
+            "@__nova_atomic_ptr_swap", "@__nova_atomic_ptr_compare_exchange",
+            "@__nova_atomic_ptr_is_lock_free",
+        ],
+    )
 }
 
 // Strip unreachable *standard-library* function definitions before selecting
@@ -343,20 +436,31 @@ fn needs_core_runtime(ir: &str) -> bool {
 fn prune_unused_std_ir(ir: &str) -> String {
     use std::collections::{HashMap, HashSet};
     #[derive(Clone)]
-    struct Definition { name: String, start: usize, end: usize }
+    struct Definition {
+        name: String,
+        start: usize,
+        end: usize,
+    }
     fn symbols(line: &str) -> Vec<&str> {
         let bytes = line.as_bytes();
         let mut out = Vec::new();
         let mut cursor = 0;
         while cursor < bytes.len() {
-            if bytes[cursor] != b'@' {cursor += 1; continue;}
+            if bytes[cursor] != b'@' {
+                cursor += 1;
+                continue;
+            }
             let start = cursor + 1;
             cursor = start;
-            while cursor < bytes.len() && (bytes[cursor].is_ascii_alphanumeric()
-                || matches!(bytes[cursor], b'_' | b'.' | b'$' | b'-')) {
+            while cursor < bytes.len()
+                && (bytes[cursor].is_ascii_alphanumeric()
+                    || matches!(bytes[cursor], b'_' | b'.' | b'$' | b'-'))
+            {
                 cursor += 1;
             }
-            if cursor > start {out.push(&line[start..cursor]);}
+            if cursor > start {
+                out.push(&line[start..cursor]);
+            }
         }
         out
     }
@@ -377,16 +481,24 @@ fn prune_unused_std_ir(ir: &str) -> String {
                 while index + 1 < lines.len() && lines[index].trim() != "}" {
                     index += 1;
                 }
-                let end = index.min(lines.len()-1);
-                for entry in &mut inside[start..=end] {*entry = true;}
+                let end = index.min(lines.len() - 1);
+                for entry in &mut inside[start..=end] {
+                    *entry = true;
+                }
                 let id = defs.len();
                 definition_by_name.insert((*name).to_owned(), id);
-                defs.push(Definition {name: (*name).to_owned(), start, end});
+                defs.push(Definition {
+                    name: (*name).to_owned(),
+                    start,
+                    end,
+                });
             }
         }
         index += 1;
     }
-    if defs.is_empty() {return ir.to_owned();}
+    if defs.is_empty() {
+        return ir.to_owned();
+    }
     let mut marked = HashSet::<usize>::new();
     let mut work = Vec::<usize>::new();
     for (id, def) in defs.iter().enumerate() {
@@ -397,11 +509,17 @@ fn prune_unused_std_ir(ir: &str) -> String {
     }
     // A callback/function pointer stored in any non-function global is a root.
     for (line, in_definition) in lines.iter().zip(inside.iter()) {
-        if *in_definition || line.trim_start().starts_with("declare ") {continue;}
-        if line.trim_start().starts_with(';') {continue;}
+        if *in_definition || line.trim_start().starts_with("declare ") {
+            continue;
+        }
+        if line.trim_start().starts_with(';') {
+            continue;
+        }
         for name in symbols(line) {
             if let Some(&id) = definition_by_name.get(name) {
-                if marked.insert(id) {work.push(id);}
+                if marked.insert(id) {
+                    work.push(id);
+                }
             }
         }
     }
@@ -410,7 +528,9 @@ fn prune_unused_std_ir(ir: &str) -> String {
         for line in &lines[definition.start..=definition.end] {
             for symbol in symbols(line) {
                 if let Some(&dependency) = definition_by_name.get(symbol) {
-                    if marked.insert(dependency) {work.push(dependency);}
+                    if marked.insert(dependency) {
+                        work.push(dependency);
+                    }
                 }
             }
         }
@@ -418,12 +538,17 @@ fn prune_unused_std_ir(ir: &str) -> String {
     let mut excluded = vec![false; lines.len()];
     for (id, def) in defs.iter().enumerate() {
         if !marked.contains(&id) {
-            for line in &mut excluded[def.start..=def.end] {*line = true;}
+            for line in &mut excluded[def.start..=def.end] {
+                *line = true;
+            }
         }
     }
     let mut out = String::with_capacity(ir.len());
     for (line, excluded) in lines.iter().zip(excluded.iter()) {
-        if !excluded {out.push_str(line); out.push('\n');}
+        if !excluded {
+            out.push_str(line);
+            out.push('\n');
+        }
     }
     out
 }
@@ -437,41 +562,59 @@ fn prune_unused_std_ir(ir: &str) -> String {
 fn reachable_foreign_symbols(ir: &str) -> Vec<String> {
     use std::collections::HashSet;
     fn names(line: &str) -> Vec<&str> {
-        line.split('@').skip(1).filter_map(|part| {
-            let end = part.find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c,'_'|'.'|'$')))
-                .unwrap_or(part.len());
-            (end > 0).then_some(&part[..end])
-        }).collect()
+        line.split('@')
+            .skip(1)
+            .filter_map(|part| {
+                let end = part
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '$')))
+                    .unwrap_or(part.len());
+                (end > 0).then_some(&part[..end])
+            })
+            .collect()
     }
-    let declared = ir.lines().filter(|line| line.trim_start().starts_with("declare "))
-        .flat_map(names).collect::<HashSet<_>>();
-    let defined = ir.lines().filter(|line| line.trim_start().starts_with("define "))
-        .flat_map(names).collect::<HashSet<_>>();
-    let mut foreign = ir.lines()
+    let declared = ir
+        .lines()
+        .filter(|line| line.trim_start().starts_with("declare "))
+        .flat_map(names)
+        .collect::<HashSet<_>>();
+    let defined = ir
+        .lines()
+        .filter(|line| line.trim_start().starts_with("define "))
+        .flat_map(names)
+        .collect::<HashSet<_>>();
+    let mut foreign = ir
+        .lines()
         .filter(|line| {
             let line = line.trim_start();
-            !line.starts_with("declare ") && !line.starts_with("define ")
-                && !line.starts_with(';')
+            !line.starts_with("declare ") && !line.starts_with("define ") && !line.starts_with(';')
         })
         .flat_map(names)
-        .filter(|symbol| declared.contains(symbol) && !defined.contains(symbol)
-            && !symbol.starts_with("llvm."))
-        .map(str::to_owned).collect::<Vec<_>>();
+        .filter(|symbol| {
+            declared.contains(symbol) && !defined.contains(symbol) && !symbol.starts_with("llvm.")
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     foreign.sort();
     foreign.dedup();
     foreign
 }
-fn unapproved_foreign_symbols(ir: &str) -> Vec<String> {
+fn unapproved_foreign_symbols(ir: &str, declared_externs: &[String]) -> Vec<String> {
     use std::collections::HashSet;
-    let approved = crate::llvm_intrinsics::Intrinsic::ALL.iter()
+    let approved = crate::llvm_intrinsics::Intrinsic::ALL
+        .iter()
         .flat_map(|intrinsic| intrinsic.declaration().lines())
         .filter_map(|line| line.split('@').nth(1))
-        .map(|name| name.split(|c:char| !(c.is_ascii_alphanumeric() || matches!(c,'_'|'.'|'$')))
-            .next().unwrap_or(""))
+        .map(|name| {
+            name.split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '$')))
+                .next()
+                .unwrap_or("")
+        })
         .collect::<HashSet<_>>();
-    reachable_foreign_symbols(ir).into_iter()
+    reachable_foreign_symbols(ir)
+        .into_iter()
         .filter(|symbol| {
-            !approved.contains(symbol.as_str())
+            !declared_externs.iter().any(|name| name == symbol)
+                && !approved.contains(symbol.as_str())
                 && !symbol.starts_with("SDL_")
                 && !symbol.starts_with("TTF_")
                 && !symbol.starts_with("gl")
@@ -483,6 +626,92 @@ fn unapproved_foreign_symbols(ir: &str) -> Vec<String> {
                 && symbol != "free"
         })
         .collect()
+}
+
+fn build_fingerprint(ir: &str, output: &Path, options: &Options) -> Result<String, String> {
+    // FNV-1a is deliberately simple and stable across Nova compiler versions.
+    // The compiler version and clang identity are included in the payload.
+    let mut payload = String::new();
+    payload.push_str(env!("CARGO_PKG_VERSION"));
+    payload.push('\n');
+    payload.push_str(ir);
+    payload.push_str(&format!(
+        "\nopt={}\ntarget={:?}\ndebug={}\n",
+        options.opt, options.target, options.debug
+    ));
+    payload.push_str(&format!("deny_all={}\n", options.deny_all_extern));
+    for value in &options.link_libraries {
+        payload.push_str(&format!("lib={value}\n"));
+    }
+    for value in &options.link_search {
+        payload.push_str(&format!("search={}\n", value.display()));
+    }
+    for value in &options.link_static {
+        payload.push_str(&format!("static={}\n", value.display()));
+    }
+    for value in &options.link_rpath {
+        payload.push_str(&format!("rpath={}\n", value.display()));
+    }
+    for value in &options.allowed_externs {
+        payload.push_str(&format!("extern={value}\n"));
+    }
+    let clang = Command::new("clang")
+        .arg("--version")
+        .output()
+        .map_err(|e| format!("unable to query clang version: {e}"))?;
+    payload.push_str(&String::from_utf8_lossy(&clang.stdout));
+    if needs_coroutine_runtime(ir) {
+        let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime/nova_coroutines.c");
+        let bytes = fs::read(&runtime).map_err(|e| format!("{}: {e}", runtime.display()))?;
+        payload.push_str(&fingerprint_bytes(&bytes));
+    }
+    if needs_atomic_runtime(ir) {
+        let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime/nova_atomics.c");
+        let bytes = fs::read(&runtime).map_err(|e| format!("{}: {e}", runtime.display()))?;
+        payload.push_str(&fingerprint_bytes(&bytes));
+    }
+    // Native inputs are part of the cache key: replacing a .a/.so must relink.
+    for archive in &options.link_static {
+        let bytes = fs::read(archive).map_err(|e| format!("{}: {e}", archive.display()))?;
+        payload.push_str(&format!("\n{}:{}", archive.display(), bytes.len()));
+        payload.push_str(&fingerprint_bytes(&bytes));
+    }
+    for directory in &options.link_search {
+        if let Ok(entries) = fs::read_dir(directory) {
+            let mut paths = entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .collect::<Vec<_>>();
+            paths.sort();
+            for path in paths.into_iter().filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        options.link_libraries.iter().any(|lib| {
+                            name == format!("lib{lib}.so")
+                                || name == format!("lib{lib}.a")
+                                || name.starts_with(&format!("lib{lib}.so."))
+                        })
+                    })
+            }) {
+                if let Ok(bytes) = fs::read(&path) {
+                    payload.push_str(&format!("\n{}:{}", path.display(), bytes.len()));
+                    payload.push_str(&fingerprint_bytes(&bytes));
+                }
+            }
+        }
+    }
+    let _ = output;
+    Ok(fingerprint_bytes(payload.as_bytes()))
+}
+
+fn fingerprint_bytes(bytes: &[u8]) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in bytes {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 fn build(ir: &str, output: &Path, options: &Options) -> Result<(), String> {
@@ -500,17 +729,24 @@ fn build(ir: &str, output: &Path, options: &Options) -> Result<(), String> {
     }
     let optimized_ir = prune_unused_std_ir(ir);
     let ir = optimized_ir.as_str();
-    if ir.contains("call ptr @GetStdHandle(") || ir.contains("call i32 @WriteFile(")
-        || ir.contains("call void @ExitProcess(") {
+    if ir.contains("call ptr @GetStdHandle(")
+        || ir.contains("call i32 @WriteFile(")
+        || ir.contains("call void @ExitProcess(")
+    {
         return Err("Windows ABI cannot be linked into a Linux executable".into());
     }
+    // The old JSON/String resource ABI is no longer a runtime-selection
+    // switch. Reachable unresolved symbols are diagnosed by the native linker;
+    // this allows ordinary extern-backed runtime adapters (e.g. atomics) to
+    // coexist with the LLVM/Nova standard library.
     let remaining = [
-        ("JSON / String legacy resource ABI", needs_core_runtime(ir)),
         ("legacy crypto ABI", needs_crypto_runtime(ir)),
         ("PostgreSQL legacy ABI", needs_postgres_runtime(ir)),
         ("legacy network ABI", needs_net_runtime(ir)),
-    ].into_iter().filter_map(|(name, present)| present.then_some(name))
-        .collect::<Vec<_>>();
+    ]
+    .into_iter()
+    .filter_map(|(name, present)| present.then_some(name))
+    .collect::<Vec<_>>();
     if !remaining.is_empty() {
         return Err(format!(
             "error[NOVA-RT000]: runtime C was removed; remaining dependencies: {}. Use Nova STD/LLVM implementations or replace this feature before linking.",
@@ -521,32 +757,64 @@ fn build(ir: &str, output: &Path, options: &Options) -> Result<(), String> {
         let foreign = reachable_foreign_symbols(ir);
         if !foreign.is_empty() {
             return Err(format!(
-                "error[NOVA-ABI001]: foreign ABI imports forbidden: {}", foreign.join(", ")
+                "error[NOVA-ABI001]: foreign ABI imports forbidden: {}",
+                foreign.join(", ")
             ));
         }
     }
-    let offenders = unapproved_foreign_symbols(ir);
+    let offenders = unapproved_foreign_symbols(ir, &options.allowed_externs);
     if !offenders.is_empty() {
         return Err(format!(
             "error[NOVA-ABI002]: imports not declared by compiler-reviewed std::abi::llvm intrinsics: {}",
             offenders.join(", ")
         ));
     }
-    fs::write(&intermediate, ir)
-        .map_err(|e| format!("{}: {e}", intermediate.display()))?;
+    let cache_path = output.with_extension("nova-cache");
+    let cache_key = build_fingerprint(ir, output, options)?;
+    if output.is_file()
+        && fs::read_to_string(&cache_path).ok().as_deref() == Some(cache_key.as_str())
+    {
+        if options.verbose {
+            eprintln!("Nova build: cache hit for {}", output.display());
+        }
+        return Ok(());
+    }
+    fs::write(&intermediate, ir).map_err(|e| format!("{}: {e}", intermediate.display()))?;
     let mut command = Command::new("clang");
-    command.arg("-x").arg("ir").arg(&intermediate)
+    command
+        .arg("-x")
+        .arg("ir")
+        .arg(&intermediate)
+        .arg("-x")
+        .arg("none")
         .arg(format!("-O{}", options.opt))
-        .arg("-ffunction-sections").arg("-fdata-sections")
+        .arg("-ffunction-sections")
+        .arg("-fdata-sections")
         .arg("-Wl,--gc-sections")
-        .arg("-o").arg(output)
+        .arg("-o")
+        .arg(output)
         .arg("-lm");
     if needs_coroutine_runtime(ir) {
         // Coroutine lowering is compiler-owned, but stack switching still
         // needs a small host adapter. Keep it limited to coroutine programs;
         // ordinary Nova executables remain free of a runtime dependency.
         let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime/nova_coroutines.c");
-        command.arg("-x").arg("c").arg(runtime);
+        command
+            .arg("-x")
+            .arg("c")
+            .arg(runtime)
+            .arg("-x")
+            .arg("none");
+    }
+    if needs_atomic_runtime(ir) {
+        let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime/nova_atomics.c");
+        command
+            .arg("-std=c11")
+            .arg("-x")
+            .arg("c")
+            .arg(runtime)
+            .arg("-x")
+            .arg("none");
     }
     if ir.contains("@pthread_create(") || ir.contains("@pthread_join(") {
         command.arg("-pthread");
@@ -560,22 +828,241 @@ fn build(ir: &str, output: &Path, options: &Options) -> Result<(), String> {
     if ir.contains("@gl") {
         command.arg("-lGL");
     }
+    for directory in &options.link_search {
+        command.arg("-L").arg(directory);
+    }
+    for library in &options.link_libraries {
+        if library.is_empty() || library.starts_with('-') || library.contains('/') {
+            return Err(format!(
+                "invalid native library name '{library}'; use [link].static for archive paths"
+            ));
+        }
+        command.arg(format!("-l{library}"));
+    }
+    for archive in &options.link_static {
+        if !archive.is_file() {
+            return Err(format!(
+                "static library does not exist: {}",
+                archive.display()
+            ));
+        }
+        command.arg(archive);
+    }
+    // Libraries referenced from package archives must appear after those
+    // archives on ELF linkers, which resolve static inputs from left to right.
+    command.arg("-lm");
+    for directory in &options.link_rpath {
+        command.arg(format!("-Wl,-rpath,{}", directory.display()));
+    }
     if let Some(target) = &options.target {
         command.arg(format!("--target={target}"));
     }
-    if options.debug {command.arg("-g").arg("-rdynamic");}
-    if options.verbose {eprintln!("{command:?}");}
-    let status = command.status()
+    if options.debug {
+        command.arg("-g").arg("-rdynamic");
+    }
+    if options.verbose {
+        eprintln!("{command:?}");
+    }
+    let status = command
+        .status()
         .map_err(|e| format!("unable to launch clang: {e}"))?;
     if !status.success() {
-        return Err(format!("clang failed ({status}); LLVM IR preserved at {}",intermediate.display()));
+        return Err(format!(
+            "clang failed ({status}); LLVM IR preserved at {}",
+            intermediate.display()
+        ));
     }
-    if !options.emit_llvm {let _ = fs::remove_file(&intermediate);}
+    if !options.emit_llvm {
+        let _ = fs::remove_file(&intermediate);
+    }
+    let cache_tmp = cache_path.with_extension("nova-cache.tmp");
+    fs::write(&cache_tmp, cache_key).map_err(|e| format!("{}: {e}", cache_tmp.display()))?;
+    fs::rename(&cache_tmp, &cache_path).map_err(|e| format!("{}: {e}", cache_path.display()))?;
     Ok(())
 }
+fn collect_declared_externs(items: &[ast::Item], output: &mut Vec<String>) {
+    fn collect(items: &[ast::Item], output: &mut Vec<String>, namespace: &str) {
+        for item in items {
+            match item {
+                ast::Item::Extern(function) => {
+                    let symbol = if namespace.is_empty() {
+                        function.name.clone()
+                    } else {
+                        format!("{}__{}", namespace.replace("::", "__"), function.name)
+                    };
+                    // Keep the leaf symbol for C ABI remapping (e.g. a
+                    // namespaced std::libc::printf declaration links as printf)
+                    // and the qualified Nova symbol for compiled package ABI.
+                    output.push(function.name.clone());
+                    if symbol != function.name {
+                        output.push(symbol);
+                    }
+                }
+                ast::Item::Public(inner) => collect(std::slice::from_ref(inner), output, namespace),
+                ast::Item::Namespace { name, items } => {
+                    let nested = if namespace.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{namespace}::{name}")
+                    };
+                    collect(items, output, &nested);
+                }
+                _ => {}
+            }
+        }
+    }
+    collect(items, output, "");
+}
+
+/// Compile a dependency-free Nova package into a relocatable object and static
+/// archive. This is the first independent package artifact path; dependency
+/// interface import and stable cross-package ABI are intentionally rejected
+/// until their typed representation is available.
+fn compile_package_artifacts(input: &Path, opts: &Options) -> Result<PathBuf, String> {
+    let plan = package::build_plan(input)?;
+    if plan.packages.len() != 1 {
+        return Err("`nova package build` currently compiles one dependency-free package at a time; Nova dependency interface consumption is the next ABI milestone".into());
+    }
+    let (name, version, program, sources) = package::load_standalone_package(input)
+        .map_err(|e| diagnostics::attach_package(&e, input, "independent package loading"))?;
+    let package_node = plan.packages.first().ok_or("empty package build plan")?;
+    let root = if input.is_dir() {
+        input.to_path_buf()
+    } else {
+        input.parent().unwrap_or(Path::new(".")).to_path_buf()
+    };
+    let artifact_key = format!("{}-{}", name, &package_node.fingerprint[..8]);
+    let artifact_dir = root.join("target/debug/packages").join(artifact_key);
+    fs::create_dir_all(&artifact_dir).map_err(|e| format!("{}: {e}", artifact_dir.display()))?;
+
+    let lowered = surface::lower_with_helpers(&program, opts.helper_mode)
+        .map_err(|e| diagnostics::semantic_with_context(&e, &sources, input, "package surface"))?;
+    let hir = hir::lower(&lowered)
+        .map_err(|e| diagnostics::semantic_with_context(&e, &sources, input, "package HIR"))?;
+    let mir = mir::lower(&hir).map_err(|e| {
+        diagnostics::pipeline_error("NOVA-PKG001", &e, &sources, input, "package MIR")
+    })?;
+    let llvm_ir = codegen::generate_reachable(&mir, true);
+
+    let ir_path = artifact_dir.join("package.ll");
+    let object_path = artifact_dir.join("package.o");
+    let archive_path = artifact_dir.join(format!("lib{name}.a"));
+    fs::write(&ir_path, &llvm_ir).map_err(|e| format!("{}: {e}", ir_path.display()))?;
+
+    let mut clang = Command::new("clang");
+    clang
+        .arg("-x")
+        .arg("ir")
+        .arg("-c")
+        .arg(&ir_path)
+        .arg(format!("-O{}", opts.opt))
+        .arg("-fPIC")
+        .arg("-o")
+        .arg(&object_path);
+    if let Some(target) = &opts.target {
+        clang.arg(format!("--target={target}"));
+    }
+    if opts.debug {
+        clang.arg("-g");
+    }
+    if opts.verbose {
+        eprintln!("Nova package compiler: {clang:?}");
+    }
+    let status = clang
+        .status()
+        .map_err(|e| format!("unable to launch clang for package '{name}': {e}"))?;
+    if !status.success() {
+        return Err(format!(
+            "clang failed compiling package '{name}' ({status}); LLVM IR preserved at {}",
+            ir_path.display()
+        ));
+    }
+
+    let mut archive = Command::new("llvm-ar");
+    archive.arg("rcs").arg(&archive_path).arg(&object_path);
+    if opts.verbose {
+        eprintln!("Nova package archiver: {archive:?}");
+    }
+    let archive_status = match archive.status() {
+        Ok(status) if status.success() => status,
+        _ => {
+            let mut fallback = Command::new("ar");
+            fallback.arg("rcs").arg(&archive_path).arg(&object_path);
+            if opts.verbose {
+                eprintln!("Nova package archiver fallback: {fallback:?}");
+            }
+            let status = fallback
+                .status()
+                .map_err(|e| format!("unable to launch llvm-ar or ar: {e}"))?;
+            if !status.success() {
+                return Err(format!(
+                    "ar failed creating {} ({status})",
+                    archive_path.display()
+                ));
+            }
+            status
+        }
+    };
+    let _ = archive_status;
+
+    let interfaces = package::write_interfaces(&root, &program)?;
+    let interface_source = interfaces
+        .first()
+        .ok_or("package interface was not generated")?;
+    let interface_output = artifact_dir.join("package.nvi");
+    fs::copy(interface_source, &interface_output)
+        .map_err(|e| format!("{}: {e}", interface_output.display()))?;
+
+    let metadata = format!(
+        "NOVA-PACKAGE-ARTIFACT 1\nname {name}\nversion {version}\nfingerprint {}\nabi experimental-native-v1\nobject package.o\narchive lib{name}.a\ninterface package.nvi\n",
+        package_node.fingerprint
+    );
+    let metadata_path = artifact_dir.join("package.nvp");
+    fs::write(&metadata_path, metadata).map_err(|e| format!("{}: {e}", metadata_path.display()))?;
+    if opts.verbose {
+        eprintln!("Nova package interface: {}", interface_output.display());
+        eprintln!("Nova package object: {}", object_path.display());
+        eprintln!("Nova package archive: {}", archive_path.display());
+    }
+    println!(
+        "Built Nova package {name} {version}: {}",
+        archive_path.display()
+    );
+    Ok(archive_path)
+}
+
 fn compile_executable(input: &Path, output: &Path, opts: &Options) -> Result<(), String> {
+    let plan = package::build_plan(input)?;
+    let package_metadata = package::write_build_plan(input, &plan)?;
+    if opts.verbose {
+        for (index, node) in plan.packages.iter().enumerate() {
+            eprintln!(
+                "Nova package graph: [{}] {} {} ({})",
+                index,
+                node.name,
+                node.version,
+                node.root.display()
+            );
+        }
+        for metadata in package_metadata {
+            eprintln!("Nova package metadata: {}", metadata.display());
+        }
+    }
     let (ast, sources) = package::load_detailed(input)
         .map_err(|e| diagnostics::attach_package(&e, input, "module loading"))?;
+    let interfaces = package::write_interfaces(input, &ast)?;
+    if opts.verbose {
+        for interface in interfaces {
+            eprintln!("Nova package interface: {}", interface.display());
+        }
+    }
+    let mut build_options = opts.clone();
+    let native = package::native_link_config(input)?;
+    build_options.link_libraries.extend(native.libraries);
+    build_options.link_static.extend(native.static_libraries);
+    build_options.link_search.extend(native.search);
+    build_options.link_rpath.extend(native.rpath);
+    collect_declared_externs(&ast.items, &mut build_options.allowed_externs);
     let ast = surface::lower_with_helpers(&ast, opts.helper_mode)
         .map_err(|e| diagnostics::semantic_with_context(&e, &sources, input, "surface"))?;
     let hir = hir::lower(&ast)
@@ -588,7 +1075,11 @@ fn compile_executable(input: &Path, output: &Path, opts: &Options) -> Result<(),
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
     }
-    build(&codegen::generate_reachable(&mir, opts.keep_all_functions), output, opts)
+    build(
+        &codegen::generate_reachable(&mir, opts.keep_all_functions),
+        output,
+        &build_options,
+    )
 }
 /// Format each error independently so source attribution and specialization traces
 /// never swallow the following diagnostic. The compiler still exits non-zero.
@@ -601,8 +1092,14 @@ fn render_collected_diagnostics(
     let count = errors.len();
     let mut output = format!("error[NOVA-MULTI]: {count} independent error(s) in {phase}\n");
     for (index, error) in errors.iter().enumerate() {
-        output.push_str(&format!("\n----- diagnostic {}/{} -----\n", index + 1, count));
-        output.push_str(&diagnostics::semantic_with_context(error, sources, path, phase));
+        output.push_str(&format!(
+            "\n----- diagnostic {}/{} -----\n",
+            index + 1,
+            count
+        ));
+        output.push_str(&diagnostics::semantic_with_context(
+            error, sources, path, phase,
+        ));
         output.push('\n');
     }
     output
@@ -773,41 +1270,74 @@ fn execute() -> Result<(), String> {
         return Ok(());
     }
     if args[0] == "meta" {
-        let inspecting = args.get(1).is_some_and(|arg|arg=="inspect");
-        let expanding = args.get(1).is_some_and(|arg|arg=="expand");
-        let verifying = args.get(1).is_some_and(|arg|arg=="verify");
-        let path = PathBuf::from(args.get(if inspecting || expanding || verifying {2}else{1}).map(String::as_str).unwrap_or("."));
+        let inspecting = args.get(1).is_some_and(|arg| arg == "inspect");
+        let expanding = args.get(1).is_some_and(|arg| arg == "expand");
+        let verifying = args.get(1).is_some_and(|arg| arg == "verify");
+        let path = PathBuf::from(
+            args.get(if inspecting || expanding || verifying {
+                2
+            } else {
+                1
+            })
+            .map(String::as_str)
+            .unwrap_or("."),
+        );
         let (ast, _) = package::load_detailed(&path)?;
         if verifying {
-            let ast=proc_macros::expand(&ast)?;
-            let ast=macros::expand(&ast)?;
-            let ast=meta::expand(&ast)?;
+            let ast = proc_macros::expand(&ast)?;
+            let ast = macros::expand(&ast)?;
+            let ast = meta::expand(&ast)?;
             meta::validate(&ast)?;
             effects::validate(&ast)?;
-            let _=consteval::fold(&ast)?;
+            let _ = consteval::fold(&ast)?;
             println!("Nova Meta CTFE: compile-time assertions satisfied");
-        }
-        else if inspecting { print!("{}", meta::inspect(&ast)?); }
-        else if expanding {
-            let ast=proc_macros::expand(&ast)?;
+        } else if inspecting {
+            print!("{}", meta::inspect(&ast)?);
+        } else if expanding {
+            let ast = proc_macros::expand(&ast)?;
             print!("{}", meta::expansion_report(&ast)?);
+        } else {
+            print!("{}", meta::describe(&ast)?);
         }
-        else { print!("{}", meta::describe(&ast)?); }
         return Ok(());
     }
     if args[0] == "lint" {
         let path = PathBuf::from(args.get(1).map(String::as_str).unwrap_or("."));
         let (ast, sources) = package::load_detailed(&path)
             .map_err(|e| diagnostics::attach_package(&e, &path, "module loading"))?;
-        let metadata_warnings=meta::lint(&ast);
-        for warning in &metadata_warnings {println!("{warning}");}
+        let metadata_warnings = meta::lint(&ast);
+        for warning in &metadata_warnings {
+            println!("{warning}");
+        }
         let ast = surface::lower(&ast)
             .map_err(|e| diagnostics::semantic_with_context(&e, &sources, &path, "surface"))?;
         let hir = hir::lower(&ast)
             .map_err(|e| diagnostics::semantic_with_context(&e, &sources, &path, "hir"))?;
         let _ = mir::lower(&hir)
             .map_err(|e| diagnostics::pipeline_error("NOVA-IR001", &e, &sources, &path, "mir"))?;
-        println!("Nova lint: {} warning(s)", devtools::lint(&hir)+metadata_warnings.len());
+        println!(
+            "Nova lint: {} warning(s)",
+            devtools::lint(&hir) + metadata_warnings.len()
+        );
+        return Ok(());
+    }
+    if args[0] == "package" {
+        if args.get(1).map(String::as_str) != Some("build") {
+            return Err("usage: nova package build [directory] [--verbose]".into());
+        }
+        let path = PathBuf::from(
+            args.get(2)
+                .filter(|value| !value.starts_with('-'))
+                .map(String::as_str)
+                .unwrap_or("."),
+        );
+        let option_start = if args.get(2).is_some_and(|value| !value.starts_with('-')) {
+            3
+        } else {
+            2
+        };
+        let opts = options(&args[option_start..])?;
+        compile_package_artifacts(&path, &opts)?;
         return Ok(());
     }
     if args[0] == "new" {
@@ -868,9 +1398,23 @@ fn execute() -> Result<(), String> {
         PathBuf::from(".")
     };
     let option_start = if has_path { 2 } else { 1 };
-    let opts = options(&args[option_start..])?;
+    let mut opts = options(&args[option_start..])?;
+    let native = package::native_link_config(&path)?;
+    opts.link_libraries.extend(native.libraries);
+    opts.link_static.extend(native.static_libraries);
+    opts.link_search.extend(native.search);
+    opts.link_rpath.extend(native.rpath);
     let (ast, sources) = package::load_detailed_with_paths(&path, &opts.module_paths)
         .map_err(|e| diagnostics::attach_package(&e, &path, "module loading"))?;
+    if command == "build" {
+        let interfaces = package::write_interfaces(&path, &ast)?;
+        if opts.verbose {
+            for interface in interfaces {
+                eprintln!("Nova package interface: {}", interface.display());
+            }
+        }
+    }
+    collect_declared_externs(&ast.items, &mut opts.allowed_externs);
     if command == "dump-ast" {
         println!("{ast:#?}");
         return Ok(());
@@ -945,17 +1489,21 @@ fn execute() -> Result<(), String> {
         // selected package's properties file explicitly instead, without
         // overriding a user-provided NB_PROPERTIES environment variable.
         if std::env::var_os("NB_PROPERTIES").is_none() {
-            let project_root = if path.is_dir() { path.as_path() } else {
+            let project_root = if path.is_dir() {
+                path.as_path()
+            } else {
                 path.parent().unwrap_or_else(|| std::path::Path::new("."))
             };
             let properties = project_root.join("application.properties");
             if properties.is_file() {
-                let absolute = properties.canonicalize()
+                let absolute = properties
+                    .canonicalize()
                     .map_err(|e| format!("{}: {e}", properties.display()))?;
                 process.env("NB_PROPERTIES", absolute);
             }
         }
-        let status = process.status()
+        let status = process
+            .status()
             .map_err(|e| format!("failed to execute {}: {e}", bin.display()))?;
         println!("Program exit code: {:?}", status.code());
         if !status.success() {
@@ -1008,56 +1556,82 @@ mod tests {
     #[test]
     fn all_errors_collects_independent_surface_specialization_errors() {
         let code = "fn first() -> i32 { return missing_first(); } fn second() -> i32 { return missing_second(); }";
-        let ast = grammar::ProgramParser::new().parse(&strip_comments(code)).unwrap();
-        let errors = surface::lower_with_helpers_all_errors(
-            &ast, compile_helpers::HelperMode::Macro,
-        ).unwrap_err();
+        let ast = grammar::ProgramParser::new()
+            .parse(&strip_comments(code))
+            .unwrap();
+        let errors =
+            surface::lower_with_helpers_all_errors(&ast, compile_helpers::HelperMode::Macro)
+                .unwrap_err();
         assert_eq!(errors.len(), 2, "{errors:?}");
-        assert!(errors.iter().any(|error| error.contains("missing_first")), "{errors:?}");
-        assert!(errors.iter().any(|error| error.contains("missing_second")), "{errors:?}");
+        assert!(
+            errors.iter().any(|error| error.contains("missing_first")),
+            "{errors:?}"
+        );
+        assert!(
+            errors.iter().any(|error| error.contains("missing_second")),
+            "{errors:?}"
+        );
     }
 
     #[test]
     fn all_errors_accumulates_independent_hir_function_bodies() {
         let code = "fn first() -> i32 { return true; } fn second() -> i32 { return \"wrong\"; }";
-        let ast = grammar::ProgramParser::new().parse(&strip_comments(code)).unwrap();
+        let ast = grammar::ProgramParser::new()
+            .parse(&strip_comments(code))
+            .unwrap();
         let errors = hir::lower_all_errors(&ast).unwrap_err();
         assert_eq!(errors.len(), 2, "{errors:?}");
-        assert!(errors.iter().any(|error| error.contains("first")), "{errors:?}");
-        assert!(errors.iter().any(|error| error.contains("second")), "{errors:?}");
+        assert!(
+            errors.iter().any(|error| error.contains("first")),
+            "{errors:?}"
+        );
+        assert!(
+            errors.iter().any(|error| error.contains("second")),
+            "{errors:?}"
+        );
         assert!(hir::lower(&ast).is_err(), "default still fails fast");
     }
 
     #[test]
     fn compiler_helper_mode_flag_parses_and_checks_values() {
-        let args=vec!["--helpers".into(), "function".into(), "--runtime-zero".into()];
-        let opts=options(&args).unwrap();
-        assert_eq!(opts.helper_mode,compile_helpers::HelperMode::Function);
+        let args = vec![
+            "--helpers".into(),
+            "function".into(),
+            "--runtime-zero".into(),
+        ];
+        let opts = options(&args).unwrap();
+        assert_eq!(opts.helper_mode, compile_helpers::HelperMode::Function);
         assert!(opts.runtime_zero);
-        assert!(options(&["--helpers".into(),"invalid".into()]).is_err());
+        assert!(options(&["--helpers".into(), "invalid".into()]).is_err());
     }
     #[test]
     fn global_const_compiles_without_global_runtime_storage() {
-        let ll=compile(r#"
+        let ll = compile(
+            r#"
             comptime const AT_FDCWD: i32 = -100;
             const O_WRITE: i32 = 1 | 64 | 512;
             fn main()->i32 {return AT_FDCWD + O_WRITE - 477;}
-        "#).unwrap();
-        assert!(ll.contains("define i32 @main"),"{ll}");
-        assert!(!ll.contains("AT_FDCWD"),"{ll}");
-        assert!(!ll.contains("O_WRITE"),"{ll}");
+        "#,
+        )
+        .unwrap();
+        assert!(ll.contains("define i32 @main"), "{ll}");
+        assert!(!ll.contains("AT_FDCWD"), "{ll}");
+        assert!(!ll.contains("O_WRITE"), "{ll}");
     }
     #[test]
     fn namespaces_and_typedef_compile_time_constants_are_lowered() {
-        let ll=compile(r#"
+        let ll = compile(
+            r#"
             typedef LinuxFd = i32;
             namespace posix {
                 pub comptime const AT_FDCWD: LinuxFd = -100;
             }
             fn main()->i32 {return posix::AT_FDCWD + 100;}
-        "#).unwrap();
-        assert!(ll.contains("define i32 @main"),"{ll}");
-        assert!(!ll.contains("AT_FDCWD"),"{ll}");
+        "#,
+        )
+        .unwrap();
+        assert!(ll.contains("define i32 @main"), "{ll}");
+        assert!(!ll.contains("AT_FDCWD"), "{ll}");
     }
     #[test]
     fn entry_accepts_legacy_main_and_c_argv() {
@@ -1075,7 +1649,10 @@ mod tests {
             let low = mir::lower(&high).unwrap();
             let llvm = codegen::generate(&low);
             if source.contains("argc:") {
-                assert!(llvm.contains("define i32 @main(i32 %arg0, ptr %arg1)"), "{llvm}");
+                assert!(
+                    llvm.contains("define i32 @main(i32 %arg0, ptr %arg1)"),
+                    "{llvm}"
+                );
             } else {
                 assert!(llvm.contains("define i32 @main()"), "{llvm}");
             }
@@ -1131,7 +1708,8 @@ fn main() -> i32 {
     }
     #[test]
     fn character_literals_have_distinct_unicode_type_and_llvm_abi() {
-        let llvm = compile(r#"
+        let llvm = compile(
+            r#"
             fn main() -> i32 {
                 let letter: char = 'A';
                 let accent: char = 'ç';
@@ -1144,18 +1722,27 @@ fn main() -> i32 {
                 if rocket as u32 != 128640 { return 4; }
                 return 0;
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(llvm.contains("define i32 @main"));
         assert!(llvm.contains("i32 128640") || llvm.contains("128640"));
     }
     #[test]
     fn character_literals_cannot_be_used_for_implicit_arithmetic() {
-        let error = compile("fn main()->i32 { let letter:char='A'; let n=letter+1; return 0; }").unwrap_err();
-        assert!(error.contains("equal types") || error.contains("numeric") || error.contains("expected char, found i32"), "{error}");
+        let error = compile("fn main()->i32 { let letter:char='A'; let n=letter+1; return 0; }")
+            .unwrap_err();
+        assert!(
+            error.contains("equal types")
+                || error.contains("numeric")
+                || error.contains("expected char, found i32"),
+            "{error}"
+        );
     }
     #[test]
     fn character_literal_out_of_range_is_reported() {
-        let error = compile("fn main()->i32 { let tiny:u8='🚀'; return tiny as i32; }").unwrap_err();
+        let error =
+            compile("fn main()->i32 { let tiny:u8='🚀'; return tiny as i32; }").unwrap_err();
         assert!(error.contains("NOVA-CHAR003"), "{error}");
     }
 
@@ -1510,7 +2097,8 @@ fn main() -> i32 {
 
     #[test]
     fn borrow_array_struct_element_is_a_real_place() {
-        let ir = compile(r#"
+        let ir = compile(
+            r#"
             struct Item { id: i32, points: i32 }
             fn main() -> i32 {
                 let items: [Item; 2] = [
@@ -1521,15 +2109,21 @@ fn main() -> i32 {
                 let item: &Item = &items[index];
                 return (*item).id - 9;
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(ir.contains("borrow.index.ok"), "{ir}");
-        assert!(ir.contains("getelementptr inbounds [2 x %struct.Item], ptr %slot"), "{ir}");
+        assert!(
+            ir.contains("getelementptr inbounds [2 x %struct.Item], ptr %slot"),
+            "{ir}"
+        );
         assert!(ir.contains("@llvm.trap"), "{ir}");
     }
 
     #[test]
     fn borrow_nested_field_from_array() {
-        let ir = compile(r#"
+        let ir = compile(
+            r#"
             struct Item { id: i32, points: i32 }
             fn main() -> i32 {
                 let items: [Item; 2] = [
@@ -1539,27 +2133,36 @@ fn main() -> i32 {
                 let points: &i32 = &items[1].points;
                 return *points - 20;
             }
-        "#).unwrap();
-        assert!(ir.contains("getelementptr inbounds [2 x %struct.Item]"), "{ir}");
+        "#,
+        )
+        .unwrap();
+        assert!(
+            ir.contains("getelementptr inbounds [2 x %struct.Item]"),
+            "{ir}"
+        );
         assert!(ir.contains("getelementptr inbounds %struct.Item"), "{ir}");
     }
 
     #[test]
     fn borrow_direct_struct_field_without_copying_owner() {
-        let ir = compile(r#"
+        let ir = compile(
+            r#"
             struct Item { id: i32, points: i32 }
             fn main() -> i32 {
                 let item = new Item { id: 7, points: 11 };
                 let points: &i32 = &item.points;
                 return *points - 11;
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(ir.contains("getelementptr inbounds %struct.Item"), "{ir}");
     }
 
     #[test]
     fn exclusive_borrow_of_array_element_supports_mutation() {
-        let ir = compile(r#"
+        let ir = compile(
+            r#"
             struct Item { id: i32 }
             fn main() -> i32 {
                 let mut items: [Item; 2] = [
@@ -1569,63 +2172,84 @@ fn main() -> i32 {
                 *id = 21;
                 return *id - 21;
             }
-        "#).unwrap();
-        assert!(ir.contains("getelementptr inbounds [2 x %struct.Item]"), "{ir}");
+        "#,
+        )
+        .unwrap();
+        assert!(
+            ir.contains("getelementptr inbounds [2 x %struct.Item]"),
+            "{ir}"
+        );
     }
 
     #[test]
     fn array_borrow_prevents_conflicting_mutable_borrow() {
-        let err = compile(r#"
+        let err = compile(
+            r#"
             fn main() -> i32 {
                 let mut values: [i32; 2] = [1, 2];
                 let first: &i32 = &values[0];
                 let second: &mut i32 = &mut values[1];
                 return *first + *second;
             }
-        "#).unwrap_err();
+        "#,
+        )
+        .unwrap_err();
         assert!(err.contains("borrow"), "{err}");
     }
 
     #[test]
     fn borrowed_array_cannot_be_overwritten() {
-        let err = compile(r#"
+        let err = compile(
+            r#"
             fn main() -> i32 {
                 let mut values: [i32; 2] = [1, 2];
                 let first: &i32 = &values[0];
                 values = [3, 4];
                 return *first;
             }
-        "#).unwrap_err();
+        "#,
+        )
+        .unwrap_err();
         assert!(err.contains("borrow"), "{err}");
     }
 
     #[test]
     fn array_borrow_literal_out_of_bounds_is_rejected() {
-        let err = compile(r#"
+        let err = compile(
+            r#"
             fn main() -> i32 {
                 let values: [i32; 2] = [1, 2];
                 let element: &i32 = &values[3];
                 return *element;
             }
-        "#).unwrap_err();
+        "#,
+        )
+        .unwrap_err();
         assert!(err.contains("out of bounds"), "{err}");
     }
 
     #[test]
     fn mutable_array_element_borrow_requires_mutable_root() {
-        let err = compile(r#"
+        let err = compile(
+            r#"
             fn main() -> i32 {
                 let values: [i32; 2] = [1, 2];
                 let element: &mut i32 = &mut values[0];
                 return *element;
             }
-        "#).unwrap_err();
-        assert!(err.contains("mutable borrow") || err.contains("let mut"), "{err}");
+        "#,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("mutable borrow") || err.contains("let mut"),
+            "{err}"
+        );
     }
 
     #[test]
     fn owning_array_drops_each_element_without_dropping_twice() {
-        let ir = compile(r#"
+        let ir = compile(
+            r#"
             struct Resource { token: i32 }
             impl Resource {
                 fn drop(self: Resource) -> () { return; }
@@ -1637,13 +2261,16 @@ fn main() -> i32 {
                 let first: &Resource = &resources[0];
                 return (*first).token - 1;
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert_eq!(ir.matches("call void @Resource__drop(").count(), 2, "{ir}");
     }
 
     #[test]
     fn moving_owning_element_out_of_array_is_still_rejected() {
-        let err = compile(r#"
+        let err = compile(
+            r#"
             struct Resource { token: i32 }
             impl Resource { fn drop(self: Resource) -> () { return; } }
             fn main() -> i32 {
@@ -1653,13 +2280,19 @@ fn main() -> i32 {
                 let removed: Resource = items[0];
                 return removed.token;
             }
-        "#).unwrap_err();
-        assert!(err.contains("owning indexed element") || err.contains("move"), "{err}");
+        "#,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("owning indexed element") || err.contains("move"),
+            "{err}"
+        );
     }
 
     #[test]
     fn borrow_nested_method_receiver_does_not_move_struct() {
-        let ir = compile(r#"
+        let ir = compile(
+            r#"
             struct Item { id: i32 }
             impl Item {
                 fn get_id(self: &Item) -> i32 { return self.id; }
@@ -1668,7 +2301,9 @@ fn main() -> i32 {
                 let items: [Item; 2] = [new Item { id: 3 }, new Item { id: 5 }];
                 return items[1].get_id() - 5;
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(ir.contains("borrow.index.ok"), "{ir}");
     }
 
@@ -1800,6 +2435,77 @@ fn main() -> i32 {
         assert!(ir.contains("MiddlewareCollection__drop"), "{ir}");
     }
 
+
+    #[test]
+    fn c_abi_accepts_pointer_to_repr_c_struct() {
+        let source = r#"
+            #[repr(C)]
+            struct Point { x: i32, y: f64 }
+            [[unsafe]] extern fn c_point_sum(point: *const Point) -> i32;
+            fn main() -> i32 {
+                let point = new Point { x: 4, y: 2.0 };
+                unsafe {
+                    let raw: *const Point = &point;
+                    return c_point_sum(raw);
+                }
+            }
+        "#;
+        let ir = compile(source).unwrap();
+        assert!(ir.contains("declare i32 @c_point_sum(ptr"), "{ir}");
+    }
+
+    #[test]
+    fn c_abi_rejects_pointer_to_non_repr_struct() {
+        let error = compile(r#"
+            struct Point { x: i32 }
+            [[unsafe]] extern fn c_point_read(point: *const Point) -> i32;
+            fn main() -> i32 { return 0; }
+        "#).unwrap_err();
+        assert!(error.contains("unsupported value across C ABI"), "{error}");
+    }
+
+    #[test]
+    fn repr_c_rejects_non_c_field_types() {
+        let error = compile(r#"
+            #[repr(C)]
+            struct Invalid { text: str }
+            fn main() -> i32 { return 0; }
+        "#).unwrap_err();
+        assert!(error.contains("non-C-compatible type"), "{error}");
+    }
+
+    #[test]
+    fn custom_drop_runs_before_owned_fields_in_reverse_order() {
+        let ir = compile(r#"
+            struct First { id: i32 }
+            impl First { fn drop(self: First) -> () { return; } }
+            struct Second { id: i32 }
+            impl Second { fn drop(self: Second) -> () { return; } }
+            struct LocalGuard { id: i32 }
+            impl LocalGuard { fn drop(self: LocalGuard) -> () { return; } }
+            struct Parent { first: First, second: Second }
+            impl Parent {
+                fn drop(self: Parent) -> () {
+                    let guard = new LocalGuard { id: 9 };
+                    return;
+                }
+            }
+            fn main() -> i32 {
+                let parent = new Parent {
+                    first: new First { id: 1 },
+                    second: new Second { id: 2 }
+                };
+                return 0;
+            }
+        "#).unwrap();
+        let parent_drop = ir.split("define void @Parent__drop(").nth(1).unwrap();
+        let local_call = parent_drop.find("call void @LocalGuard__drop(").unwrap();
+        let first_call = parent_drop.find("call void @First__drop(").unwrap();
+        let second_call = parent_drop.find("call void @Second__drop(").unwrap();
+        assert!(local_call < second_call && second_call < first_call,
+            "body locals drop before fields, then fields in reverse declaration order: {parent_drop}");
+    }
+
     #[test]
     fn explicit_destructor_move_suppresses_automatic_drop() {
         let ir = compile(
@@ -1849,15 +2555,31 @@ fn main() -> i32 {
         assert!(!needs_net_runtime(declarations));
         assert!(!needs_core_runtime(declarations));
 
-        assert!(needs_coroutine_runtime("%task = call i64 @__nova_coro_create(ptr %fn, ptr null)"));
-        assert!(needs_coroutine_runtime("call void @__nova_std__old__task____run_until_idle()"));
-        assert!(needs_coroutine_runtime("call void @__nova_std__old__generator____drop(i64 %gen)"));
-        assert!(needs_net_runtime("%fd = call i32 @__nova_std__old__net____tcp_listen(i64 9999)"));
-        assert!(needs_core_runtime("%m = call ptr @__nova_std__old__sync____mutex_new(i64 0)"));
-        assert!(needs_core_runtime("%t = call ptr @__nova_std__old__thread____thread_start(ptr %f)"));
+        assert!(needs_coroutine_runtime(
+            "%task = call i64 @__nova_coro_create(ptr %fn, ptr null)"
+        ));
+        assert!(needs_coroutine_runtime(
+            "call void @__nova_std__old__task____run_until_idle()"
+        ));
+        assert!(needs_coroutine_runtime(
+            "call void @__nova_std__old__generator____drop(i64 %gen)"
+        ));
+        assert!(needs_net_runtime(
+            "%fd = call i32 @__nova_std__old__net____tcp_listen(i64 9999)"
+        ));
+        assert!(needs_core_runtime(
+            "%m = call ptr @__nova_std__old__sync____mutex_new(i64 0)"
+        ));
+        assert!(needs_core_runtime(
+            "%t = call ptr @__nova_std__old__thread____thread_start(ptr %f)"
+        ));
         // Taking a function address is a reference too, not merely calling it.
-        assert!(needs_net_runtime("store ptr @__nova_std__old__net____tcp_listen, ptr %slot"));
-        assert!(!needs_net_runtime("; call i32 @__nova_std__old__net____tcp_listen(i64 9999)"));
+        assert!(needs_net_runtime(
+            "store ptr @__nova_std__old__net____tcp_listen, ptr %slot"
+        ));
+        assert!(!needs_net_runtime(
+            "; call i32 @__nova_std__old__net____tcp_listen(i64 9999)"
+        ));
     }
 
     #[test]
@@ -1874,12 +2596,41 @@ fn main() -> i32 {
     }
 
     #[test]
+    fn atomic_bool_symbols_activate_atomic_runtime() {
+        assert!(!needs_atomic_runtime(
+            "declare i1 @__nova_atomic_bool_load(ptr, i32)\\n"
+        ));
+        assert!(needs_atomic_runtime(
+            "%value = call i1 @__nova_atomic_bool_load(ptr %address, i32 1)\\n"
+        ));
+        assert!(needs_atomic_runtime(
+            "store ptr @__nova_atomic_bool_compare_exchange, ptr %slot\\n"
+        ));
+        assert!(needs_atomic_runtime(
+            "%value = call i32 @__nova_atomic_i32_load(ptr %address, i32 1)\\n"
+        ));
+        assert!(needs_atomic_runtime(
+            "%value = call ptr @__nova_atomic_ptr_load(ptr %address, i32 1)\\n"
+        ));
+    }
+
+    #[test]
     fn pure_llvm_program_needs_no_custom_c_runtime() {
-        assert!(!needs_core_runtime("define i32 @main() {\nentry:\n  ret i32 42\n}\n"));
-        assert!(!needs_core_runtime("declare i64 @__nova_std__old__raw____allocate(i64, i64)\n"));
-        assert!(needs_core_runtime("%ptr = call ptr @__nova_std__old__raw____allocate(i64 8, i64 8)"));
-        assert!(needs_core_runtime("call void @__nova_json_builder_append(i64 1, ptr %p)"));
-        assert!(needs_core_runtime("store ptr @__nova_std__old__string____destroy, ptr %slot"));
+        assert!(!needs_core_runtime(
+            "define i32 @main() {\nentry:\n  ret i32 42\n}\n"
+        ));
+        assert!(!needs_core_runtime(
+            "declare i64 @__nova_std__old__raw____allocate(i64, i64)\n"
+        ));
+        assert!(needs_core_runtime(
+            "%ptr = call ptr @__nova_std__old__raw____allocate(i64 8, i64 8)"
+        ));
+        assert!(needs_core_runtime(
+            "call void @__nova_json_builder_append(i64 1, ptr %p)"
+        ));
+        assert!(needs_core_runtime(
+            "store ptr @__nova_std__old__string____destroy, ptr %slot"
+        ));
     }
 
     #[test]
@@ -1898,7 +2649,8 @@ fn main() -> i32 {
     }
     #[test]
     fn raw_pointer_address_casts_are_explicit_and_unsafe() {
-        let ok = compile(r#"fn main()->i32 {
+        let ok = compile(
+            r#"fn main()->i32 {
             unsafe {
                 let mut value:i64 = 41;
                 let pointer:*mut i64 = &mut value as (*mut i64);
@@ -1906,15 +2658,20 @@ fn main() -> i32 {
                 let second:*mut i64 = raw as (*mut i64);
                 return (*second as i32) - 41;
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
         assert!(ok.contains("ptrtoint"), "{ok}");
         assert!(ok.contains("inttoptr"), "{ok}");
-        let rejected = compile(r#"fn main()->i32 {
+        let rejected = compile(
+            r#"fn main()->i32 {
             let value:i32 = 42;
             let pointer:*const i32 = &value as (*const i32);
             let address:u64 = pointer as u64;
             return 0;
-        }"#).unwrap_err();
+        }"#,
+        )
+        .unwrap_err();
         assert!(rejected.contains("unsafe"), "{rejected}");
     }
 
@@ -1943,7 +2700,7 @@ fn main() -> i32 {
 
 #[cfg(test)]
 mod foreign_import_stage14_tests {
-    use super::{reachable_foreign_symbols, unapproved_foreign_symbols, options};
+    use super::{options, reachable_foreign_symbols, unapproved_foreign_symbols};
     #[test]
     fn deny_all_extern_rejects_even_approved_platform_calls() {
         let program = concat!(
@@ -1961,7 +2718,8 @@ mod foreign_import_stage14_tests {
     }
     #[test]
     fn absent_foreign_symbol_is_not_treated_as_live() {
-        let program = "declare i64 @printf(ptr, ...)\ndefine i32 @main() {\nentry:\n  ret i32 0\n}\n";
+        let program =
+            "declare i64 @printf(ptr, ...)\ndefine i32 @main() {\nentry:\n  ret i32 0\n}\n";
         assert!(reachable_foreign_symbols(program).is_empty());
     }
     #[test]

@@ -3,16 +3,18 @@ use std::memory::raw;
 use std::text::text::Text;
 use std::core::types::Size;
 use std::core::value::Clone;
+use std::core::value::Eq;
 use std::core::value::Display;
 use std::serialization::traits::Serialize;
 use std::serialization::traits::Deserialize;
 use std::text::traits::Appendable;
 use std::text::traits::TextLike;
 
+@RequiredArgsConstructor
 pub class String : std::text::text::Text {}
 
 impl String {
-    static fn new() -> String { return new std::text::string::String {}; }
+    //static fn new() -> String { return new std::text::string::String {}; }
     static fn with_capacity(bytes: Size) -> Self {
         let mut result: String = String::new();
         result.reserve(bytes);
@@ -21,6 +23,64 @@ impl String {
     static fn from(value: str) -> Self {
         let mut result: String = String::new();
         result.append(value);
+        return result;
+    }
+    // Converts one Unicode scalar value to its UTF-8 byte sequence.
+    static fn from_char(value: char) -> Self {
+        let code: u32 = value as u32;
+        let mut result: String = String::with_capacity(4);
+        let mut count: Size = 0;
+
+        unsafe {
+            if code <= 127 {
+                let first: *mut u8 = raw::element_at::<u8>(result.data, 0);
+                *first = code as u8;
+                count = 1;
+            } else if code <= 2047 {
+                let first: *mut u8 = raw::element_at::<u8>(result.data, 0);
+                let second: *mut u8 = raw::element_at::<u8>(result.data, 1);
+                *first = (192 + (code / 64)) as u8;
+                *second = (128 + (code % 64)) as u8;
+                count = 2;
+            } else if code <= 65535 {
+                let first: *mut u8 = raw::element_at::<u8>(result.data, 0);
+                let second: *mut u8 = raw::element_at::<u8>(result.data, 1);
+                let third: *mut u8 = raw::element_at::<u8>(result.data, 2);
+                *first = (224 + (code / 4096)) as u8;
+                *second = (128 + ((code / 64) % 64)) as u8;
+                *third = (128 + (code % 64)) as u8;
+                count = 3;
+            } else {
+                let first: *mut u8 = raw::element_at::<u8>(result.data, 0);
+                let second: *mut u8 = raw::element_at::<u8>(result.data, 1);
+                let third: *mut u8 = raw::element_at::<u8>(result.data, 2);
+                let fourth: *mut u8 = raw::element_at::<u8>(result.data, 3);
+
+                *first = (240 + (code / 262144)) as u8;
+                *second = (128 + ((code / 4096) % 64)) as u8;
+                *third = (128 + ((code / 64) % 64)) as u8;
+                *fourth = (128 + (code % 64)) as u8;
+                count = 4;
+            }
+
+            result.length = count;
+
+            let terminator: *mut u8 = raw::element_at::<u8>(result.data, count);
+            *terminator = 0;
+        }
+
+        return result;
+    }
+    // Construct an owned Nova String from a conventional NUL-terminated C string.
+    static fn from_cstr(value: *const u8) -> Self {
+        let count: Size = std::text::cstr::length(value);
+        let mut result: String = String::with_capacity(count);
+        unsafe {
+            core::copy(result.data, value, count);
+            result.length = count;
+            let terminator: *mut u8 = raw::element_at::<u8>(result.data, count);
+            *terminator = 0;
+        }
         return result;
     }
     fn append(self: &mut String, value: str) -> () {
@@ -39,7 +99,6 @@ impl String {
             let terminator: *mut u8 = raw::element_at::<u8>(self.data, self.length);
             *terminator = 0;
         }
-        return;
     }
     fn as_str(self: &String) -> str {
         if self.capacity == 0 { return ""; }
@@ -60,6 +119,21 @@ impl String {
         if index >= self.length { return 0; }
         unsafe { return *raw::element_at::<u8>(self.data, index); }
     }
+    // Returns an owned copy of a byte range. The returned String is always
+    // NUL-terminated and can safely be exposed as a borrowed C-compatible view.
+    fn substring(self: &String, start: Size, count: Size) -> String {
+        if start > self.length || count > self.length - start || count == 0 {
+            return String::new();
+        }
+        let mut result: String = String::with_capacity(count);
+        unsafe {
+            core::copy(result.data, raw::element_at::<u8>(self.data, start) as (*const u8), count);
+            result.length = count;
+            let terminator: *mut u8 = raw::element_at::<u8>(result.data, count);
+            *terminator = 0;
+        }
+        return result;
+    }
     fn backspace(self: &mut String) -> () {
         if self.length == 0 { return; }
         self.length -= 1;
@@ -75,7 +149,38 @@ impl String {
     fn drop(self: String) -> () {
         unsafe { raw::deallocate_bytes(self.data); }
         return;
-    }    
+    }
+
+    fn isspace_at(self: &String, index: Size) -> bool
+    {
+        with(self.byte_at(index)) {
+            return it == ' '
+            || it == '\t'
+            || it == '\n'
+            // TODO|| it == '\v'
+            // TODO|| it == '\f'
+            // TODO|| it == '\r'
+            ;
+        }
+    }
+
+    fn eq_ref(self: &String, other: &String) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
+
+        let mut index: u64 = 0;
+
+        while index < self.len() {
+            if self.byte_at(index) != other.byte_at(index) {
+                return false;
+            }
+
+            index += 1;
+        }
+
+        return true;
+    }
 }
 
 impl TextLike for String {
@@ -90,6 +195,7 @@ impl Appendable for String {
 
 pub fn new_string() -> String { return String::new(); }
 pub fn from_text(value: str) -> String { return String::from(value); }
+pub fn from_char(value: char) -> String { return String::from_char(value); }
 pub fn owned_text(value: str) -> impl TextLike { return String::from(value); }
 pub fn text_length(value: str) -> Size { return core::text_size(value); }
 // Cross-module callers use these free functions so the receiver keeps its
@@ -205,6 +311,12 @@ pub fn format_add_owned(base: String, value: String) -> String {
     let mut result: String = base;
     append_text(&mut result, as_text(&value));
     return result;
+}
+
+impl Eq for String {
+    fn equals(self: &String, other: &String) -> bool {
+        return self.eq_ref(other);
+    }
 }
 
 impl Clone for String {

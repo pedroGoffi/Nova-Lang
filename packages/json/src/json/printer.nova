@@ -1,0 +1,318 @@
+
+use super::value::JsonValue;
+use std::io::file::File;
+use std::text::string::String;
+use std::collections::vec::Vec;
+use std::collections::map::Map;
+
+comptime const LEVEL_STEP: i32 = 2;
+
+class JsonPrinterImpl {}
+
+impl JsonPrinterImpl
+{
+    static fn json_line_ident(sb: &mut String, level: i32) -> ()
+    {
+        let mut i: i32 = 0;
+
+        unsafe {
+            while i < level * LEVEL_STEP {
+                sb.append(" ");
+                i += 1;
+            }
+        }
+        return;
+    }
+
+    static fn json_null(sb: &mut String) -> ()
+    {
+        unsafe { sb.append("null"); }
+        return;
+    }
+
+    static fn json_integer(sb: &mut String, value: i64) -> ()
+    {
+        if value == -9223372036854775807 - 1 {
+            unsafe { sb.append("-9223372036854775808"); }
+            return;
+        }
+
+        let mut number: u64 = 0;
+
+        if value < 0 {
+            unsafe { sb.append("-"); }
+            number = (-value) as u64;
+        } else {
+            number = value as u64;
+        }
+
+        let mut divisor: u64 = 1;
+
+        while number / divisor >= 10 {
+            divisor *= 10;
+        }
+
+        unsafe {
+            while divisor > 0 {
+                let digit: u64 = (number / divisor) % 10;
+
+
+                if digit == 0 { sb.append("0"); }
+                else if digit == 1 { sb.append("1"); }
+                else if digit == 2 { sb.append("2"); }
+                else if digit == 3 { sb.append("3"); }
+                else if digit == 4 { sb.append("4"); }
+                else if digit == 5 { sb.append("5"); }
+                else if digit == 6 { sb.append("6"); }
+                else if digit == 7 { sb.append("7"); }
+                else if digit == 8 { sb.append("8"); }
+                else if digit == 9 { sb.append("9"); }
+
+
+                divisor /= 10;
+            }
+        }
+
+        return;
+    }
+
+    static fn json_boolean(sb: &mut String, value: bool) -> ()
+    {
+        unsafe {
+            if value {
+                sb.append("true");
+            } else {
+                sb.append("false");
+            }
+        }
+        return;
+    }
+
+    static fn json_string(sb: &mut String, value: &String) -> ()
+    {
+        unsafe {
+            sb.append("\"");
+
+            let mut index: u64 = 0;
+            let length: u64 = value.len() as u64;
+
+            while index < length {
+                let byte: u8 = value.byte_at(index as std::core::types::Size);
+
+                if byte == 34 {
+                    sb.append("\\\"");
+                    index += 1;
+                } else if byte == 92 {
+                    sb.append("\\\\");
+                    index += 1;
+                } else if byte == 8 {
+                    sb.append("\\b");
+                    index += 1;
+                } else if byte == 9 {
+                    sb.append("\\t");
+                    index += 1;
+                } else if byte == 10 {
+                    sb.append("\\n");
+                    index += 1;
+                } else if byte == 12 {
+                    sb.append("\\f");
+                    index += 1;
+                } else if byte == 13 {
+                    sb.append("\\r");
+                    index += 1;
+                } else if byte < 32 {
+                    sb.append("\\u00");
+
+                    let high: u8 = byte / 16;
+                    let low: u8 = byte % 16;
+
+                    JsonPrinterImpl::json_hex_digit(sb, high);
+                    JsonPrinterImpl::json_hex_digit(sb, low);
+
+                    index += 1;
+                } else {
+                    let mut width: u64 = 1;
+
+                    if byte >= 240 {
+                        width = 4;
+                    } else if byte >= 224 {
+                        width = 3;
+                    } else if byte >= 192 {
+                        width = 2;
+                    }
+
+                    let part: String = value.substring(
+                        index as std::core::types::Size,
+                        width as std::core::types::Size
+                    );
+
+                    sb.append(part.as_str());
+                    index += width;
+                }
+            }
+
+            sb.append("\"");
+        }
+
+        return;
+    }
+
+    static fn json_hex_digit(sb: &mut String, digit: u8) -> ()
+    {
+        unsafe {
+            if digit == 0 { sb.append("0"); }
+            else if digit == 1 { sb.append("1"); }
+            else if digit == 2 { sb.append("2"); }
+            else if digit == 3 { sb.append("3"); }
+            else if digit == 4 { sb.append("4"); }
+            else if digit == 5 { sb.append("5"); }
+            else if digit == 6 { sb.append("6"); }
+            else if digit == 7 { sb.append("7"); }
+            else if digit == 8 { sb.append("8"); }
+            else if digit == 9 { sb.append("9"); }
+            else if digit == 10 { sb.append("a"); }
+            else if digit == 11 { sb.append("b"); }
+            else if digit == 12 { sb.append("c"); }
+            else if digit == 13 { sb.append("d"); }
+            else if digit == 14 { sb.append("e"); }
+            else if digit == 15 { sb.append("f"); }
+        }
+        return;
+    }
+
+    [[unsafe]] static fn json_array(
+        sb: &mut String,
+        array: &Vec<JsonValue>,
+        level: i32
+    ) -> ()
+    {
+        let length: i32 = array.len() as i32;
+
+        if length == 0 {
+            sb.append("[]");
+            return;
+        }
+
+        sb.append("[\n");
+
+        let mut index: i32 = 0;
+
+        while index < length {
+            JsonPrinterImpl::json_line_ident(sb, level + 1);
+
+            let item = array.get_ref(index);
+
+            JsonPrinterImpl::json_value(
+                sb,
+                item,
+                level + 1
+            );
+
+            if index + 1 < length {
+                sb.append(",");
+            }
+
+            sb.append("\n");
+            index += 1;
+        }
+
+        JsonPrinterImpl::json_line_ident(sb, level);
+        sb.append("]");
+
+        return;
+    }
+
+    [[unsafe]] static fn json_object(
+        sb: &mut String,
+        object: &Map<String, JsonValue>,
+        level: i32
+    ) -> ()
+    {
+        let length: i32 = object.keys.len() as i32;
+
+        if length == 0 {
+            sb.append("{}");
+            return;
+        }
+
+        sb.append("{\n");
+
+        let mut index: i32 = 0;
+
+        while index < length {
+            JsonPrinterImpl::json_line_ident(sb, level + 1);
+
+            let key = object.keys.get_ref(index);
+            let value = object.values.get_ref(index);
+
+            JsonPrinterImpl::json_string(sb, key);
+            sb.append(": ");
+
+            JsonPrinterImpl::json_value(
+                sb,
+                value,
+                level + 1
+            );
+
+            if index + 1 < length {
+                sb.append(",");
+            }
+
+            sb.append("\n");
+            index += 1;
+        }
+
+        JsonPrinterImpl::json_line_ident(sb, level);
+        sb.append("}");
+
+        return;
+    }
+
+    [[unsafe]] static fn json_value(
+        sb: &mut String,
+        value: &JsonValue,
+        level: i32
+    ) -> ()
+    {
+        match value {
+            JsonValue::null                 => { JsonPrinterImpl::json_null(sb);                    },
+            JsonValue::integer(number)      => { JsonPrinterImpl::json_integer(sb, *number);        },
+            JsonValue::boolean(boolean)     => { JsonPrinterImpl::json_boolean(sb, *boolean);       },
+            JsonValue::string(string)       => { JsonPrinterImpl::json_string(sb, string);          },
+            JsonValue::array(array)         => { JsonPrinterImpl::json_array(sb, array, level);     },
+            JsonValue::object(object)       => { JsonPrinterImpl::json_object(sb, object, level);   }
+        }
+
+        return;
+    }
+}
+
+impl JsonValue
+{
+    [[unsafe]] fn to_json(self: &Self) -> String
+    {
+        let mut output = String::from("");
+
+        JsonPrinterImpl::json_value(
+            &mut output,
+            self,
+            0
+        );
+
+        return output;
+    }
+
+    fn print_file(self: &Self, file: &File) -> ()
+    {
+
+        let output: String = unsafe { self.to_json() };
+
+        auto writer = file
+            .writer()
+            .expect("Failed to create writer for file");
+
+        writer.write_line("======================");
+        writer.write_line(output.as_str());
+        writer.write_line("======================");
+    }
+}

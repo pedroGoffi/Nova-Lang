@@ -9,6 +9,7 @@ use std::abi::native::libc::string::strstr;
 
 // High-level owned text base. Allocation and pointer manipulation stay here;
 // String and StringBuilder expose only text operations to application code.
+// @RequiredArgsConstructor
 pub class Text { data: *mut u8, capacity: Size, length: Size }
 
 impl Text {

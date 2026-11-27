@@ -1,0 +1,4 @@
+# Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
+tryexpressions 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/features/try-expressions hash=e08baae5011dd99b
+std 0.20.0 builtin hash=e91bb9ced2d7a815
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/features/try-expressions/src/main.nova hash=e08baae5011dd99b

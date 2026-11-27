@@ -26,9 +26,16 @@ impl<T> Storage<T> {
             };
         }
     }
+
+    fn request(self: &mut Storage<T>, requested: Size) -> Result<*mut T, Error>
+    {
+        unsafe { self.grow(requested); }
+        Ok(self.data_ptr())
+    }
     fn data_ptr(self: &Storage<T>) -> *mut T { return self.data; }
     fn capacity(self: &Storage<T>) -> Size { return self.capacity; }
-    [[unsafe]] fn grow(self: &mut Storage<T>, requested: Size) -> () {
+    [[unsafe]]
+    fn grow(self: &mut Storage<T>, requested: Size) -> () {
         if requested <= self.capacity { return; }
         let max: Size = -1 as Size;
         let mut target_capacity: Size = self.capacity;

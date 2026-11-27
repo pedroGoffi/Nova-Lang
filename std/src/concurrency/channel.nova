@@ -4,7 +4,7 @@ use std::error::error::Error;
 use std::error::result::Result;
 pub class Channel<T> { values: Vec<T>, closed: bool }
 impl<T> Channel<T> {
-    static fn new() -> Self { return new Channel<T> { values: Vec::new(), closed: false }; }
+    static fn new() -> Self { return new Channel<T> { values: Vec::new::<V>(), closed: false }; }
     fn send(self: &Channel<T>, value: T) -> Result<(),Error> {
         if self.closed { return Err(Error::new(-1, "channel is closed")); }
         self.values.push(value);

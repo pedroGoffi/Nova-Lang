@@ -1,0 +1,9 @@
+
+extern fn nova_native_add(left: i32, right: i32) -> i32;
+extern fn strlen(x: str) -> i64;
+fn main() -> i32 {
+    auto str = "hello, world!\n";
+    auto x = strlen(str);
+    println!("len({str}) = {x}\n");
+    return nova_native_add(20, 22) - 42;
+}

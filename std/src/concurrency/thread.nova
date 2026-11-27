@@ -1,3 +1,4 @@
+use std::abi::llvm::thread_yield;
 use std::abi::llvm::thread_start;
 use std::abi::llvm::thread_join;
 pub class Thread { identifier: i64 }
@@ -8,4 +9,10 @@ impl Thread {
         return new Thread { identifier: identifier };
     }
     fn join(self: &Thread) -> i32 { unsafe { return thread_join(self.identifier as u64); } }
+}
+
+// Yield the current OS thread to the scheduler.
+pub fn yield_now() -> () {
+    thread_yield();
+    return;
 }

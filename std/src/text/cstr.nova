@@ -1,0 +1,42 @@
+// C-compatible NUL-terminated byte string operations.
+// String literals can be used directly where `*const u8` is expected.
+use std::core;
+use std::core::types::Size;
+
+pub fn length(value: *const u8) -> usize {
+    let mut index: i32 = 0;
+    while value[index] != 0 {
+        index += 1;
+    }
+    return index as usize;
+}
+
+pub fn is_empty(value: *const u8) -> bool {
+    return value[0] == 0;
+}
+
+pub fn equals(left: *const u8, right: *const u8) -> bool {
+    let mut index: i32 = 0;
+    while left[index] == right[index] && left[index] != 0 {
+        index += 1;
+    }
+    return left[index] == right[index];
+}
+
+pub fn compare(left: *const u8, right: *const u8) -> i32 {
+    let mut index: i32 = 0;
+    while left[index] == right[index] && left[index] != 0 {
+        index += 1;
+    }
+    return (left[index] as i32) - (right[index] as i32);
+}
+
+pub fn copy(destination: *mut u8, source: *const u8) -> *mut u8 {
+    // Copy the complete C string, including its NUL terminator. Use the
+    // compiler-backed byte-copy primitive instead of indexed pointer writes:
+    // raw pointer indexing is readable, but indexed assignment is not yet a
+    // supported assignment place in the surface language.
+    let byte_count: Size = length(source) + 1;
+    unsafe { core::copy(destination, source, byte_count); }
+    return destination;
+}

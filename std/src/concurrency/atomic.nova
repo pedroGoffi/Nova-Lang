@@ -1,8 +1,470 @@
-use std::abi::llvm::atomic_load_i64;
-use std::abi::llvm::atomic_store_i64;
-pub class AtomicI64 { pointer: *mut i64 }
-impl AtomicI64 {
-    [[unsafe]] static fn from_raw(pointer: *mut i64) -> Self { return new AtomicI64 { pointer: pointer }; }
-    [[unsafe]] fn load(self: &AtomicI64) -> i64 { unsafe { return atomic_load_i64(self.pointer, 5); } }
-    [[unsafe]] fn store(self: &AtomicI64, value: i64) -> () { unsafe { atomic_store_i64(self.pointer, value, 5); } return; }
+use std::concurrency::thread;
+
+// Memory-ordering values shared with runtime/nova_atomics.c.
+pub enum MemoryOrdering
+{
+    Relaxed,
+    Acquire,
+    Release,
+    AcqRel,
+    SeqCst
+}
+
+pub comptime const OrdRelaxed: i32 = 0;
+pub comptime const OrdAcquire: i32 = 1;
+pub comptime const OrdRelease: i32 = 2;
+pub comptime const OrdAcqRel: i32 = 3;
+pub comptime const OrdSeqCst: i32 = 4;
+
+fn ordering_code(ordering: MemoryOrdering) -> i32
+{
+    match ordering
+    {
+        MemoryOrdering::Relaxed => { return OrdRelaxed; }
+        MemoryOrdering::Acquire => { return OrdAcquire; }
+        MemoryOrdering::Release => { return OrdRelease; }
+        MemoryOrdering::AcqRel => { return OrdAcqRel; }
+        MemoryOrdering::SeqCst => { return OrdSeqCst; }
+    }
+}
+
+// Native runtime bindings. The compiler links runtime/nova_atomics.c only
+// when one of these symbols is reachable from the final program.
+extern fn __nova_atomic_bool_load(address: *mut u8, ordering: i32) -> bool;
+extern fn __nova_atomic_bool_store(address: *mut u8, value: bool, ordering: i32) -> ();
+extern fn __nova_atomic_bool_swap(address: *mut u8, value: bool, ordering: i32) -> bool;
+extern fn __nova_atomic_bool_compare_exchange(
+    address: *mut u8, expected: bool, desired: bool,
+    success_ordering: i32, failure_ordering: i32
+) -> bool;
+extern fn __nova_atomic_bool_is_lock_free(address: *mut u8) -> bool;
+
+extern fn __nova_atomic_i8_load(address: *mut i8, ordering: i32) -> i8;
+extern fn __nova_atomic_i8_store(address: *mut i8, value: i8, ordering: i32) -> ();
+extern fn __nova_atomic_i8_swap(address: *mut i8, value: i8, ordering: i32) -> i8;
+extern fn __nova_atomic_i8_compare_exchange(
+    address: *mut i8, expected: i8, desired: i8,
+    success_ordering: i32, failure_ordering: i32
+) -> bool;
+extern fn __nova_atomic_i8_is_lock_free(address: *mut i8) -> bool;
+
+extern fn __nova_atomic_i16_load(address: *mut i16, ordering: i32) -> i16;
+extern fn __nova_atomic_i16_store(address: *mut i16, value: i16, ordering: i32) -> ();
+extern fn __nova_atomic_i16_swap(address: *mut i16, value: i16, ordering: i32) -> i16;
+extern fn __nova_atomic_i16_compare_exchange(
+    address: *mut i16, expected: i16, desired: i16,
+    success_ordering: i32, failure_ordering: i32
+) -> bool;
+extern fn __nova_atomic_i16_is_lock_free(address: *mut i16) -> bool;
+
+extern fn __nova_atomic_u8_load(address: *mut u8, ordering: i32) -> u8;
+extern fn __nova_atomic_u8_store(address: *mut u8, value: u8, ordering: i32) -> ();
+extern fn __nova_atomic_u8_swap(address: *mut u8, value: u8, ordering: i32) -> u8;
+extern fn __nova_atomic_u8_compare_exchange(
+    address: *mut u8, expected: u8, desired: u8,
+    success_ordering: i32, failure_ordering: i32
+) -> bool;
+extern fn __nova_atomic_u8_is_lock_free(address: *mut u8) -> bool;
+
+extern fn __nova_atomic_u16_load(address: *mut u16, ordering: i32) -> u16;
+extern fn __nova_atomic_u16_store(address: *mut u16, value: u16, ordering: i32) -> ();
+extern fn __nova_atomic_u16_swap(address: *mut u16, value: u16, ordering: i32) -> u16;
+extern fn __nova_atomic_u16_compare_exchange(
+    address: *mut u16, expected: u16, desired: u16,
+    success_ordering: i32, failure_ordering: i32
+) -> bool;
+extern fn __nova_atomic_u16_is_lock_free(address: *mut u16) -> bool;
+
+extern fn __nova_atomic_i32_load(address: *mut i32, ordering: i32) -> i32;
+extern fn __nova_atomic_i32_store(address: *mut i32, value: i32, ordering: i32) -> ();
+extern fn __nova_atomic_i32_swap(address: *mut i32, value: i32, ordering: i32) -> i32;
+extern fn __nova_atomic_i32_compare_exchange(
+    address: *mut i32, expected: i32, desired: i32,
+    success_ordering: i32, failure_ordering: i32
+) -> bool;
+extern fn __nova_atomic_i32_is_lock_free(address: *mut i32) -> bool;
+
+extern fn __nova_atomic_i64_load(address: *mut i64, ordering: i32) -> i64;
+extern fn __nova_atomic_i64_store(address: *mut i64, value: i64, ordering: i32) -> ();
+extern fn __nova_atomic_i64_swap(address: *mut i64, value: i64, ordering: i32) -> i64;
+extern fn __nova_atomic_i64_compare_exchange(
+    address: *mut i64, expected: i64, desired: i64,
+    success_ordering: i32, failure_ordering: i32
+) -> bool;
+extern fn __nova_atomic_i64_is_lock_free(address: *mut i64) -> bool;
+
+extern fn __nova_atomic_u32_load(address: *mut u32, ordering: i32) -> u32;
+extern fn __nova_atomic_u32_store(address: *mut u32, value: u32, ordering: i32) -> ();
+extern fn __nova_atomic_u32_swap(address: *mut u32, value: u32, ordering: i32) -> u32;
+extern fn __nova_atomic_u32_compare_exchange(
+    address: *mut u32, expected: u32, desired: u32,
+    success_ordering: i32, failure_ordering: i32
+) -> bool;
+extern fn __nova_atomic_u32_is_lock_free(address: *mut u32) -> bool;
+
+extern fn __nova_atomic_u64_load(address: *mut u64, ordering: i32) -> u64;
+extern fn __nova_atomic_u64_store(address: *mut u64, value: u64, ordering: i32) -> ();
+extern fn __nova_atomic_u64_swap(address: *mut u64, value: u64, ordering: i32) -> u64;
+extern fn __nova_atomic_u64_compare_exchange(
+    address: *mut u64, expected: u64, desired: u64,
+    success_ordering: i32, failure_ordering: i32
+) -> bool;
+extern fn __nova_atomic_u64_is_lock_free(address: *mut u64) -> bool;
+
+extern fn __nova_atomic_ptr_load(address: *mut u8, ordering: i32) -> *mut u8;
+extern fn __nova_atomic_ptr_store(address: *mut u8, value: *mut u8, ordering: i32) -> ();
+extern fn __nova_atomic_ptr_swap(address: *mut u8, value: *mut u8, ordering: i32) -> *mut u8;
+extern fn __nova_atomic_ptr_compare_exchange(
+    address: *mut u8, expected: *mut u8, desired: *mut u8,
+    success_ordering: i32, failure_ordering: i32
+) -> bool;
+extern fn __nova_atomic_ptr_is_lock_free(address: *mut u8) -> bool;
+
+// Atomic boolean backed by a native one-byte atomic object.
+pub class AtomicBool { value: u8 }
+
+impl AtomicBool
+{
+    static fn new(value: bool) -> Self
+    {
+        let mut initial: u8 = 0;
+        if value { initial = 1; }
+        return new AtomicBool { value: initial };
+    }
+
+    fn load(self: &AtomicBool, ordering: MemoryOrdering) -> bool
+    {
+        unsafe {
+            return __nova_atomic_bool_load(
+                &self.value as (*const u8) as (*mut u8), ordering_code(ordering)
+            );
+        }
+    }
+
+    fn store(self: &AtomicBool, value: bool, ordering: MemoryOrdering) -> ()
+    {
+        unsafe {
+            __nova_atomic_bool_store(
+                &self.value as (*const u8) as (*mut u8), value, ordering_code(ordering)
+            );
+        }
+        return;
+    }
+
+    fn swap(self: &AtomicBool, value: bool, ordering: MemoryOrdering) -> bool
+    {
+        unsafe {
+            return __nova_atomic_bool_swap(
+                &self.value as (*const u8) as (*mut u8), value, ordering_code(ordering)
+            );
+        }
+    }
+
+    fn compare_exchange(
+        self: &AtomicBool, expected: bool, desired: bool,
+        success_ordering: MemoryOrdering, failure_ordering: MemoryOrdering
+    ) -> bool
+    {
+        unsafe {
+            return __nova_atomic_bool_compare_exchange(
+                &self.value as (*const u8) as (*mut u8), expected, desired,
+                ordering_code(success_ordering), ordering_code(failure_ordering)
+            );
+        }
+    }
+
+    fn is_lock_free(self: &AtomicBool) -> bool
+    {
+        unsafe {
+            return __nova_atomic_bool_is_lock_free(
+                &self.value as (*const u8) as (*mut u8)
+            );
+        }
+    }
+
+    fn get_mut(self: &mut AtomicBool) -> &mut u8
+    {
+        return &mut self.value;
+    }
+}
+
+// Native integer atomics. These are genuinely atomic and do not use a spinlock.
+pub class AtomicI8 { value: i8 }
+impl AtomicI8
+{
+    static fn new(value: i8) -> Self { return new AtomicI8 { value: value }; }
+    fn load(self: &AtomicI8, ordering: MemoryOrdering) -> i8 {
+        unsafe { return __nova_atomic_i8_load(&self.value as (*const i8) as (*mut i8), ordering_code(ordering)); }
+    }
+    fn store(self: &AtomicI8, value: i8, ordering: MemoryOrdering) -> () {
+        unsafe { __nova_atomic_i8_store(&self.value as (*const i8) as (*mut i8), value, ordering_code(ordering)); }
+        return;
+    }
+    fn swap(self: &AtomicI8, value: i8, ordering: MemoryOrdering) -> i8 {
+        unsafe { return __nova_atomic_i8_swap(&self.value as (*const i8) as (*mut i8), value, ordering_code(ordering)); }
+    }
+    fn compare_exchange(self: &AtomicI8, expected: i8, desired: i8, success: MemoryOrdering, failure: MemoryOrdering) -> bool {
+        unsafe { return __nova_atomic_i8_compare_exchange(&self.value as (*const i8) as (*mut i8), expected, desired, ordering_code(success), ordering_code(failure)); }
+    }
+    fn is_lock_free(self: &AtomicI8) -> bool {
+        unsafe { return __nova_atomic_i8_is_lock_free(&self.value as (*const i8) as (*mut i8)); }
+    }
+    fn get_mut(self: &mut AtomicI8) -> &mut i8 { return &mut self.value; }
+}
+
+pub class AtomicI16 { value: i16 }
+impl AtomicI16
+{
+    static fn new(value: i16) -> Self { return new AtomicI16 { value: value }; }
+    fn load(self: &AtomicI16, ordering: MemoryOrdering) -> i16 {
+        unsafe { return __nova_atomic_i16_load(&self.value as (*const i16) as (*mut i16), ordering_code(ordering)); }
+    }
+    fn store(self: &AtomicI16, value: i16, ordering: MemoryOrdering) -> () {
+        unsafe { __nova_atomic_i16_store(&self.value as (*const i16) as (*mut i16), value, ordering_code(ordering)); }
+        return;
+    }
+    fn swap(self: &AtomicI16, value: i16, ordering: MemoryOrdering) -> i16 {
+        unsafe { return __nova_atomic_i16_swap(&self.value as (*const i16) as (*mut i16), value, ordering_code(ordering)); }
+    }
+    fn compare_exchange(self: &AtomicI16, expected: i16, desired: i16, success: MemoryOrdering, failure: MemoryOrdering) -> bool {
+        unsafe { return __nova_atomic_i16_compare_exchange(&self.value as (*const i16) as (*mut i16), expected, desired, ordering_code(success), ordering_code(failure)); }
+    }
+    fn is_lock_free(self: &AtomicI16) -> bool {
+        unsafe { return __nova_atomic_i16_is_lock_free(&self.value as (*const i16) as (*mut i16)); }
+    }
+    fn get_mut(self: &mut AtomicI16) -> &mut i16 { return &mut self.value; }
+}
+
+pub class AtomicU8 { value: u8 }
+impl AtomicU8
+{
+    static fn new(value: u8) -> Self { return new AtomicU8 { value: value }; }
+    fn load(self: &AtomicU8, ordering: MemoryOrdering) -> u8 {
+        unsafe { return __nova_atomic_u8_load(&self.value as (*const u8) as (*mut u8), ordering_code(ordering)); }
+    }
+    fn store(self: &AtomicU8, value: u8, ordering: MemoryOrdering) -> () {
+        unsafe { __nova_atomic_u8_store(&self.value as (*const u8) as (*mut u8), value, ordering_code(ordering)); }
+        return;
+    }
+    fn swap(self: &AtomicU8, value: u8, ordering: MemoryOrdering) -> u8 {
+        unsafe { return __nova_atomic_u8_swap(&self.value as (*const u8) as (*mut u8), value, ordering_code(ordering)); }
+    }
+    fn compare_exchange(self: &AtomicU8, expected: u8, desired: u8, success: MemoryOrdering, failure: MemoryOrdering) -> bool {
+        unsafe { return __nova_atomic_u8_compare_exchange(&self.value as (*const u8) as (*mut u8), expected, desired, ordering_code(success), ordering_code(failure)); }
+    }
+    fn is_lock_free(self: &AtomicU8) -> bool {
+        unsafe { return __nova_atomic_u8_is_lock_free(&self.value as (*const u8) as (*mut u8)); }
+    }
+    fn get_mut(self: &mut AtomicU8) -> &mut u8 { return &mut self.value; }
+}
+
+pub class AtomicU16 { value: u16 }
+impl AtomicU16
+{
+    static fn new(value: u16) -> Self { return new AtomicU16 { value: value }; }
+    fn load(self: &AtomicU16, ordering: MemoryOrdering) -> u16 {
+        unsafe { return __nova_atomic_u16_load(&self.value as (*const u16) as (*mut u16), ordering_code(ordering)); }
+    }
+    fn store(self: &AtomicU16, value: u16, ordering: MemoryOrdering) -> () {
+        unsafe { __nova_atomic_u16_store(&self.value as (*const u16) as (*mut u16), value, ordering_code(ordering)); }
+        return;
+    }
+    fn swap(self: &AtomicU16, value: u16, ordering: MemoryOrdering) -> u16 {
+        unsafe { return __nova_atomic_u16_swap(&self.value as (*const u16) as (*mut u16), value, ordering_code(ordering)); }
+    }
+    fn compare_exchange(self: &AtomicU16, expected: u16, desired: u16, success: MemoryOrdering, failure: MemoryOrdering) -> bool {
+        unsafe { return __nova_atomic_u16_compare_exchange(&self.value as (*const u16) as (*mut u16), expected, desired, ordering_code(success), ordering_code(failure)); }
+    }
+    fn is_lock_free(self: &AtomicU16) -> bool {
+        unsafe { return __nova_atomic_u16_is_lock_free(&self.value as (*const u16) as (*mut u16)); }
+    }
+    fn get_mut(self: &mut AtomicU16) -> &mut u16 { return &mut self.value; }
+}
+
+pub class AtomicI32 { value: i32 }
+impl AtomicI32
+{
+    static fn new(value: i32) -> Self { return new AtomicI32 { value: value }; }
+    fn load(self: &AtomicI32, ordering: MemoryOrdering) -> i32 {
+        unsafe { return __nova_atomic_i32_load(&self.value as (*const i32) as (*mut i32), ordering_code(ordering)); }
+    }
+    fn store(self: &AtomicI32, value: i32, ordering: MemoryOrdering) -> () {
+        unsafe { __nova_atomic_i32_store(&self.value as (*const i32) as (*mut i32), value, ordering_code(ordering)); }
+        return;
+    }
+    fn swap(self: &AtomicI32, value: i32, ordering: MemoryOrdering) -> i32 {
+        unsafe { return __nova_atomic_i32_swap(&self.value as (*const i32) as (*mut i32), value, ordering_code(ordering)); }
+    }
+    fn compare_exchange(self: &AtomicI32, expected: i32, desired: i32, success: MemoryOrdering, failure: MemoryOrdering) -> bool {
+        unsafe { return __nova_atomic_i32_compare_exchange(&self.value as (*const i32) as (*mut i32), expected, desired, ordering_code(success), ordering_code(failure)); }
+    }
+    fn is_lock_free(self: &AtomicI32) -> bool {
+        unsafe { return __nova_atomic_i32_is_lock_free(&self.value as (*const i32) as (*mut i32)); }
+    }
+    fn get_mut(self: &mut AtomicI32) -> &mut i32 { return &mut self.value; }
+}
+
+pub class AtomicI64 { value: i64 }
+impl AtomicI64
+{
+    static fn new(value: i64) -> Self { return new AtomicI64 { value: value }; }
+    fn load(self: &AtomicI64, ordering: MemoryOrdering) -> i64 {
+        unsafe { return __nova_atomic_i64_load(&self.value as (*const i64) as (*mut i64), ordering_code(ordering)); }
+    }
+    fn store(self: &AtomicI64, value: i64, ordering: MemoryOrdering) -> () {
+        unsafe { __nova_atomic_i64_store(&self.value as (*const i64) as (*mut i64), value, ordering_code(ordering)); }
+        return;
+    }
+    fn swap(self: &AtomicI64, value: i64, ordering: MemoryOrdering) -> i64 {
+        unsafe { return __nova_atomic_i64_swap(&self.value as (*const i64) as (*mut i64), value, ordering_code(ordering)); }
+    }
+    fn compare_exchange(self: &AtomicI64, expected: i64, desired: i64, success: MemoryOrdering, failure: MemoryOrdering) -> bool {
+        unsafe { return __nova_atomic_i64_compare_exchange(&self.value as (*const i64) as (*mut i64), expected, desired, ordering_code(success), ordering_code(failure)); }
+    }
+    fn is_lock_free(self: &AtomicI64) -> bool {
+        unsafe { return __nova_atomic_i64_is_lock_free(&self.value as (*const i64) as (*mut i64)); }
+    }
+    fn get_mut(self: &mut AtomicI64) -> &mut i64 { return &mut self.value; }
+}
+
+pub class AtomicU32 { value: u32 }
+impl AtomicU32
+{
+    static fn new(value: u32) -> Self { return new AtomicU32 { value: value }; }
+    fn load(self: &AtomicU32, ordering: MemoryOrdering) -> u32 {
+        unsafe { return __nova_atomic_u32_load(&self.value as (*const u32) as (*mut u32), ordering_code(ordering)); }
+    }
+    fn store(self: &AtomicU32, value: u32, ordering: MemoryOrdering) -> () {
+        unsafe { __nova_atomic_u32_store(&self.value as (*const u32) as (*mut u32), value, ordering_code(ordering)); }
+        return;
+    }
+    fn swap(self: &AtomicU32, value: u32, ordering: MemoryOrdering) -> u32 {
+        unsafe { return __nova_atomic_u32_swap(&self.value as (*const u32) as (*mut u32), value, ordering_code(ordering)); }
+    }
+    fn compare_exchange(self: &AtomicU32, expected: u32, desired: u32, success: MemoryOrdering, failure: MemoryOrdering) -> bool {
+        unsafe { return __nova_atomic_u32_compare_exchange(&self.value as (*const u32) as (*mut u32), expected, desired, ordering_code(success), ordering_code(failure)); }
+    }
+    fn is_lock_free(self: &AtomicU32) -> bool {
+        unsafe { return __nova_atomic_u32_is_lock_free(&self.value as (*const u32) as (*mut u32)); }
+    }
+    fn get_mut(self: &mut AtomicU32) -> &mut u32 { return &mut self.value; }
+}
+
+pub class AtomicU64 { value: u64 }
+impl AtomicU64
+{
+    static fn new(value: u64) -> Self { return new AtomicU64 { value: value }; }
+    fn load(self: &AtomicU64, ordering: MemoryOrdering) -> u64 {
+        unsafe { return __nova_atomic_u64_load(&self.value as (*const u64) as (*mut u64), ordering_code(ordering)); }
+    }
+    fn store(self: &AtomicU64, value: u64, ordering: MemoryOrdering) -> () {
+        unsafe { __nova_atomic_u64_store(&self.value as (*const u64) as (*mut u64), value, ordering_code(ordering)); }
+        return;
+    }
+    fn swap(self: &AtomicU64, value: u64, ordering: MemoryOrdering) -> u64 {
+        unsafe { return __nova_atomic_u64_swap(&self.value as (*const u64) as (*mut u64), value, ordering_code(ordering)); }
+    }
+    fn compare_exchange(self: &AtomicU64, expected: u64, desired: u64, success: MemoryOrdering, failure: MemoryOrdering) -> bool {
+        unsafe { return __nova_atomic_u64_compare_exchange(&self.value as (*const u64) as (*mut u64), expected, desired, ordering_code(success), ordering_code(failure)); }
+    }
+    fn is_lock_free(self: &AtomicU64) -> bool {
+        unsafe { return __nova_atomic_u64_is_lock_free(&self.value as (*const u64) as (*mut u64)); }
+    }
+    fn get_mut(self: &mut AtomicU64) -> &mut u64 { return &mut self.value; }
+}
+
+// Atomic pointer. Pointer values are never dereferenced by the C runtime.
+pub class AtomicPtr<T> { value: *mut T }
+impl<T> AtomicPtr<T>
+{
+    static fn new(value: *mut T) -> Self { return new AtomicPtr<T> { value: value }; }
+    fn load(self: &AtomicPtr<T>, ordering: MemoryOrdering) -> *mut T {
+        unsafe { return __nova_atomic_ptr_load(&self.value as (*const u8) as (*mut u8), ordering_code(ordering)) as (*mut T); }
+    }
+    fn store(self: &AtomicPtr<T>, value: *mut T, ordering: MemoryOrdering) -> () {
+        unsafe { __nova_atomic_ptr_store(&self.value as (*const u8) as (*mut u8), value as (*mut u8), ordering_code(ordering)); }
+        return;
+    }
+    fn swap(self: &AtomicPtr<T>, value: *mut T, ordering: MemoryOrdering) -> *mut T {
+        unsafe { return __nova_atomic_ptr_swap(&self.value as (*const u8) as (*mut u8), value as (*mut u8), ordering_code(ordering)) as (*mut T); }
+    }
+    fn compare_exchange(self: &AtomicPtr<T>, expected: *mut T, desired: *mut T, success: MemoryOrdering, failure: MemoryOrdering) -> bool {
+        unsafe { return __nova_atomic_ptr_compare_exchange(&self.value as (*const u8) as (*mut u8), expected as (*mut u8), desired as (*mut u8), ordering_code(success), ordering_code(failure)); }
+    }
+    fn is_lock_free(self: &AtomicPtr<T>) -> bool {
+        unsafe { return __nova_atomic_ptr_is_lock_free(&self.value as (*const u8) as (*mut u8)); }
+    }
+}
+
+// Generic synchronized cell. This is a yielding spinlock, NOT a lock-free
+// atomic operation. Use AtomicI32/AtomicI64/etc. for native atomic values.
+pub class Atomic<T>
+{
+    value: T,
+    locked: AtomicBool
+}
+
+impl<T> Atomic<T>
+{
+    static fn new(value: T) -> Self
+    {
+        return new Atomic<T> { value: value, locked: AtomicBool::new(false) };
+    }
+
+    fn is_locked(self: &Atomic<T>) -> bool
+    {
+        return self.locked.load(MemoryOrdering::Relaxed);
+    }
+
+    fn try_lock(self: &Atomic<T>) -> bool
+    {
+        return self.locked.compare_exchange(
+            false, true, MemoryOrdering::Acquire, MemoryOrdering::Relaxed
+        );
+    }
+
+    fn lock(self: &Atomic<T>) -> ()
+    {
+        while !self.try_lock() {
+            thread::yield_now();
+        }
+        return;
+    }
+
+    fn unlock(self: &Atomic<T>) -> ()
+    {
+        self.locked.store(false, MemoryOrdering::Release);
+        return;
+    }
+
+    // Safe scoped access. defer guarantees unlock on normal return and early
+    // return paths supported by Nova's scope cleanup lowering.
+    fn with_lock<R>(self: &Atomic<T>, callback: fn(&mut T) -> R) -> R
+    {
+        self.lock();
+        defer self.unlock();
+        unsafe {
+            return callback(self.get_unchecked_mut());
+        }
+    }
+
+    // The caller MUST hold this Atomic<T>'s lock for the entire returned
+    // reference lifetime. This is unsafe because Nova has no lifetime-bearing
+    // lock-guard type yet.
+    [[unsafe]] fn get_unchecked_mut(self: &Atomic<T>) -> &mut T
+    {
+        // Keep the raw pointer in an addressable local. HIR borrow lowering
+        // can project through `*pointer`, but cannot currently resolve a
+        // dereference whose operand is an inline cast expression.
+        unsafe {
+            let pointer: *mut T = (&self.value as (*const T)) as (*mut T);
+            return &mut *pointer;
+        }
+    }
+
+    // Exclusive access that does not require taking the lock.
+    fn get_mut(self: &mut Atomic<T>) -> &mut T
+    {
+        return &mut self.value;
+    }
 }

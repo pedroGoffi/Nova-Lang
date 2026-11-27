@@ -12,6 +12,8 @@ pub enum Primitive {
     Signed(u8),
     Unsigned(u8),
     Float(u8),
+    /// Legacy borrowed-text ABI type. New C-compatible strings use `*const u8`;
+    /// this remains temporarily for existing standard-library APIs.
     Str,
 }
 // Single source of truth for builtin scalar type names. A module named
@@ -33,13 +35,58 @@ const PRIMITIVE_TYPE_DEFINITIONS: &[(&str, Primitive)] = &[
     ("f32", Primitive::Float(32)),
     ("f64", Primitive::Float(64)),
     ("str", Primitive::Str),
-    ("String", Primitive::Str),
 ];
 
 pub(crate) fn is_primitive_type_name(name: &str) -> bool {
     PRIMITIVE_TYPE_DEFINITIONS
         .iter()
         .any(|(primitive_name, _)| *primitive_name == name)
+}
+
+/// Render flattened monomorphized type identities using Nova source syntax.
+/// Internal identities use `namespace__Type__arg1__arg2`; diagnostics should
+/// show `namespace::Type<arg1, arg2>` instead of leaking that ABI encoding.
+pub(crate) fn display_type_name(name: &str) -> String {
+    const SCALARS: &[&str] = &[
+        "unit", "bool", "char", "str", "i8", "i16", "i32", "i64", "i128",
+        "u8", "u16", "u32", "u64", "u128", "isize", "usize", "f32", "f64",
+    ];
+    let parts = name.split("__").collect::<Vec<_>>();
+    let Some(type_index) = parts.iter().position(|part| {
+        part.chars().next().is_some_and(|character| character.is_uppercase())
+    }) else {
+        return name.replace("__", "::");
+    };
+    if type_index + 1 >= parts.len() {
+        return name.replace("__", "::");
+    }
+
+    let base = parts[..=type_index].join("::");
+    let mut arguments = Vec::new();
+    let mut current = Vec::new();
+    for part in &parts[type_index + 1..] {
+        if SCALARS.contains(part) {
+            if !current.is_empty() {
+                arguments.push(current.join("::"));
+                current.clear();
+            }
+            arguments.push(if *part == "unit" { "()".into() } else { (*part).to_owned() });
+            continue;
+        }
+        current.push(*part);
+        if part.chars().next().is_some_and(|character| character.is_uppercase()) {
+            arguments.push(current.join("::"));
+            current.clear();
+        }
+    }
+    if !current.is_empty() {
+        arguments.push(current.join("::"));
+    }
+    if arguments.is_empty() {
+        name.replace("__", "::")
+    } else {
+        format!("{base}<{}>", arguments.join(", "))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -65,6 +112,11 @@ pub struct StructInfo {
     pub serialize: bool,
     pub deserialize: bool,
     pub is_class: bool,
+    /// Whether this aggregate has the platform C field layout contract.
+    pub repr_c: bool,
+    /// True only when the source program declared a user-defined destructor.
+    /// Compiler-synthesized field destructors leave this false.
+    pub has_custom_drop: bool,
 }
 #[derive(Debug, Clone)]
 pub struct Types {
@@ -134,6 +186,7 @@ impl Types {
         serialize: bool,
         deserialize: bool,
         is_class: bool,
+        repr_c: bool,
     ) -> Result<StructId, String> {
         if self.names.contains_key(name) {
             return Err(format!("duplicate type '{name}'"));
@@ -145,6 +198,8 @@ impl Types {
             serialize,
             deserialize,
             is_class,
+            repr_c,
+            has_custom_drop: false,
         });
         let ty = self.intern(TypeKind::Struct(id));
         self.names.insert(name.into(), ty);
@@ -222,7 +277,7 @@ impl Types {
                 Primitive::Unsigned(bits) => format!("u{bits}"),
                 Primitive::Float(bits) => format!("f{bits}"),
             },
-            TypeKind::Struct(s) => self.structs[s].name.clone(),
+            TypeKind::Struct(s) => display_type_name(&self.structs[s].name),
             TypeKind::Array { element, len } => format!("[{}; {len}]", self.display(element)),
             TypeKind::TraitObject { trait_name } => format!("dyn {trait_name}"),
             TypeKind::Pointer { element, mutable } => format!(
@@ -386,16 +441,16 @@ mod intern_tests {
     }
 
     #[test]
-    fn string_is_the_text_compatibility_alias() {
+    fn str_is_the_legacy_borrowed_text_type() {
         let types = Types::new();
-        assert_eq!(types.named("String"), Some(types.string()));
         assert_eq!(types.named("str"), Some(types.string()));
+        assert_eq!(types.named("String"), None);
     }
 
     #[test]
     fn unit_payload_is_zero_sized_in_llvm_aggregate() {
         let mut types = Types::new();
-        let sid = types.register_struct("UnitEnvelope", false, false, false).unwrap();
+        let sid = types.register_struct("UnitEnvelope", false, false, false, false).unwrap();
         let unit = types.unit();
         let number = types.i64();
         types.structs[sid].fields.push(super::Field {
@@ -411,4 +466,26 @@ mod intern_tests {
         ));
     }
 
+}
+
+#[cfg(test)]
+mod readable_type_name_tests {
+    use super::display_type_name;
+
+    #[test]
+    fn renders_monomorphized_result_with_qualified_payload_types() {
+        assert_eq!(
+            display_type_name("std__error__result__Result__lib__value__JsonValue__lib__parser__JsonParserError"),
+            "std::error::result::Result<lib::value::JsonValue, lib::parser::JsonParserError>"
+        );
+    }
+
+    #[test]
+    fn renders_scalar_generic_arguments() {
+        assert_eq!(
+            display_type_name("std__core__option__Option__i64"),
+            "std::core::option::Option<i64>"
+        );
+        assert_eq!(display_type_name("std__core__option__Option__unit"), "std::core::option::Option<()>");
+    }
 }

@@ -349,7 +349,9 @@ pub fn lint(hir: &crate::hir::Program) -> usize {
     fn expr(e: &Expr, used: &mut HashSet<usize>) {
         match &e.kind {
             ExprKind::Local(id) | ExprKind::MoveLocal(id)
-            | ExprKind::DropArray { root: id, .. } => { used.insert(*id); }
+            | ExprKind::DropArray { root: id, .. }
+            | ExprKind::DropStruct { root: id, .. }
+            | ExprKind::MoveField { root: id, .. } => { used.insert(*id); }
             ExprKind::AddressOf { place, .. } => {
                 used.insert(place.root);
                 for p in &place.projections {

@@ -196,3 +196,56 @@ fn c_callback_with_aggregate_parameter_is_rejected() {
     .unwrap_err();
     assert!(err.contains("ABI") && err.contains("aggregate"), "{err}");
 }
+
+#[test]
+fn c_string_literals_coerce_to_const_byte_pointers_and_support_indexing() {
+    let ir = compile(
+        r#"
+        fn first_byte(value: *const u8) -> u8 { return value[0]; }
+        fn main() -> i32 {
+            let text: *const u8 = "Nova";
+            let first: u8 = first_byte(text);
+            return first as i32;
+        }
+        "#,
+    )
+    .unwrap();
+    assert!(ir.contains("getelementptr inbounds i8, ptr"), "{ir}");
+    assert!(ir.contains("@.str"), "{ir}");
+}
+
+#[test]
+fn mutable_byte_pointers_support_indexed_writes() {
+    let ir = compile(
+        r#"
+        fn set_first(value: *mut u8) -> () {
+            value[0] = 65;
+            return;
+        }
+        fn main() -> i32 { return 0; }
+        "#,
+    )
+    .unwrap();
+    assert!(ir.contains("getelementptr inbounds i8, ptr"), "{ir}");
+    assert!(ir.contains("store i8 65"), "{ir}");
+}
+
+
+#[test]
+fn c_string_literal_contextual_decay_works_for_local_and_call_arguments() {
+    let ir = compile(
+        r#"
+        fn consume(value: *const u8) -> u8 { return value[0]; }
+        fn main() -> i32 {
+            let local: *const u8 = "Nova";
+            let first: u8 = consume("C strings");
+            if local[0] != 78 as u8 { return 1; }
+            if first != 67 as u8 { return 2; }
+            return 0;
+        }
+        "#,
+    )
+    .unwrap();
+    assert!(ir.contains("getelementptr inbounds i8, ptr"), "{ir}");
+    assert!(ir.contains("@.str"), "{ir}");
+}

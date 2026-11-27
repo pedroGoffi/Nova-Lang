@@ -1334,7 +1334,7 @@ mod builtin_instance_resolution_tests {
             assert!(matches!(&ty, TypeRef::Named(n) if n == name), "{name} became {ty:?}");
         }
         assert!(!crate::types::is_primitive_type_name("std::old::char"));
-        assert!(crate::types::is_primitive_type_name("String"));
+        assert!(!crate::types::is_primitive_type_name("String"));
     }
 
     #[test]

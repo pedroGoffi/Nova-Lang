@@ -11,17 +11,41 @@
 use crate::ast::{self, Expr, Item, Stmt, TypeRef};
 
 fn join(ns: &str, name: &str) -> String {
-    if ns.is_empty() { name.to_owned() } else { format!("{ns}::{name}") }
+    if ns.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{ns}::{name}")
+    }
 }
 
-fn methods<'a>(items: &'a [Item], namespace: &str, target: &str, name: &str, found: &mut Vec<&'a ast::Function>) {
+fn methods<'a>(
+    items: &'a [Item],
+    namespace: &str,
+    target: &str,
+    name: &str,
+    found: &mut Vec<&'a ast::Function>,
+) {
     for item in items {
         match item {
-            Item::Public(inner) => methods(std::slice::from_ref(inner.as_ref()), namespace, target, name, found),
-            Item::Namespace { name: ns, items } => methods(items, &join(namespace, ns), target, name, found),
+            Item::Public(inner) => methods(
+                std::slice::from_ref(inner.as_ref()),
+                namespace,
+                target,
+                name,
+                found,
+            ),
+            Item::Namespace { name: ns, items } => {
+                methods(items, &join(namespace, ns), target, name, found)
+            }
             Item::Impl(block) => {
-                let TypeRef::Named(owner) = &block.target else { continue };
-                let qualified = if owner.contains("::") { owner.clone() } else { join(namespace, owner) };
+                let TypeRef::Named(owner) = &block.target else {
+                    continue;
+                };
+                let qualified = if owner.contains("::") {
+                    owner.clone()
+                } else {
+                    join(namespace, owner)
+                };
                 if qualified == target {
                     found.extend(block.methods.iter().filter(|method| method.name == name));
                 }
@@ -47,7 +71,10 @@ fn deferred_boot_main(items: &[Item], ns: &str, owner: &str) -> bool {
             decl.is_class
                 && join(ns, &decl.name) == owner
                 && decl.attributes.iter().any(|attr| {
-                    matches!(attr.name.as_str(), "BootApplication" | "NB::BootApplication")
+                    matches!(
+                        attr.name.as_str(),
+                        "BootApplication" | "NB::BootApplication"
+                    )
                 })
         }
         _ => false,
@@ -69,12 +96,17 @@ fn deferred_sdlef_main(items: &[Item], ns: &str, owner: &str) -> bool {
 
 fn deferred_sdlef_2d_main(items: &[Item], ns: &str, owner: &str) -> bool {
     items.iter().any(|item| match item {
-        Item::Public(inner) => deferred_sdlef_2d_main(std::slice::from_ref(inner.as_ref()), ns, owner),
+        Item::Public(inner) => {
+            deferred_sdlef_2d_main(std::slice::from_ref(inner.as_ref()), ns, owner)
+        }
         Item::Namespace { name, items } => deferred_sdlef_2d_main(items, &join(ns, name), owner),
         Item::Struct(decl) => {
             decl.is_class
                 && join(ns, &decl.name) == owner
-                && decl.attributes.iter().any(|attr| attr.name == "sdlefGame2D")
+                && decl
+                    .attributes
+                    .iter()
+                    .any(|attr| attr.name == "sdlefGame2D")
         }
         _ => false,
     })
@@ -94,20 +126,23 @@ fn global_main(items: &[Item]) -> bool {
 pub fn generate(program: &ast::Program, selected: &str) -> Result<ast::Program, String> {
     let (owner, method_name) = selected.rsplit_once("::")
         .ok_or_else(|| format!("error[NOVA-ENTRY001]: package main '{selected}' must name a static method as 'Class::method'"))?;
-    if owner.is_empty() || method_name.is_empty() || selected.split("::").any(|part| part.is_empty()) {
-        return Err(format!("error[NOVA-ENTRY001]: invalid package main '{selected}'; expected 'Class::method'"));
+    if owner.is_empty()
+        || method_name.is_empty()
+        || selected.split("::").any(|part| part.is_empty())
+    {
+        return Err(format!(
+            "error[NOVA-ENTRY001]: invalid package main '{selected}'; expected 'Class::method'"
+        ));
     }
     if global_main(&program.items) {
         return Err(format!("error[NOVA-ENTRY003]: package main '{selected}' conflicts with global fn main; choose one entry point"));
     }
     let mut found = Vec::new();
     methods(&program.items, "", owner, method_name, &mut found);
-    let generated_by_boot = found.is_empty()
-        && method_name == "main"
-        && deferred_boot_main(&program.items, "", owner);
-    let generated_by_sdlef = found.is_empty()
-        && method_name == "main"
-        && deferred_sdlef_main(&program.items, "", owner);
+    let generated_by_boot =
+        found.is_empty() && method_name == "main" && deferred_boot_main(&program.items, "", owner);
+    let generated_by_sdlef =
+        found.is_empty() && method_name == "main" && deferred_sdlef_main(&program.items, "", owner);
     let generated_by_sdlef_2d = found.is_empty()
         && method_name == "main"
         && deferred_sdlef_2d_main(&program.items, "", owner);
@@ -118,11 +153,17 @@ pub fn generate(program: &ast::Program, selected: &str) -> Result<ast::Program, 
     // entry is synthesized later; ordinary typechecking checks its signature
     // and the reference from the global ABI bridge after expansion.
     if let Some(method) = found.first() {
-        if !method.attributes.iter().any(|a| a.name == "static") || !method.generics.is_empty() || !method.concept_bounds.is_empty() || method.variadic {
+        if !method.attributes.iter().any(|a| a.name == "static")
+            || !method.generics.is_empty()
+            || !method.concept_bounds.is_empty()
+            || method.variadic
+        {
             return Err(format!("error[NOVA-ENTRY005]: package main '{selected}' must be a non-generic static method"));
         }
         if method.result != TypeRef::Named("i32".into()) {
-            return Err(format!("error[NOVA-ENTRY006]: package main '{selected}' must return i32"));
+            return Err(format!(
+                "error[NOVA-ENTRY006]: package main '{selected}' must return i32"
+            ));
         }
         if !method.params.is_empty() {
             return Err(format!("error[NOVA-ENTRY007]: package main '{selected}' must have no parameters; use std::old::arg for process arguments"));
@@ -133,7 +174,11 @@ pub fn generate(program: &ast::Program, selected: &str) -> Result<ast::Program, 
         let owner_type = TypeRef::Named(owner.to_owned());
         let callback = |name: &str| Expr::FunctionRef(format!("{owner}::{name}"));
         let run = Expr::GenericCall(
-            if generated_by_sdlef_2d { "sdlef::application::run_2d".into() } else { "sdlef::application::run".into() },
+            if generated_by_sdlef_2d {
+                "sdlef::application::run_2d".into()
+            } else {
+                "sdlef::application::run".into()
+            },
             vec![owner_type],
             vec![
                 Expr::Call(format!("{owner}::new"), vec![]),
@@ -164,7 +209,10 @@ pub fn generate(program: &ast::Program, selected: &str) -> Result<ast::Program, 
                 body: vec![Stmt::Return(Some(run))],
                 is_virtual: false,
                 is_override: false,
-                attributes: vec![ast::Attribute { name: "static".into(), args: vec![] }],
+                attributes: vec![ast::Attribute {
+                    name: "static".into(),
+                    args: vec![],
+                }],
             }],
         }));
     }

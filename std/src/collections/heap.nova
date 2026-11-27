@@ -3,7 +3,7 @@ use std::core::types::Size;
 use std::collections::traits::Collection;
 pub class MinHeap<T> { values: Vec<T> }
 impl<T> MinHeap<T> {
-    static fn new() -> Self { return new MinHeap<T> { values: Vec::new() }; }
+    static fn new() -> Self { return new MinHeap<T> { values: Vec::new::<V>() }; }
     fn len(self: &MinHeap<T>) -> Size { return self.values.len(); }
     fn is_empty(self: &MinHeap<T>) -> bool { return self.values.is_empty(); }
     fn push(self: &MinHeap<T>, value: T) -> () { self.values.push(value); return; }

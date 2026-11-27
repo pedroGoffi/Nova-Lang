@@ -403,6 +403,13 @@ OperatorMethod: Function = {
 
 // Modifiers apply only to methods. `override` requires a virtual ancestor.
 Method: Function = {
+    // Method-level visibility. Kept as an AST attribute so module/package
+    // export processing can distinguish public methods from private methods.
+    "pub" <f:Function> => {
+        let mut attributes = f.attributes.clone();
+        attributes.push(Attribute { name:"__public".into(), args:vec![] });
+        Function { attributes, ..f }
+    },
     // Read-only computed property. It is an ordinary Nova method, so the
     // compiler does not create a hidden field, vtable or runtime descriptor.
     "property" <name:MemberIdent> ":" <result:Type> "{" "get" "=>" <value:Expr> ";" "}"
@@ -477,9 +484,14 @@ EffectRequirements: Vec<String> = {
 EffectName: String = {
     <name:Path> => name,
 };
+ThrowsClause: TypeRef = {
+    "throws" <error:Type> => error,
+};
 FunctionBase: Function = {
-    "fn" <header:FunctionDeclName> "(" <params:Comma<FnParam>> ")" "->" <result:Type> <effect_requirements:EffectRequirements?> <where_bounds:WhereConcepts> <body:Block>
+    "fn" <header:FunctionDeclName> "(" <params:Comma<FnParam>> ")" <throws:ThrowsClause?> "->" <declared_result:Type> <effect_requirements:EffectRequirements?> <where_bounds:WhereConcepts> <body:Block>
          => {
+            let result=throws.map(|error| TypeRef::Applied("std::error::result::Result".into(), vec![declared_result.clone(), error]))
+                .unwrap_or(declared_result);
             let variadic=params.last().map(|(_,v)|*v).unwrap_or(false);
             let params=params.into_iter().map(|(mut p,v)| {
                 if v && !variadic {p.name=format!("__nova_invalid_pack__{}",p.name);}
@@ -711,6 +723,9 @@ Stmt: Stmt = {
     // are currently supported by the semantic lowering pipeline.
     <target:PostfixExpr> <op:AssignmentOp> <value:Expr> ";"
         => crate::ast::assignment_stmt(target, op, value),
+    // Typed exception spelling: `throw e` returns the error variant of the
+    // function's Result<T, E> contract. Native stack unwinding is a later ABI.
+    "throw" <value:ValueExpr> ";" => Stmt::Return(Some(Expr::Call("Err".into(), vec![value]))),
     "return" <value:ValueExpr> ";" => Stmt::Return(Some(value)),
     "return" ";" => Stmt::Return(None),
     // Refutable binding without boilerplate `match`. Bindings exist only in
@@ -751,6 +766,9 @@ Stmt: Stmt = {
         condition: Expr::Bool(true), then_body: body, else_body: None
     },
     "unsafe" <body:Block> => Stmt::Unsafe(body),
+    "try" <body:Block> ";" => Stmt::Expr(Expr::Call(
+        "__nova_internal_try".into(), vec![Expr::Block(body)]
+    )),
     "match" <value:Expr> "{" <arms:MatchArms> "}"
         => Stmt::Match { value, arms },
     <expression:Expr> ";" => Stmt::Expr(expression),
@@ -860,6 +878,10 @@ UnaryExpr: Expr = {
     "*" <e:UnaryExpr> => Expr::Deref(Box::new(e)),
     "yield" <e:UnaryExpr> => Expr::Yield(Box::new(e)),
     "await" <e:UnaryExpr> => Expr::Await(Box::new(e)),
+    // `try expr` propagates the error channel of an Option/Result-returning
+    // expression. It is lowered through the same ownership-aware continuation
+    // machinery as postfix `?`.
+    "try" <e:UnaryExpr> => Expr::Call("__nova_internal_try".into(), vec![e]),
     // Coroutine operations are language syntax. The compiler lowers them to
     // generic, ABI-compatible STD primitives, without user-facing imports.
     "next" <handle:UnaryExpr> => Expr::MethodCall(Box::new(handle),"next".into(),vec![],vec![]),
@@ -923,6 +945,50 @@ IfValue: Expr = {
 // Braced lexical blocks and if/else values can appear in value positions.
 // Ordinary expressions still use the existing precedence grammar.
 ValueExpr: Expr = {
+    // Pattern-based catch handles variants of the error type independently.
+    // The Ok arm is unwrapped; only the Err payload is matched by catch arms.
+    "try" <body:Block> "catch" "{" <first:MatchArm> <rest:MatchArms> "}" => {
+        let mut handlers = vec![first];
+        handlers.extend(rest);
+        let error = "__nova_try_error".to_string();
+        let caught = Expr::Block(vec![
+            Stmt::Expr(Expr::Var("__nova_internal_match_value".into())),
+            Stmt::Match { value: Expr::Var(error.clone()), arms: handlers },
+        ]);
+        Expr::Block(vec![
+            Stmt::Expr(Expr::Var("__nova_internal_match_value".into())),
+            Stmt::Match {
+                value: Expr::Block(body),
+                arms: vec![
+                    MatchArm {
+                        pattern: Pattern::Variant { path:"Ok".into(), bindings:vec!["__nova_try_value".into()] },
+                        body:vec![Stmt::Tail(Expr::Var("__nova_try_value".into()))],
+                    },
+                    MatchArm {
+                        pattern: Pattern::Variant { path:"Err".into(), bindings:vec![error] },
+                        body:vec![Stmt::Tail(caught)],
+                    },
+                ],
+            },
+        ])
+    },
+    // `try { ... } catch error { ... }` handles the Err arm locally.
+    // The block itself must evaluate to Result<T, E>; the catch arm supplies T.
+    "try" <body:Block> "catch" <error:Ident> <handler:Block>
+        => Expr::Block(vec![
+            Stmt::Expr(Expr::Var("__nova_internal_match_value".into())),
+            Stmt::Match {
+            value: Expr::Block(body),
+            arms: vec![
+                MatchArm { pattern: Pattern::Variant { path:"Ok".into(), bindings:vec!["__nova_try_value".into()] },
+                    body:vec![Stmt::Tail(Expr::Var("__nova_try_value".into()))] },
+                MatchArm { pattern: Pattern::Variant { path:"Err".into(), bindings:vec![error] },
+                    body:handler },
+            ],
+        }]),
+    // A try block without catch propagates to the enclosing Result/Option function.
+    "try" <body:Block>
+        => Expr::Call("__nova_internal_try".into(), vec![Expr::Block(body)]),
     IfValue,
     // Keep unsafe expressions at the value level, like if/match expressions.
     // Putting this production in Atom conflicts with the statement form

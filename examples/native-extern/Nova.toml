@@ -1,0 +1,12 @@
+[package]
+name = "native_extern"
+version = "0.1.0"
+entry = "src/main.nova"
+
+[dependencies]
+std = { builtin = "std" }
+
+[link]
+libraries = ["nova_math"]
+search = ["native/lib"]
+rpath = ["$ORIGIN/../native/lib"]

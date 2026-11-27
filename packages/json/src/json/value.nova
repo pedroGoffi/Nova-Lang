@@ -1,0 +1,53 @@
+use std::text::string::String;
+use std::collections::vec::Vec;
+use std::collections::map::Map;
+
+
+pub enum JsonValue {
+    null,
+    integer(i64),
+    string(String),
+    boolean(bool),
+    array(Vec<Self>),
+    object(Map<String, Self>)
+}
+// Default builders for json value
+impl JsonValue
+{
+    static fn Object() -> JsonValue
+    {
+        auto map = Map::new::<String, JsonValue>();
+        JsonValue::object(map)
+    }
+    static fn Null() -> JsonValue
+    {
+        JsonValue::null
+    }
+    static fn Integer(i: i64) -> JsonValue
+    {
+        JsonValue::Integer(i)
+    }
+    static fn String(s: String) -> JsonValue
+    {
+        JsonValue::string(s)
+    }
+    static fn Boolean(b: bool) -> JsonValue
+    {
+        JsonValue::boolean(b)
+    }
+    static fn Array() -> JsonValue
+    {
+        auto vec = Vec::new::<JsonValue>();
+        JsonValue::array(vec)
+    }
+}
+
+trait ToJson
+{
+    fn to_json(self: Self) -> JsonValue;
+}
+
+trait FromJson
+{
+    fn from_json(self: &mut Self, json: JsonValue) -> ();
+}

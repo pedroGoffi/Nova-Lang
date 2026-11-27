@@ -1,4 +1,5 @@
 use std::core::types::Size;
+use std::core::integer::Integer;
 
 pub trait Clone { fn clone(self: &Self) -> Self; }
 pub trait Eq { fn equals(self: &Self, other: &Self) -> bool; }
@@ -6,6 +7,20 @@ pub trait Ord extends Eq { fn compare(self: &Self, other: &Self) -> i64; }
 pub trait Hash { fn hash(self: &Self) -> Size; }
 pub trait Display { fn to_string(self: &Self) -> str; }
 pub trait Debug { fn debug_string(self: &Self) -> str; }
+
+// Primitive equality implementations use borrowed operands, so generic
+// collections can compare keys without moving them.
+impl<T: Integer> Eq for T {
+    fn equals(self: &T, other: &T) -> bool {
+        return *self == *other;
+    }
+}
+
+impl Eq for bool {
+    fn equals(self: &bool, other: &bool) -> bool {
+        return *self == *other;
+    }
+}
 
 pub concept Cloneable<T> = implements<T,Clone>;
 pub concept Equatable<T> = implements<T,Eq>;

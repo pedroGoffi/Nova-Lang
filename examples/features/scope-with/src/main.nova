@@ -5,6 +5,15 @@ struct Pair { left: i32, right: i32 }
 fn main() -> i32 {
     // with exposes the receiver as it inside a scoped expression.
     let pair = new Pair { left: 20, right: 22 };
+    let new_pair = pair.let {
+        it.left = 67;
+        it
+    };
     let total: i32 = with(pair) { return it.left + it.right; };
+
+    println!("pair.left = {pair.left}");
+    println!("pair.right = {pair.right}");
+    println!("new_pair.left = {new_pair.left}");
+    
     return total - 42;
 }

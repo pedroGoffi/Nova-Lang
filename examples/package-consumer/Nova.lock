@@ -1,0 +1,4 @@
+# Nova.lock v2 - path dependencies and source snapshots (non-cryptographic)
+package_consumer 0.1.0 path=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/package-consumer hash=b6a730f5abc70153
+math_core binary-interface=59521d0095fd0cd8 archive=/home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/package-consumer/vendor/math_core/libmath_core.a
+source /home/pedro/Desenvolvimento/nova-core-0.7-foundations/examples/package-consumer/src/main.nova hash=b6a730f5abc70153

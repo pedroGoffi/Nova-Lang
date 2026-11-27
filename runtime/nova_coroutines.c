@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <time.h>
+#include "sync/nova_atomic_bool.c"
 
 typedef int64_t (*NovaBody)(void *args);
 typedef struct NovaCoroutine {

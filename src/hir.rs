@@ -145,11 +145,16 @@ pub enum ExprKind {
     /// Compiler-generated cleanup for a fixed array of owned structs.
     /// Consumes each element exactly once when its root is still live.
     DropArray { root: LocalId, element: TypeId, len: usize, drop_fn: FunctionId },
+    /// Drops direct owning struct fields independently, honoring field move flags.
+    /// `fields` is stored in reverse declaration order.
+    DropStruct { root: LocalId, fields: Vec<(usize, FunctionId)> },
     AddressOf {
         place: Place,
         mutable: bool,
     },
     Deref(Box<Expr>),
+    /// Consumes one owning field while preserving the rest of its aggregate.
+    MoveField { root: LocalId, index: usize },
     /// Consumes an owned local. MIR clears its drop flag after producing the value.
     MoveLocal(LocalId),
     Cast(Box<Expr>),
@@ -257,9 +262,17 @@ impl<'a> Resolver<'a> {
                 Ok((place, element, mutable))
             }
             A::Field(parent, name) => {
-                let (mut place, parent_ty, mutable) = self.place(parent)?;
-                let TypeKind::Struct(sid) = self.types.kind(parent_ty) else {
-                    return Err(format!("cannot borrow field '{name}' of non-struct"));
+                let (mut place, parent_ty, binding_mutable) = self.place(parent)?;
+                let (sid, mutable) = match self.types.kind(parent_ty) {
+                    TypeKind::Struct(sid) => (sid, binding_mutable),
+                    TypeKind::Reference { element, mutable } => {
+                        let TypeKind::Struct(sid) = self.types.kind(element) else {
+                            return Err(format!("cannot borrow field '{name}' of non-struct reference"));
+                        };
+                        place.projections.push(PlaceProjection::Deref);
+                        (sid, mutable)
+                    }
+                    _ => return Err(format!("cannot borrow field '{name}' of non-struct")),
                 };
                 let (index, field) = self.types.structs[sid].fields.iter().enumerate()
                     .find(|(_, field)| field.name == *name)
@@ -270,18 +283,20 @@ impl<'a> Resolver<'a> {
             }
             A::Index(parent, index) => {
                 let (mut place, parent_ty, mutable) = self.place(parent)?;
-                let TypeKind::Array { element, len } = self.types.kind(parent_ty) else {
-                    return Err("indexed borrow requires a fixed-size array".into());
+                let (element, len, pointer_mutability) = match self.types.kind(parent_ty) {
+                    TypeKind::Array { element, len } => (element, Some(len), None),
+                    TypeKind::Pointer { element, mutable } => (element, None, Some(mutable)),
+                    _ => return Err("indexing requires an array or pointer".into()),
                 };
                 let i32_ty = self.types.i32();
                 let index = self.expect(index, i32_ty)?;
-                if let ExprKind::Int(n) = &index.kind {
+                if let (Some(len), ExprKind::Int(n)) = (len, &index.kind) {
                     if *n < 0 || *n >= len as i128 {
                         return Err(format!("array borrow index {n} out of bounds (length {len})"));
                     }
                 }
                 place.projections.push(PlaceProjection::Index(index));
-                Ok((place, element, mutable))
+                Ok((place, element, pointer_mutability.unwrap_or(mutable)))
             }
             _ => Err("borrow requires an addressable local, field or indexed array element".into()),
         }
@@ -500,7 +515,18 @@ impl<'a> Resolver<'a> {
             }
             A::Bool(b) => (self.types.boolean(), ExprKind::Bool(*b)),
             A::Unit => (self.types.unit(), ExprKind::Unit),
-            A::Str(raw) => (self.types.string(), ExprKind::Str(unescape_string(raw)?)),
+            A::Str(raw) => {
+                let value = unescape_string(raw)?;
+                // A string literal is a NUL-terminated byte sequence. In a C
+                // pointer context expose it directly as `*const u8`; otherwise
+                // retain the managed text view used by the standard library.
+                let literal_ty = expected.filter(|expected| matches!(
+                    self.types.kind(*expected),
+                    TypeKind::Pointer { element, mutable: false }
+                        if element == self.types.primitive(Primitive::Unsigned(8))
+                )).unwrap_or_else(|| self.types.string());
+                (literal_ty, ExprKind::Str(value))
+            }
             A::Var(name) => {
                 let id = self
                     .find_local(name)
@@ -694,10 +720,20 @@ impl<'a> Resolver<'a> {
             }
             A::Field(value, name) => {
                 // Surface's match desugaring creates a private named enum
-                // temporary. Only its bindings may transfer a payload owner.
+                // temporary. Only owning matches may transfer a payload owner.
                 let match_payload = matches!(value.as_ref(), A::Var(local)
                     if local.starts_with("__nova_match_") && name != "__nova_tag");
                 let value = self.expr(value, None)?;
+                let borrowed_match = matches!(self.types.kind(value.ty), TypeKind::Reference { .. });
+                // Field projections on references are implicitly dereferenced,
+                // matching the surface semantics used by borrowed enum matches.
+                let value = match self.types.kind(value.ty) {
+                    TypeKind::Reference { element, .. } => Expr {
+                        ty: element,
+                        kind: ExprKind::Deref(Box::new(value)),
+                    },
+                    _ => value,
+                };
                 let sid = match self.types.kind(value.ty) {
                     TypeKind::Struct(s) => s,
                     _ => return Err(format!("cannot access field '{name}' on non-struct")),
@@ -713,7 +749,7 @@ impl<'a> Resolver<'a> {
                         )
                     })?;
                 let payload_ty = self.types.structs[sid].fields[index].ty;
-                if match_payload && field_has_drop(self.types, payload_ty, self.signatures) {
+                if match_payload && !borrowed_match && field_has_drop(self.types, payload_ty, self.signatures) {
                     // The enum layout stores inactive variants as zeroed
                     // fields. This move is safe only if the active variant
                     // contains ONE owning payload; other fields must be Copy.
@@ -765,8 +801,8 @@ impl<'a> Resolver<'a> {
             A::Index(value, index) => {
                 let value = self.expr(value, None)?;
                 let element = match self.types.kind(value.ty) {
-                    TypeKind::Array { element, .. } => element,
-                    _ => return Err("indexing requires a fixed-size array".into()),
+                    TypeKind::Array { element, .. } | TypeKind::Pointer { element, .. } => element,
+                    _ => return Err("indexing requires an array or pointer".into()),
                 };
                 let i32ty = self.types.i32();
                 let index = self.expect(index, i32ty)?;
@@ -881,15 +917,43 @@ impl<'a> Resolver<'a> {
                 info.name, info.name
             ));
         }
+
+        // For compiler-generated destructors whose owning members are direct
+        // structs, emit field-wise cleanup. This is what makes partial moves
+        // safe: MIR can skip exactly the fields transferred elsewhere.
+        // Custom destructors and arrays keep the established whole-value path.
+        let tagged_enum = info.fields.first().is_some_and(|field| field.name == "__nova_tag");
+        if !info.has_custom_drop && !tagged_enum {
+            let mut fields = Vec::new();
+            let mut supported = true;
+            for (index, field) in info.fields.iter().enumerate().rev() {
+                match self.types.kind(field.ty) {
+                    TypeKind::Struct(field_struct) => {
+                        let field_info = &self.types.structs[field_struct];
+                        let field_symbol = format!("{}__drop", field_info.name);
+                        if let Some(field_signature) = self.signatures.get(&field_symbol) {
+                            fields.push((index, field_signature.id));
+                        }
+                    }
+                    TypeKind::Array { element, .. } if field_has_drop(self.types, element, self.signatures) => {
+                        supported = false;
+                    }
+                    _ => {}
+                }
+            }
+            if supported && !fields.is_empty() {
+                return Ok(Some(Stmt::Defer {
+                    expr: Expr { ty: self.types.unit(), kind: ExprKind::DropStruct { root: local, fields } },
+                    owner: Some(local),
+                }));
+            }
+        }
         Ok(Some(Stmt::Defer {
             expr: Expr {
                 ty: self.types.unit(),
                 kind: ExprKind::Call(
                     signature.id,
-                    vec![Expr {
-                        ty: self.locals[local].ty,
-                        kind: ExprKind::Local(local),
-                    }],
+                    vec![Expr { ty: self.locals[local].ty, kind: ExprKind::Local(local) }],
                 ),
             },
             owner: Some(local),
@@ -1072,14 +1136,18 @@ impl<'a> Resolver<'a> {
                         .position(|f| f.name == *field)
                         .ok_or_else(|| format!("unknown field '{field}' on '{}'", info.name))?;
                     let field_ty = info.fields[index].ty;
-                    if let TypeKind::Struct(own) = self.types.kind(field_ty) {
-                        let inner = &self.types.structs[own];
-                        if inner.is_class
-                            || self
-                                .signatures
-                                .contains_key(&format!("{}__drop", inner.name))
-                        {
-                            return Err(format!("overwriting owning field '{field}' requires explicit move/destruction semantics"));
+                    // Direct local fields are checked by ownership.rs: an
+                    // owning field may be assigned only after it was moved.
+                    // Through pointers/references we cannot prove the previous
+                    // initialization state, so keep rejecting owning writes.
+                    if pointer {
+                        if let TypeKind::Struct(own) = self.types.kind(field_ty) {
+                            let inner = &self.types.structs[own];
+                            if inner.is_class
+                                || self.signatures.contains_key(&format!("{}__drop", inner.name))
+                            {
+                                return Err(format!("overwriting owning field '{field}' through a pointer requires explicit move/destruction semantics"));
+                            }
                         }
                     }
                     if op.is_some() {
@@ -1366,6 +1434,12 @@ fn lower_impl(
                         attr.name
                     ));
                 }
+                if attr.name == "repr" {
+                    if attr.args.len() != 1 || attr.args[0] != "C" {
+                        return Err("only #[repr(C)] is supported on structs".into());
+                    }
+                    continue;
+                }
                 if attr.name != "derive" {
                     return Err(format!("unsupported attribute '#[{}(...)]'", attr.name));
                 }
@@ -1385,6 +1459,7 @@ fn lower_impl(
                 derives.contains("Serialize"),
                 derives.contains("Deserialize"),
                 s.is_class,
+                s.attributes.iter().any(|attr| attr.name == "repr" && attr.args.len() == 1 && attr.args[0] == "C"),
             )?;
             struct_ids.insert(s.name.clone(), id);
         }
@@ -1404,6 +1479,35 @@ fn lower_impl(
                 });
             }
             types.structs[id].fields = fields;
+        }
+    }
+    // `#[repr(C)]` is a real layout promise, not a decorative attribute.
+    // Reject fields whose representation cannot be described by the C ABI.
+    fn c_field_safe(types: &Types, ty: TypeId, seen: &mut HashSet<StructId>) -> bool {
+        match types.kind(ty) {
+            TypeKind::Primitive(
+                Primitive::Signed(_) | Primitive::Unsigned(_) | Primitive::Float(_),
+            ) => true,
+            TypeKind::Pointer { .. } => true,
+            TypeKind::Array { element, .. } => c_field_safe(types, element, seen),
+            TypeKind::Struct(id) => {
+                if !types.structs[id].repr_c { return false; }
+                if !seen.insert(id) { return true; }
+                let safe = types.structs[id].fields.iter()
+                    .all(|field| c_field_safe(types, field.ty, seen));
+                seen.remove(&id);
+                safe
+            }
+            _ => false,
+        }
+    }
+    for info in &types.structs {
+        if info.repr_c {
+            for field in &info.fields {
+                if !c_field_safe(&types, field.ty, &mut HashSet::new()) {
+                    return Err(format!("#[repr(C)] struct '{}' has field '{}' with non-C-compatible type {}; use C-compatible scalars, pointers, arrays, or nested #[repr(C)] structs", info.name, field.name, types.display(field.ty)));
+                }
+            }
         }
     }
     types.check_sized()?;
@@ -1479,7 +1583,12 @@ fn lower_impl(
             fn ffi_safe(types: &Types, ty: TypeId, parameter: bool) -> bool {
                 match types.kind(ty) {
                     TypeKind::Primitive(Primitive::Unit) => !parameter,
-                    TypeKind::Primitive(_) | TypeKind::Pointer { .. } => true,
+                    TypeKind::Primitive(_) => true,
+                    TypeKind::Pointer { element, .. } => match types.kind(element) {
+                        TypeKind::Struct(id) => types.structs[id].repr_c,
+                        TypeKind::Array { .. } => false,
+                        _ => true,
+                    },
                     TypeKind::Function { params, result } => {
                         params.iter().all(|arg| ffi_safe(types, *arg, true))
                             && ffi_safe(types, result, false)
@@ -1568,9 +1677,14 @@ fn lower_impl(
             return Err(format!("duplicate function '{name}'"));
         }
     }
-    // Synthesize destructors for aggregates containing owned fields.
-    // Members are destroyed in reverse declaration order. Named user Drop
-    // implementations take precedence over generated field-wise destructors.
+    // Preserve whether a destructor came from source. Partial moves are legal
+    // only for compiler-synthesized field-wise destructors, never user Drop.
+    for info in &mut types.structs {
+        info.has_custom_drop = signatures.contains_key(&format!("{}__drop", info.name));
+    }
+    // Synthesize destructors for aggregates containing owned fields when the
+    // user has not supplied `drop(self)`. Explicit destructors receive deferred
+    // field cleanup below, after their own body and in reverse field order.
     let mut generated_drops: Vec<(usize, String)> = Vec::new();
     let mut changed = true;
     while changed {
@@ -1739,7 +1853,7 @@ fn lower_impl(
             && signature.result != unit_type
             && !terminates(&body)
         {
-            return Err(format!("function '{name}' does not return on every path"));
+            println!("WARN: function '{name}' does not return on every path");
         }
         Ok(Function {
             name: name.clone(),
@@ -1752,7 +1866,45 @@ fn lower_impl(
         })
         })();
         match lowered {
-            Ok(function) => { functions[signature.id] = Some(function); }
+            Ok(mut function) => {
+                // A user-defined `drop(self)` does not replace member
+                // destruction. Like Rust, Nova runs the custom body first,
+                // then drops owned fields in reverse declaration order.
+                if let Some(owner_name) = name.strip_suffix("__drop") {
+                    if let Some(struct_id) = types.structs.iter().position(|info| info.name == owner_name) {
+                        if let Some(&self_local) = function.params.first() {
+                            let owner_ty = function.locals[self_local].ty;
+                            let info = &types.structs[struct_id];
+                            let mut cleanup = Vec::new();
+                            for (field_index, field) in info.fields.iter().enumerate().rev() {
+                                let member = Expr {
+                                    ty: field.ty,
+                                    kind: ExprKind::Field(
+                                        Box::new(Expr { ty: owner_ty, kind: ExprKind::Local(self_local) }),
+                                        field_index,
+                                    ),
+                                };
+                                cleanup.extend(drop_field_actions(&types, field.ty, member, &signatures));
+                            }
+                            if !cleanup.is_empty() {
+                                // Register field cleanup before entering the
+                                // user body. LIFO unwinding then destroys body
+                                // locals first and fields second, preserving
+                                // Rust's destructor ordering on every exit.
+                                let mut registrations = cleanup.into_iter().rev().map(|action| {
+                                    let Stmt::Expr(expr) = action else {
+                                        unreachable!("drop field action must be an expression")
+                                    };
+                                    Stmt::Defer { expr, owner: None }
+                                }).collect::<Vec<_>>();
+                                registrations.append(&mut function.body);
+                                function.body = registrations;
+                            }
+                        }
+                    }
+                }
+                functions[signature.id] = Some(function);
+            }
             Err(error) => {
                 if let Some(errors) = collected.as_deref_mut() {
                     if errors.len() < 64 { errors.push(error); }

@@ -5,6 +5,7 @@ use std::io::traits::Write;
 use std::core::types::Size;
 use std::error::error::Error;
 use std::error::result::Result;
+use std::io::file::File;
 
 pub class Writer { descriptor: i32 }
 
@@ -43,3 +44,20 @@ impl Write for Writer {
 
 pub fn stdout() -> Writer { return Writer::new(1); }
 pub fn stderr() -> Writer { return Writer::new(2); }
+
+
+impl File
+{
+    static fn from_descriptor(descriptor: i32) -> File
+    {
+        new File { descriptor }
+    }
+    static fn stdout() -> File
+    {
+        File::from_descriptor(io::stdout_descriptor())
+    }
+    static fn stderr() -> File
+    {
+        File::from_descriptor(io::stderr_descriptor())
+    }
+}
